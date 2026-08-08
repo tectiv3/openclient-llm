@@ -34,7 +34,6 @@ final class LaunchViewModel {
 
     private let checkOnboardingUseCase: CheckOnboardingUseCaseProtocol
     private let resetAppDataUseCase: ResetAppDataUseCaseProtocol
-    private let configureVoticeUseCase: ConfigureVoticeUseCaseProtocol
     private let attachmentMigrationUseCase: AttachmentMigrationUseCaseProtocol
     private let remoteConfigManager: RemoteConfigManagerProtocol
     private let settingsManager: SettingsManagerProtocol
@@ -48,7 +47,6 @@ final class LaunchViewModel {
         state: State = .loading,
         checkOnboardingUseCase: CheckOnboardingUseCaseProtocol = CheckOnboardingUseCase(),
         resetAppDataUseCase: ResetAppDataUseCaseProtocol = ResetAppDataUseCase(),
-        configureVoticeUseCase: ConfigureVoticeUseCaseProtocol = ConfigureVoticeUseCase(),
         attachmentMigrationUseCase: AttachmentMigrationUseCaseProtocol = AttachmentMigrationUseCase(),
         remoteConfigManager: RemoteConfigManagerProtocol = RemoteConfigManager(),
         settingsManager: SettingsManagerProtocol = SettingsManager(),
@@ -59,7 +57,6 @@ final class LaunchViewModel {
         self.state = state
         self.checkOnboardingUseCase = checkOnboardingUseCase
         self.resetAppDataUseCase = resetAppDataUseCase
-        self.configureVoticeUseCase = configureVoticeUseCase
         self.attachmentMigrationUseCase = attachmentMigrationUseCase
         self.remoteConfigManager = remoteConfigManager
         self.settingsManager = settingsManager
@@ -73,7 +70,6 @@ final class LaunchViewModel {
     func send(_ event: Event) {
         switch event {
         case .viewAppeared:
-            configureVotice()
             attachmentMigrationUseCase.execute()
 
             let isCompleted = checkOnboardingUseCase.execute()
@@ -90,16 +86,6 @@ final class LaunchViewModel {
             guard let remoteBanner else { return }
             settingsManager.setDismissedRemoteBannerKey(remoteBanner.id)
             self.remoteBanner = nil
-        }
-    }
-
-    // MARK: - Private functions
-
-    func configureVotice() {
-        do {
-            try configureVoticeUseCase.execute(userIsPremium: false)
-        } catch {
-            LogManager.error("LaunchViewModel: configureVoticeUseCase: execute: error: \(error)")
         }
     }
 

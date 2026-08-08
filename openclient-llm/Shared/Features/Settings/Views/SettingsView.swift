@@ -12,7 +12,6 @@ import TipKit
 import StoreKit
 import SwiftUI
 #endif
-import VoticeSDK
 
 struct SettingsView: View {
     // MARK: - Properties
@@ -23,7 +22,6 @@ struct SettingsView: View {
     @State private var serverURL: String = ""
     @State private var apiKey: String = ""
     @State private var isAPIKeyVisible = false
-    @State var isShowingVotice = false
     @State private var isShowingUserProfile = false
     @State private var isShowingMemory = false
     @State var isShowingHelp = false
@@ -76,9 +74,6 @@ private extension SettingsView {
             if let url = destination.url {
                 WebContentView(title: destination.title, url: url)
             }
-        }
-        .sheet(isPresented: $isShowingVotice) {
-            Votice.feedbackView()
         }
         .sheet(isPresented: $isShowingUserProfile) {
             UserProfileView()

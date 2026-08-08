@@ -28,13 +28,6 @@ extension SettingsView {
             .buttonStyle(.plain)
 
             Button {
-                isShowingVotice = true
-            } label: {
-                Label(String(localized: "Suggest Features"), systemImage: "lightbulb")
-            }
-            .buttonStyle(.plain)
-
-            Button {
                 isShowingHelp = true
             } label: {
                 Label(String(localized: "Help"), systemImage: "questionmark.circle")

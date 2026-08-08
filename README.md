@@ -16,7 +16,7 @@
 ## Description
 
 OpenClient connects directly to the AI server you configure, without an OpenClient-hosted proxy or subscription.
-Requests may still reach providers configured behind your server, and the optional in-app feedback screen uses Votice.
+Requests may still reach providers configured behind your server.
 
 It works with [LiteLLM](https://github.com/BerriAI/litellm), [Ollama](https://ollama.com), and OpenAI-compatible
 servers that provide the endpoints used by your selected features; point the app at your URL and use the models it exposes.
@@ -88,12 +88,9 @@ servers that provide the endpoints used by your selected features; point the app
 | URLSession + SSE | Networking & streaming |
 | Keychain | Secure storage |
 | SwiftLintPlugins | Build-time code linting |
-| ConfettiSwiftUI | Tip-jar celebration effect |
 | SF Symbols | Iconography |
 | AppIntents | Apple Shortcuts, Siri & Control Center integration |
 | WidgetKit | Control Center toggle and home-screen widgets (New Chat, Search, Quick Actions, Recent Conversations) |
-| Votice | In-app feedback & feature requests |
-
 This project was developed entirely with Xcode, Visual Studio Code and GitHub Copilot (with Claude Opus / Sonnet 4.6).
 
 ## Architecture
@@ -109,26 +106,16 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full project tree and layer respo
    git clone https://github.com/ArtCC/openclient-llm.git
    cd openclient-llm
    ```
-2. **Create** the required local secrets configuration. Empty placeholders are sufficient to build; real credentials
-   are required for the in-app Votice feedback screen:
-   ```bash
-   cat > Secrets.xcconfig <<'EOF'
-   VOTICE_API_KEY =
-   VOTICE_API_SECRET =
-   VOTICE_APP_ID =
-   EOF
-   ```
-   `Secrets.xcconfig` is gitignored. Xcode Cloud creates it through `ci_scripts/ci_post_clone.sh`.
-3. **Open** in Xcode:
+2. **Open** in Xcode:
    ```bash
    open openclient-llm.xcodeproj
    ```
-4. **Configure** your server URL in the app settings:
+3. **Configure** your server URL in the app settings:
    - **LiteLLM**: `http://your-server:4000`
    - **Ollama** (direct): `http://your-server:11434/v1`
    OpenClient appends API paths to this value without adding or removing `/v1`: LiteLLM uses paths such as
    `/models` and `/chat/completions`, while direct Ollama requires its `/v1` OpenAI-compatible base.
-5. **Run** on your device or simulator
+4. **Run** on your device or simulator
 
 ### Requirements
 
@@ -160,7 +147,7 @@ Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) for gu
 
 ## Feedback
 
-To suggest features or report bugs from within the app, go to **Settings** and use the built-in feedback option powered by [Votice](https://github.com/ArtCC/votice-sdk), another open source project by the same author.
+To suggest features or report bugs, open an issue on [GitHub](https://github.com/ArtCC/openclient-llm/issues).
 
 ## Author
 

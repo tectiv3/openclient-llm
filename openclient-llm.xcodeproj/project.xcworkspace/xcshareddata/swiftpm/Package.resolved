@@ -18,15 +18,6 @@
         "revision" : "3292bab28e6e92000161348003fdef8edc4e582d",
         "version" : "0.65.0"
       }
-    },
-    {
-      "identity" : "votice-sdk",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/ArtCC/votice-sdk",
-      "state" : {
-        "revision" : "2c87516b7d1c6a762f80b6e97089f34e76135c40",
-        "version" : "1.0.25"
-      }
     }
   ],
   "version" : 3

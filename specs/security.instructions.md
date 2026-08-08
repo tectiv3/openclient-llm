@@ -144,11 +144,7 @@ let apiKey = Configuration.apiKey  // Loaded from a non-committed source
 ```
 
 - No API keys, secrets, or credentials in source code
-- Add `*.xcconfig` files containing secrets to `.gitignore`
 - Use environment variables or a secrets manager for CI/CD
-- `Secrets.xcconfig` values used by Votice are expanded into the client bundle. They must be treated as recoverable client
-  configuration even though the local file and CI values are protected from source control. Never use this mechanism for
-  a privileged server-side secret.
 
 ---
 

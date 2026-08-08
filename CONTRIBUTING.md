@@ -19,17 +19,6 @@ Thank you for your interest in contributing! This guide will help you get starte
 
 ### Build
 
-Create the gitignored configuration required by both app targets. Empty placeholders are sufficient to build; real
-credentials are required to use the in-app Votice feedback screen:
-
-```bash
-cat > Secrets.xcconfig <<'EOF'
-VOTICE_API_KEY =
-VOTICE_API_SECRET =
-VOTICE_APP_ID =
-EOF
-```
-
 ```bash
 open openclient-llm.xcodeproj
 # Or build from terminal:
@@ -94,7 +83,6 @@ Update settings view for macOS layout
 - Reference related issues (e.g., `Closes #12`)
 - Ensure the project builds without warnings
 - Run the smallest relevant unit-test set. The repository currently has no real-server integration-test suite
-- Do not commit `Secrets.xcconfig`
 
 ## Code of Conduct
 

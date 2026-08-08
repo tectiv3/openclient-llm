@@ -124,7 +124,7 @@ openclient-llm-test/               # Unit tests
 
 The Xcode project contains five native targets: `openclient-llm`, `openclient-llm-macOS`,
 `openclient-llm-test`, `ShareExtension`, and `WidgetsExtension`. It resolves three Swift packages:
-SwiftLintPlugins, VoticeSDK, and ConfettiSwiftUI.
+SwiftLintPlugins and ConfettiSwiftUI.
 
 ## Layer Responsibilities
 

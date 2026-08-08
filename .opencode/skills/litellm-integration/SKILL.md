@@ -14,7 +14,7 @@ Ask for both values before making authenticated requests:
 1. The exact OpenAI-compatible base URL entered in the app, for example `https://litellm.example.com/v1`.
 2. A temporary virtual key with the minimum permissions required for the tests.
 
-Never store either value in source files, `Secrets.xcconfig`, Xcode settings,
+Never store either value in source files, Xcode settings,
 test fixtures, Git, or logs. Do not repeat the virtual key in user-facing output.
 Tell the user to revoke the key after testing.
 

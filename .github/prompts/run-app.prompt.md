@@ -5,18 +5,6 @@ agent: "agent"
 
 Build and run the app on the iPhone 17 Pro Max simulator so the user can interact with it.
 
-Before either path, create the required local build configuration if it does not exist. Never overwrite an existing file:
-
-```bash
-if [ ! -f Secrets.xcconfig ]; then
-  cat > Secrets.xcconfig << 'EOF'
-VOTICE_API_KEY =
-VOTICE_API_SECRET =
-VOTICE_APP_ID =
-EOF
-fi
-```
-
 ## MCP Detection
 
 Before building, check whether the **XcodeBuildMCP** MCP server is available by searching for its tools using `tool_search_tool_regex` with the pattern `mcp_xcodebuildmcp_build_run_sim`. Then follow the appropriate path below.

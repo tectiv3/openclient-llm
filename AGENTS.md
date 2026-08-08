@@ -48,21 +48,12 @@ xcodebuild build -project openclient-llm.xcodeproj -scheme openclient-llm -desti
 xcodebuild build -project openclient-llm.xcodeproj -scheme openclient-llm-macOS -destination 'platform=macOS'
 ```
 
-- Use `.xcodeproj` (not `.xcworkspace`). The three SPM packages are SwiftLintPlugins, VoticeSDK, and ConfettiSwiftUI.
+- Use `.xcodeproj` (not `.xcworkspace`). The SPM packages are SwiftLintPlugins and ConfettiSwiftUI.
 - SwiftLint runs on the iOS and macOS app builds. `.swiftlint.yml` sets line-length warning/error limits to
   120/150, function-body limits to 50/80, type-body limits to 300/400, and file-length limits to 500/650;
   force unwraps and force casts are errors.
 - CI skips code signing: append `CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO` to `xcodebuild` commands.
 - VS Code + XcodeBuildMCP is supported (config at `.xcodebuildmcp/config.yaml`).
-- **You must create a `Secrets.xcconfig` before building.** Copy the template from CI:
-
-```bash
-cat > Secrets.xcconfig << 'EOF'
-VOTICE_API_KEY =
-VOTICE_API_SECRET =
-VOTICE_APP_ID =
-EOF
-```
 
 ## Concurrency (critical)
 
@@ -153,15 +144,12 @@ final class FeatureViewModel {
 - Write localized source strings in English only; translations are maintained manually by the project author.
 - SwiftLint configuration: warnings/errors are 120/150 lines for line length, 50/80 for function bodies, 300/400 for
   type bodies, and 500/650 for files. `force_unwrapping` and `force_cast` are errors.
-- External SPM packages are SwiftLintPlugins, VoticeSDK, and ConfettiSwiftUI; do not add others without a concrete need.
+- External SPM packages are SwiftLintPlugins and ConfettiSwiftUI; do not add others without a concrete need.
 
 ## Git workflow
 
 - Branch from `develop`, open PRs targeting `develop`.
 - Commit messages: imperative style ("Add chat streaming support"), reference related issues with `Closes #N`.
-- Do NOT commit `Secrets.xcconfig` (gitignored; contains Votice API keys).
-- Values from `Secrets.xcconfig` are compiled into the client app and are recoverable from a distributed bundle. Treat them
-  as client configuration, not as confidential server-side secrets; never place a privileged credential there.
 - Release workflows derive tag and artifact labels from the first numeric `CHANGELOG.md` header. The deployment process
   increments the published build number automatically, so the checked-in `CURRENT_PROJECT_VERSION` does not need to match
   the changelog build suffix. Tags use the full changelog version prefixed with `v`.
@@ -172,4 +160,4 @@ final class FeatureViewModel {
 - When the user wants to verify: run the smallest relevant test set after a focused change; run the full iOS suite after shared-code changes.
 - Build both iOS and macOS after changing shared SwiftUI or shared business logic.
 - Run `git diff --check` before reporting completion.
-- Do not include generated files, `Secrets.xcconfig`, or unrelated working-tree changes in a commit.
+- Do not include generated files or unrelated working-tree changes in a commit.

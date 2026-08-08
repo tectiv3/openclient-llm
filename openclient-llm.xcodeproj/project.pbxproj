@@ -7,8 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		8042FA682F7B01E800F0E933 /* VoticeSDK in Frameworks */ = {isa = PBXBuildFile; productRef = 8042FA672F7B01E800F0E933 /* VoticeSDK */; };
-		8042FA6B2F7B01F800F0E933 /* VoticeSDK in Frameworks */ = {isa = PBXBuildFile; productRef = 8042FA6A2F7B01F800F0E933 /* VoticeSDK */; };
 		8084C87F2F9CC4D300F4BDC3 /* ConfettiSwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = 8084C87E2F9CC4D300F4BDC3 /* ConfettiSwiftUI */; };
 		8084C8812F9CC4DD00F4BDC3 /* ConfettiSwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = 8084C8802F9CC4DD00F4BDC3 /* ConfettiSwiftUI */; };
 		8090B5C82F9365D7006E9DAE /* ShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 8090B5BE2F9365D6006E9DAE /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -62,7 +60,6 @@
 		805E798B2F79AC9B0070CBB3 /* openclient-llm.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "openclient-llm.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		8080773A2F7A66EF009BC8C4 /* OpenClient.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OpenClient.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		8080774A2F7A67CD009BC8C4 /* openclient-llm-test.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "openclient-llm-test.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
-		8089F4102F7D000500465D6C /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig; sourceTree = "<group>"; };
 		8090B5BE2F9365D6006E9DAE /* ShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		80E6877D2F9A24A000AC491E /* WidgetsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = WidgetsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		80E6877F2F9A24A000AC491E /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
@@ -187,7 +184,6 @@
 			files = (
 				80FEAFD82F9D11C300ED2905 /* StoreKit.framework in Frameworks */,
 				8084C87F2F9CC4D300F4BDC3 /* ConfettiSwiftUI in Frameworks */,
-				8042FA682F7B01E800F0E933 /* VoticeSDK in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -197,7 +193,6 @@
 			files = (
 				80FEAFDA2F9D11D300ED2905 /* StoreKit.framework in Frameworks */,
 				8084C8812F9CC4DD00F4BDC3 /* ConfettiSwiftUI in Frameworks */,
-				8042FA6B2F7B01F800F0E933 /* VoticeSDK in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -237,7 +232,6 @@
 				80E687832F9A24A000AC491E /* Widgets */,
 				80E6877E2F9A24A000AC491E /* Frameworks */,
 				805E798C2F79AC9B0070CBB3 /* Products */,
-				8089F4102F7D000500465D6C /* Secrets.xcconfig */,
 			);
 			sourceTree = "<group>";
 		};
@@ -288,7 +282,6 @@
 			);
 			name = "openclient-llm";
 			packageProductDependencies = (
-				8042FA672F7B01E800F0E933 /* VoticeSDK */,
 				8084C87E2F9CC4D300F4BDC3 /* ConfettiSwiftUI */,
 			);
 			productName = "openclient-llm";
@@ -314,7 +307,6 @@
 			);
 			name = "openclient-llm-macOS";
 			packageProductDependencies = (
-				8042FA6A2F7B01F800F0E933 /* VoticeSDK */,
 				8084C8802F9CC4DD00F4BDC3 /* ConfettiSwiftUI */,
 			);
 			productName = "openclient-llm-macOS";
@@ -437,7 +429,6 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				808077342F7A6664009BC8C4 /* XCRemoteSwiftPackageReference "SwiftLintPlugins" */,
-				8042FA662F7B01E800F0E933 /* XCRemoteSwiftPackageReference "votice-sdk" */,
 				8084C87D2F9CC4D300F4BDC3 /* XCRemoteSwiftPackageReference "ConfettiSwiftUI" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -721,7 +712,6 @@
 		};
 		805E79972F79AC9C0070CBB3 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 8089F4102F7D000500465D6C /* Secrets.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = Icon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -769,7 +759,6 @@
 		};
 		805E79982F79AC9C0070CBB3 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 8089F4102F7D000500465D6C /* Secrets.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = Icon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -817,7 +806,6 @@
 		};
 		808077432F7A66F1009BC8C4 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 8089F4102F7D000500465D6C /* Secrets.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = Icon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -873,7 +861,6 @@
 		};
 		808077442F7A66F1009BC8C4 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 8089F4102F7D000500465D6C /* Secrets.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = Icon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -1159,14 +1146,6 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		8042FA662F7B01E800F0E933 /* XCRemoteSwiftPackageReference "votice-sdk" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/ArtCC/votice-sdk";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.0.20;
-			};
-		};
 		808077342F7A6664009BC8C4 /* XCRemoteSwiftPackageReference "SwiftLintPlugins" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/SimplyDanny/SwiftLintPlugins";
@@ -1186,16 +1165,6 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		8042FA672F7B01E800F0E933 /* VoticeSDK */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 8042FA662F7B01E800F0E933 /* XCRemoteSwiftPackageReference "votice-sdk" */;
-			productName = VoticeSDK;
-		};
-		8042FA6A2F7B01F800F0E933 /* VoticeSDK */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 8042FA662F7B01E800F0E933 /* XCRemoteSwiftPackageReference "votice-sdk" */;
-			productName = VoticeSDK;
-		};
 		8084C87E2F9CC4D300F4BDC3 /* ConfettiSwiftUI */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 8084C87D2F9CC4D300F4BDC3 /* XCRemoteSwiftPackageReference "ConfettiSwiftUI" */;

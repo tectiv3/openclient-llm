@@ -48,23 +48,6 @@ jobs:
           PYEOF
           echo "version=$(cat RELEASE_VERSION)" >> "$GITHUB_OUTPUT"
 
-      - name: Create Secrets.xcconfig
-        env:
-          VOTICE_API_KEY: ${{ secrets.VOTICE_API_KEY }}
-          VOTICE_API_SECRET: ${{ secrets.VOTICE_API_SECRET }}
-          VOTICE_APP_ID: ${{ secrets.VOTICE_APP_ID }}
-        run: |
-          cat > Secrets.xcconfig << 'EOF'
-          VOTICE_API_KEY = $(VOTICE_API_KEY_PLACEHOLDER)
-          VOTICE_API_SECRET = $(VOTICE_API_SECRET_PLACEHOLDER)
-          VOTICE_APP_ID = $(VOTICE_APP_ID_PLACEHOLDER)
-          EOF
-          sed -i '' \
-            -e "s|\$(VOTICE_API_KEY_PLACEHOLDER)|$VOTICE_API_KEY|g" \
-            -e "s|\$(VOTICE_API_SECRET_PLACEHOLDER)|$VOTICE_API_SECRET|g" \
-            -e "s|\$(VOTICE_APP_ID_PLACEHOLDER)|$VOTICE_APP_ID|g" \
-            Secrets.xcconfig
-
       - name: Import Developer ID certificate
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
