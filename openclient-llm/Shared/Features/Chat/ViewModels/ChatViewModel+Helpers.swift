@@ -101,8 +101,41 @@ extension ChatViewModel {
             self.refreshContextUsage(in: &currentState)
             self.state = .loaded(currentState)
             self.persistConversation()
+            #if os(iOS)
+            if BackgroundCompletionService.shared.submitFallback() {
+                LogManager.info("Background fallback submitted — continuing via background URLSession")
+            } else {
+                Task { await self.notifyStreamingCompletedUseCase.executeExpired() }
+            }
+            #else
             Task { await self.notifyStreamingCompletedUseCase.executeExpired() }
+            #endif
         }
+    }
+
+    func prepareFallbackRequest(
+        allMessages: [ChatMessage],
+        modelId: String,
+        parameters: ModelParameters,
+        selectedModel: LLMModel?,
+        assistantMessageId: UUID
+    ) {
+        #if os(iOS)
+        guard !isPrivateChat,
+              case .loaded(let loadedState) = state,
+              let conversationId = loadedState.conversation?.id else { return }
+        let cappedParameters = parametersCappedToModelOutput(parameters, model: selectedModel)
+        guard let body = buildFallbackRequestUseCase.execute(
+            messages: allMessages,
+            model: modelId,
+            parameters: cappedParameters
+        ) else { return }
+        BackgroundCompletionService.shared.prepareFallback(
+            requestBody: body,
+            conversationId: conversationId,
+            assistantMessageId: assistantMessageId
+        )
+        #endif
     }
 
     func buildEffectiveSystemPrompt(

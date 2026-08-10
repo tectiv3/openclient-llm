@@ -121,6 +121,7 @@ final class ChatViewModel {
     let streamingBackgroundUseCase: StreamingBackgroundUseCaseProtocol
     let notifyStreamingCompletedUseCase: NotifyStreamingCompletedUseCaseProtocol
     let compactConversationUseCase: CompactConversationUseCaseProtocol
+    let buildFallbackRequestUseCase: BuildFallbackRequestUseCaseProtocol
     var streamTask: Task<Void, Never>?
     var compactionTask: Task<Void, Never>?
     private var loadTask: Task<Void, Never>?
@@ -164,7 +165,8 @@ final class ChatViewModel {
         triggerHapticFeedbackUseCase: TriggerHapticFeedbackUseCaseProtocol = TriggerHapticFeedbackUseCase(),
         streamingBackgroundUseCase: StreamingBackgroundUseCaseProtocol = StreamingBackgroundUseCase(),
         notifyStreamingCompletedUseCase: NotifyStreamingCompletedUseCaseProtocol = NotifyStreamingCompletedUseCase(),
-        compactConversationUseCase: CompactConversationUseCaseProtocol = CompactConversationUseCase()
+        compactConversationUseCase: CompactConversationUseCaseProtocol = CompactConversationUseCase(),
+        buildFallbackRequestUseCase: BuildFallbackRequestUseCaseProtocol = BuildFallbackRequestUseCase()
     ) {
         self.state = state
         self.pendingConversation = conversation
@@ -201,6 +203,7 @@ final class ChatViewModel {
         self.streamingBackgroundUseCase = streamingBackgroundUseCase
         self.notifyStreamingCompletedUseCase = notifyStreamingCompletedUseCase
         self.compactConversationUseCase = compactConversationUseCase
+        self.buildFallbackRequestUseCase = buildFallbackRequestUseCase
         observeAppDataReset()
     }
 

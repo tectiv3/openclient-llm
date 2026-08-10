@@ -4944,6 +4944,7 @@
     },
     "Configure your personal context and memory items to personalise model responses." : {
       "comment" : "A description of the personalization section.",
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -5006,6 +5007,9 @@
           }
         }
       }
+    },
+    "Configure your personal context, memory, and default system prompt to personalise model responses." : {
+
     },
     "Connect external tools" : {
       "comment" : "A tip that explains how to connect external tools to the model.",
@@ -6880,6 +6884,9 @@
           }
         }
       }
+    },
+    "Default System Prompt" : {
+
     },
     "Delete" : {
       "localizations" : {
@@ -19997,6 +20004,9 @@
         }
       }
     },
+    "Pre-fills new conversations. Can be changed per conversation." : {
+
+    },
     "Prepare meeting notes" : {
       "comment" : "Title of a conversation.",
       "localizations" : {
@@ -32349,6 +32359,9 @@
           }
         }
       }
+    },
+    "When disabled, explicitly tells reasoning models not to use extended thinking." : {
+
     },
     "Work" : {
       "comment" : "A placeholder tag.",

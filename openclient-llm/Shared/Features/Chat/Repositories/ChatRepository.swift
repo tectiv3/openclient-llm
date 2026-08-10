@@ -25,6 +25,11 @@ protocol ChatRepositoryProtocol: Sendable {
         parameters: ModelParameters,
         tools: [ToolDefinition]?
     ) async throws -> ChatCompletionResponse
+    func buildNonStreamingRequestBody(
+        messages: [ChatMessage],
+        model: String,
+        parameters: ModelParameters
+    ) -> Data?
 }
 
 enum StreamChunk: Sendable {
@@ -155,6 +160,27 @@ struct ChatRepository: ChatRepositoryProtocol {
         )
         LogManager.success("agentCompletion done finishReason=\(response.choices.first?.finishReason ?? "nil")")
         return response
+    }
+
+    func buildNonStreamingRequestBody(
+        messages: [ChatMessage],
+        model: String,
+        parameters: ModelParameters
+    ) -> Data? {
+        let request = ChatCompletionRequest(
+            model: model,
+            messages: messages.map { buildCompletionMessage($0) },
+            stream: false,
+            temperature: parameters.temperature,
+            maxTokens: parameters.maxTokens,
+            topP: parameters.topP,
+            streamOptions: nil,
+            modalities: nil,
+            tools: nil,
+            toolChoice: nil,
+            thinking: parameters.thinkingEnabled == false ? ThinkingConfig(enabled: false) : nil
+        )
+        return try? JSONEncoder().encode(request)
     }
 }
 

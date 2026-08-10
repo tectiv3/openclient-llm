@@ -30,6 +30,13 @@ extension ChatViewModel {
             if !requestContext.effectiveSystemPrompt.isEmpty {
                 allMessages.insert(ChatMessage(role: .system, content: requestContext.effectiveSystemPrompt), at: 0)
             }
+            prepareFallbackRequest(
+                allMessages: allMessages,
+                modelId: sendContext.modelId,
+                parameters: sendContext.parameters,
+                selectedModel: sendContext.selectedModel,
+                assistantMessageId: assistantMessageId
+            )
             let stream = streamMessageUseCase.execute(
                 messages: allMessages,
                 model: sendContext.modelId,
@@ -61,6 +68,9 @@ extension ChatViewModel {
             scheduleErrorDismiss()
             persistConversation()
             streamingBackgroundUseCase.end()
+            #if os(iOS)
+            BackgroundCompletionService.shared.clearFallback()
+            #endif
             completeActiveStream(assistantMessageId)
         }
     }
@@ -111,6 +121,9 @@ private extension ChatViewModel {
         LogManager.success("performStreaming completed model=\(model)")
         let didPersist = persistConversation()
         streamingBackgroundUseCase.end()
+        #if os(iOS)
+        BackgroundCompletionService.shared.clearFallback()
+        #endif
         completeActiveStream(assistantMessageId)
         if didPersist { scheduleCompactionIfNeeded() }
         await notifyStreamingCompletedUseCase.execute()
