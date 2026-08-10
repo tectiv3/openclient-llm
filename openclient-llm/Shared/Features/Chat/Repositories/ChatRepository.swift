@@ -68,7 +68,8 @@ struct ChatRepository: ChatRepositoryProtocol {
             streamOptions: nil,
             modalities: nil,
             tools: nil,
-            toolChoice: nil
+            toolChoice: nil,
+            thinking: parameters.thinkingEnabled == false ? ThinkingConfig(enabled: false) : nil
         )
 
         let response: ChatCompletionResponse = try await apiClient.request(
@@ -109,7 +110,8 @@ struct ChatRepository: ChatRepositoryProtocol {
             streamOptions: ChatStreamOptions(includeUsage: true),
             modalities: nil,
             tools: nil,
-            toolChoice: nil
+            toolChoice: nil,
+            thinking: parameters.thinkingEnabled == false ? ThinkingConfig(enabled: false) : nil
         )
 
         let decoder = JSONDecoder()
@@ -143,7 +145,8 @@ struct ChatRepository: ChatRepositoryProtocol {
             streamOptions: nil,
             modalities: nil,
             tools: tools,
-            toolChoice: tools != nil ? "auto" : nil
+            toolChoice: tools != nil ? "auto" : nil,
+            thinking: parameters.thinkingEnabled == false ? ThinkingConfig(enabled: false) : nil
         )
         let response: ChatCompletionResponse = try await apiClient.request(
             endpoint: "chat/completions",

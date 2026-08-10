@@ -14,17 +14,20 @@ struct ModelParameters: Equatable, Sendable, Codable {
     var temperature: Double?
     var maxTokens: Int?
     var topP: Double?
+    var thinkingEnabled: Bool?
 
     // MARK: - Init
 
     init(
         temperature: Double? = nil,
         maxTokens: Int? = nil,
-        topP: Double? = nil
+        topP: Double? = nil,
+        thinkingEnabled: Bool? = nil
     ) {
         self.temperature = temperature
         self.maxTokens = maxTokens
         self.topP = topP
+        self.thinkingEnabled = thinkingEnabled
     }
 
     // MARK: - Static
@@ -32,6 +35,6 @@ struct ModelParameters: Equatable, Sendable, Codable {
     static let `default` = ModelParameters()
 
     var hasCustomValues: Bool {
-        temperature != nil || maxTokens != nil || topP != nil
+        temperature != nil || maxTokens != nil || topP != nil || thinkingEnabled != nil
     }
 }

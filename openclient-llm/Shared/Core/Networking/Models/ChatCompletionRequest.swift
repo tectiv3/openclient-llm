@@ -18,6 +18,12 @@ nonisolated struct ChatStreamOptions: Encodable, Sendable {
     }
 }
 
+// MARK: - ThinkingConfig
+
+nonisolated struct ThinkingConfig: Encodable, Sendable {
+    let enabled: Bool
+}
+
 // MARK: - ChatCompletionRequest
 
 nonisolated struct ChatCompletionRequest: Encodable, Sendable {
@@ -31,6 +37,7 @@ nonisolated struct ChatCompletionRequest: Encodable, Sendable {
     let modalities: [String]?
     let tools: [ToolDefinition]?
     let toolChoice: String?
+    let thinking: ThinkingConfig?
 
     enum CodingKeys: String, CodingKey {
         case model
@@ -43,6 +50,7 @@ nonisolated struct ChatCompletionRequest: Encodable, Sendable {
         case modalities
         case tools
         case toolChoice = "tool_choice"
+        case thinking
     }
 
     func encode(to encoder: Encoder) throws {
@@ -57,6 +65,7 @@ nonisolated struct ChatCompletionRequest: Encodable, Sendable {
         try container.encodeIfPresent(modalities, forKey: .modalities)
         try container.encodeIfPresent(tools, forKey: .tools)
         try container.encodeIfPresent(toolChoice, forKey: .toolChoice)
+        try container.encodeIfPresent(thinking, forKey: .thinking)
     }
 }
 

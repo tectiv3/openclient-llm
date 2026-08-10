@@ -22,6 +22,7 @@ struct ChatModelParametersView: View {
     @State private var topP: Double = 1.0
     @State private var contextWindowEnabled: Bool = false
     @State private var contextWindowText: String = "16384"
+    @State private var thinkingEnabled: Bool = true
 
     // MARK: - View
 
@@ -181,6 +182,14 @@ private extension ChatModelParametersView {
             } footer: {
                 Text(String(localized: "Use this when an OpenAI-compatible server does not provide context metadata."))
             }
+
+            Section {
+                Toggle(isOn: $thinkingEnabled) {
+                    Label(String(localized: "Thinking"), systemImage: "brain")
+                }
+            } footer: {
+                Text(String(localized: "When disabled, explicitly tells reasoning models not to use extended thinking."))
+            }
         }
 #if os(macOS)
         .formStyle(.grouped)
@@ -246,13 +255,15 @@ private extension ChatModelParametersView {
             contextWindowEnabled = true
             contextWindowText = String(contextTokens)
         }
+        thinkingEnabled = params.thinkingEnabled ?? true
     }
 
     func applyParameters() {
         let parameters = ModelParameters(
             temperature: temperatureEnabled ? temperature : nil,
             maxTokens: maxTokensEnabled ? Int(maxTokens) : nil,
-            topP: topPEnabled ? topP : nil
+            topP: topPEnabled ? topP : nil,
+            thinkingEnabled: thinkingEnabled ? nil : false
         )
         viewModel.send(.modelParametersChanged(parameters))
         let contextTokens = contextWindowEnabled ? parsedContextWindow : nil
@@ -268,6 +279,7 @@ private extension ChatModelParametersView {
         topP = 1.0
         contextWindowEnabled = false
         contextWindowText = "16384"
+        thinkingEnabled = true
     }
 }
 
