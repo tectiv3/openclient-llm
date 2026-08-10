@@ -14,6 +14,7 @@ protocol GetChatPreferencesUseCaseProtocol: Sendable {
     func getIsWebSearchEnabled() -> Bool
     func getWebSearchToolName() -> String
     func getSelectedTTSVoice(forModelId modelId: String) -> String
+    func getDefaultSystemPrompt() -> String
 }
 
 struct GetChatPreferencesUseCase: GetChatPreferencesUseCaseProtocol {
@@ -47,5 +48,9 @@ struct GetChatPreferencesUseCase: GetChatPreferencesUseCaseProtocol {
 
     func getSelectedTTSVoice(forModelId modelId: String) -> String {
         settingsManager.getSelectedTTSVoice(forModelId: modelId)
+    }
+
+    func getDefaultSystemPrompt() -> String {
+        settingsManager.getDefaultSystemPrompt()
     }
 }

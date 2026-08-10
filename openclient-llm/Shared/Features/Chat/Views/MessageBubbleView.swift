@@ -435,6 +435,12 @@ private extension MessageBubbleView {
                 .font(.system(size: 9))
             Text(String(localized: "\(usage.totalTokens) tokens"))
                 .font(.caption2)
+            if let tps = usage.tokensPerSecond, tps > 0 {
+                Text("·")
+                    .font(.caption2)
+                Text(String(format: "%.1f tok/s", tps))
+                    .font(.caption2)
+            }
         }
         .foregroundStyle(.tertiary)
     }

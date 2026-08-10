@@ -31,6 +31,7 @@ final class SettingsViewModel {
         case requestNotificationPermissionTapped
         case notificationStatusRefresh
         case privacyScreenToggled(Bool)
+        case defaultSystemPromptChanged(String)
         case fetchMCPToolsTapped
         case mcpToolToggled(toolId: String, enabled: Bool)
     }
@@ -57,6 +58,7 @@ final class SettingsViewModel {
         var showLiteLLMHint: Bool = false
         var notificationPermissionStatus: NotificationPermissionStatus = .notDetermined
         var isPrivacyScreenEnabled: Bool = true
+        var defaultSystemPrompt: String = ""
         var conversationSyncResult: ConversationSyncResult?
         var availableMCPTools: [MCPToolInfo] = []
         var availableMCPServers: [MCPServerInfo] = []
@@ -135,7 +137,7 @@ final class SettingsViewModel {
             saveSettings()
         case .cloudSyncToggled, .cloudSyncConflictResolved, .cloudSyncConflictCancelled, .syncConversationsTapped:
             handleCloudSyncEvent(event)
-        case .showTokenUsageToggled, .privacyScreenToggled:
+        case .showTokenUsageToggled, .privacyScreenToggled, .defaultSystemPromptChanged:
             handlePreferenceToggleEvent(event)
         case .webSearchToolNameChanged, .webSearchMaxResultsChanged, .fetchSearchToolsTapped,
              .fetchMCPToolsTapped, .mcpToolToggled:
@@ -168,6 +170,7 @@ private extension SettingsViewModel {
             webSearchMaxResults: settingsManager.getWebSearchMaxResults(),
             availableSearchTools: settingsManager.getAvailableSearchTools(),
             isPrivacyScreenEnabled: settingsManager.getIsPrivacyScreenEnabled(),
+            defaultSystemPrompt: settingsManager.getDefaultSystemPrompt(),
             enabledMCPToolIds: Set(settingsManager.getEnabledMCPToolIds())
         )
         state = .loaded(loadedState)
@@ -307,6 +310,8 @@ private extension SettingsViewModel {
 #else
             _ = enabled
 #endif
+        case .defaultSystemPromptChanged(let prompt):
+            updateDefaultSystemPrompt(prompt)
         default:
             break
         }
@@ -320,6 +325,13 @@ private extension SettingsViewModel {
         state = .loaded(loadedState)
     }
 #endif
+
+    func updateDefaultSystemPrompt(_ prompt: String) {
+        guard case .loaded(var loadedState) = state else { return }
+        settingsManager.setDefaultSystemPrompt(prompt)
+        loadedState.defaultSystemPrompt = prompt
+        state = .loaded(loadedState)
+    }
 
     func updateWebSearchToolName(_ name: String) {
         guard case .loaded(var loadedState) = state else { return }

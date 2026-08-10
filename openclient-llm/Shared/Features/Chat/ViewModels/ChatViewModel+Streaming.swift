@@ -38,6 +38,7 @@ extension ChatViewModel {
                     model: sendContext.selectedModel
                 )
             )
+            streamStartTime = ContinuousClock.now
             for try await chunk in stream {
                 guard !Task.isCancelled, isActiveStream(assistantMessageId),
                       case .loaded(var currentState) = state else { return }
@@ -74,7 +75,19 @@ extension ChatViewModel {
             if let index = state.messages.firstIndex(where: { $0.id == assistantMessageId }) {
                 state.messages[index].reasoningContent = (state.messages[index].reasoningContent ?? "") + text
             }
-        case .usage(let usage):
+        case .usage(var usage):
+            if let start = streamStartTime {
+                let elapsed = ContinuousClock.now - start
+                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                if seconds > 0 {
+                    usage = TokenUsage(
+                        promptTokens: usage.promptTokens,
+                        completionTokens: usage.completionTokens,
+                        totalTokens: usage.totalTokens,
+                        tokensPerSecond: Double(usage.completionTokens) / seconds
+                    )
+                }
+            }
             if let index = state.messages.firstIndex(where: { $0.id == assistantMessageId }) {
                 state.messages[index].tokenUsage = usage
             }

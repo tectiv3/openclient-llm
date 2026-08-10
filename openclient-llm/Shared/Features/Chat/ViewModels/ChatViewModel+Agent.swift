@@ -23,6 +23,7 @@ extension ChatViewModel {
                 contextWindowTokens: context.contextWindowTokens ?? context.selectedModel.maxInputTokens,
                 toolRegistry: registry
             )
+            streamStartTime = ContinuousClock.now
 
             for try await event in stream {
                 guard !Task.isCancelled, isActiveStream(context.assistantId),
@@ -87,7 +88,19 @@ extension ChatViewModel {
             state.messages[index].content += text
         case .reasoning(let text):
             state.messages[index].reasoningContent = (state.messages[index].reasoningContent ?? "") + text
-        case .usage(let usage):
+        case .usage(var usage):
+            if let start = streamStartTime {
+                let elapsed = ContinuousClock.now - start
+                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                if seconds > 0 {
+                    usage = TokenUsage(
+                        promptTokens: usage.promptTokens,
+                        completionTokens: usage.completionTokens,
+                        totalTokens: usage.totalTokens,
+                        tokensPerSecond: Double(usage.completionTokens) / seconds
+                    )
+                }
+            }
             state.messages[index].tokenUsage = usage
         case .promptUsage(let promptTokens):
             refreshContextUsage(in: &state, calibratedPromptTokens: promptTokens)

@@ -24,6 +24,7 @@ struct SettingsView: View {
     @State private var isAPIKeyVisible = false
     @State private var isShowingUserProfile = false
     @State private var isShowingMemory = false
+    @State private var isShowingDefaultSystemPrompt = false
     @State var isShowingHelp = false
     @State var isShowingTipJar = false
     @State private var showResetAlert = false
@@ -80,6 +81,12 @@ private extension SettingsView {
         }
         .sheet(isPresented: $isShowingMemory) {
             MemoryView()
+#if os(macOS)
+                .frame(width: 500, height: 460)
+#endif
+        }
+        .sheet(isPresented: $isShowingDefaultSystemPrompt) {
+            defaultSystemPromptSheet
 #if os(macOS)
                 .frame(width: 500, height: 460)
 #endif
@@ -444,10 +451,49 @@ private extension SettingsView {
             }
             .buttonStyle(.plain)
             .popoverTip(canShowMemoryTip ? AppTips.memory : nil)
+
+            Button {
+                isShowingDefaultSystemPrompt = true
+            } label: {
+                Label(String(localized: "Default System Prompt"), systemImage: "text.bubble")
+            }
+            .buttonStyle(.plain)
         } header: {
             Text(String(localized: "Personalization"))
         } footer: {
-            Text(String(localized: "Configure your personal context and memory items to personalise model responses."))
+            Text(String(localized: "Configure your personal context, memory, and default system prompt to personalise model responses."))
+        }
+    }
+
+    var defaultSystemPromptSheet: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextEditor(text: Binding(
+                        get: {
+                            guard case .loaded(let loadedState) = viewModel.state else { return "" }
+                            return loadedState.defaultSystemPrompt
+                        },
+                        set: { viewModel.send(.defaultSystemPromptChanged($0)) }
+                    ))
+                    .frame(minHeight: 200)
+                } header: {
+                    Text(String(localized: "Default System Prompt"))
+                } footer: {
+                    Text(String(localized: "Pre-fills new conversations. Can be changed per conversation."))
+                }
+            }
+            .navigationTitle(String(localized: "Default System Prompt"))
+#if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(String(localized: "Done")) {
+                        isShowingDefaultSystemPrompt = false
+                    }
+                }
+            }
+#endif
         }
     }
 

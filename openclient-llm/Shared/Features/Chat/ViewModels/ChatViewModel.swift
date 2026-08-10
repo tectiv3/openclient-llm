@@ -125,6 +125,7 @@ final class ChatViewModel {
     var compactionTask: Task<Void, Never>?
     private var loadTask: Task<Void, Never>?
     var activeAssistantMessageId: UUID?
+    var streamStartTime: ContinuousClock.Instant?
     var errorDismissTask: Task<Void, Never>?
     var durationTrackingTask: Task<Void, Never>?
     private var pendingConversation: Conversation?

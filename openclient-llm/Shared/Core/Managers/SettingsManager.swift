@@ -43,6 +43,8 @@ protocol SettingsManagerProtocol: Sendable {
     func setEnabledMCPToolIds(_ ids: [String])
     func getDismissedRemoteBannerKey() -> String?
     func setDismissedRemoteBannerKey(_ value: String?)
+    func getDefaultSystemPrompt() -> String
+    func setDefaultSystemPrompt(_ value: String)
     func deleteAll()
 }
 
@@ -66,6 +68,7 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         static let hasEnoughConversationsForMemoryTip = "hasEnoughConversationsForMemoryTip"
         static let enabledMCPToolIds = "enabledMCPToolIds"
         static let dismissedRemoteBannerKey = "dismissedRemoteBannerKey"
+        static let defaultSystemPrompt = "defaultSystemPrompt"
 
         static func ttsVoiceKey(forModelId modelId: String) -> String {
             "tts_voice_\(modelId)"
@@ -237,6 +240,14 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.set(value, forKey: Keys.dismissedRemoteBannerKey)
     }
 
+    func getDefaultSystemPrompt() -> String {
+        defaults.string(forKey: Keys.defaultSystemPrompt) ?? ""
+    }
+
+    func setDefaultSystemPrompt(_ value: String) {
+        defaults.set(value, forKey: Keys.defaultSystemPrompt)
+    }
+
     func deleteAll() {
         defaults.removeObject(forKey: Keys.isOnboardingCompleted)
         defaults.removeObject(forKey: Keys.selectedModelId)
@@ -252,6 +263,7 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.removeObject(forKey: Keys.hasEnoughConversationsForMemoryTip)
         defaults.removeObject(forKey: Keys.enabledMCPToolIds)
         defaults.removeObject(forKey: Keys.dismissedRemoteBannerKey)
+        defaults.removeObject(forKey: Keys.defaultSystemPrompt)
         defaults.removeObject(forKey: LegacyKeys.serverBaseURL)
         defaults.removeObject(forKey: LegacyKeys.apiKey)
         keychainManager.deleteAll()
