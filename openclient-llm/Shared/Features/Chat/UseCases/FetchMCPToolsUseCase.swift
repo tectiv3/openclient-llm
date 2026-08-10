@@ -85,11 +85,7 @@ struct FetchMCPToolsUseCase: FetchMCPToolsUseCaseProtocol {
             )
         } catch {
             LogManager.debug("FetchMCPToolsUseCase: MCP not available — \(error.localizedDescription)")
-            return MCPDiscoveryResult(
-                servers: [],
-                tools: [],
-                errorMessage: error.localizedDescription
-            )
+            return empty
         }
     }
 }

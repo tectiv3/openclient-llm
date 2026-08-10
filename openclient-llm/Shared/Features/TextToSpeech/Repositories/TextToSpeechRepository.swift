@@ -34,7 +34,7 @@ struct TextToSpeechRepository: TextToSpeechRepositoryProtocol {
         )
 
         let data = try await apiClient.rawDataRequest(
-            endpoint: "v1/audio/speech",
+            endpoint: "audio/speech",
             body: request
         )
         LogManager.success("synthesize done audioData=\(data.count) bytes")

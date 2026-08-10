@@ -111,10 +111,10 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full project tree and layer respo
    open openclient-llm.xcodeproj
    ```
 3. **Configure** your server URL in the app settings:
-   - **LiteLLM**: `http://your-server:4000`
+   - **LiteLLM**: `http://your-server:4000/v1`
    - **Ollama** (direct): `http://your-server:11434/v1`
-   OpenClient appends API paths to this value without adding or removing `/v1`: LiteLLM uses paths such as
-   `/models` and `/chat/completions`, while direct Ollama requires its `/v1` OpenAI-compatible base.
+   - **LM Studio**: `http://your-server:1234/v1`
+   OpenClient appends endpoint paths (e.g. `/models`, `/chat/completions`) directly to this base URL.
 4. **Run** on your device or simulator
 
 ### Requirements

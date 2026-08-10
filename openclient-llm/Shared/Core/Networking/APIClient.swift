@@ -238,18 +238,18 @@ struct APIClient: APIClientProtocol, Sendable {
         toolName: String,
         body: LiteLLMSearchRequest
     ) async throws -> LiteLLMSearchResponse {
-        let endpoint = "v1/search/\(toolName)"
+        let endpoint = "search/\(toolName)"
         return try await request(endpoint: endpoint, method: .post, body: body)
     }
 
     func fetchSearchTools() async throws -> SearchToolsResponse {
-        try await request(endpoint: "v1/search/tools", method: .get, body: nil)
+        try await request(endpoint: "search/tools", method: .get, body: nil)
     }
 
     func listMCPServers() async throws -> [MCPServerInfo] {
         LogManager.network("→ GET /v1/mcp/server")
         let response: MCPServersResponse = try await request(
-            endpoint: "v1/mcp/server",
+            endpoint: "mcp/server",
             method: .get,
             body: nil
         )

@@ -33,7 +33,7 @@ struct AudioTranscriptionRepository: AudioTranscriptionRepositoryProtocol {
         }
 
         let response: AudioTranscriptionResponse = try await apiClient.multipartRequest(
-            endpoint: "v1/audio/transcriptions",
+            endpoint: "audio/transcriptions",
             fields: fields,
             file: MultipartFileData(
                 field: "file",
