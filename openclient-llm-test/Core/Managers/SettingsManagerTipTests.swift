@@ -15,7 +15,7 @@ final class SettingsManagerTipTests: XCTestCase {
 
     private var sut: SettingsManager!
     private var mockKeychain: MockKeychainManager!
-    private let suiteName = "com.artcc.openclient-llm.test.tips"
+    private let suiteName = "com.kinchaku.openclient-llm.test.tips"
 
     // MARK: - Setup
 

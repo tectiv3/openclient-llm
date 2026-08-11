@@ -98,7 +98,7 @@ struct APIClient: APIClientProtocol, Sendable {
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 LogManager.error("HTTP \(http.statusCode) /\(endpoint) (\(data.count) bytes)")
             }
-            try validateResponse(response)
+            try validateResponse(response, data: data)
 
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
             LogManager.network("← \(method.rawValue) /\(endpoint) [\(statusCode)] \(data.count) bytes")
@@ -132,7 +132,11 @@ struct APIClient: APIClientProtocol, Sendable {
                     LogManager.network("→ STREAM POST /\(endpoint)")
 
                     let (bytes, response) = try await session.bytes(for: urlRequest)
-                    try validateResponse(response)
+                    if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                        var errorBody = Data()
+                        for try await byte in bytes { errorBody.append(byte) }
+                        try validateResponse(response, data: errorBody)
+                    }
                     let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
                     LogManager.network("← STREAM /\(endpoint) [\(statusCode)] opened")
 
@@ -216,7 +220,7 @@ struct APIClient: APIClientProtocol, Sendable {
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 LogManager.error("HTTP \(http.statusCode) /\(endpoint) (\(data.count) bytes)")
             }
-            try validateResponse(response)
+            try validateResponse(response, data: data)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
             LogManager.network("← MULTIPART /\(endpoint) [\(statusCode)] \(data.count) bytes")
 
@@ -310,7 +314,7 @@ struct APIClient: APIClientProtocol, Sendable {
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 LogManager.error("HTTP \(http.statusCode) /\(endpoint) (\(data.count) bytes)")
             }
-            try validateResponse(response)
+            try validateResponse(response, data: data)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
             LogManager.network("← POST /\(endpoint) [\(statusCode)] \(data.count) bytes")
             return data
@@ -397,7 +401,7 @@ private extension APIClient {
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 LogManager.error("HTTP \(http.statusCode) /\(endpoint) (\(data.count) bytes)")
             }
-            try validateResponse(response)
+            try validateResponse(response, data: data)
 
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
             LogManager.network("← \(method.rawValue) /\(endpoint) [\(statusCode)] \(data.count) bytes")
@@ -432,7 +436,7 @@ private extension APIClient {
         }
     }
 
-    func validateResponse(_ response: URLResponse) throws {
+    func validateResponse(_ response: URLResponse, data: Data? = nil) throws {
         guard let httpResponse = response as? HTTPURLResponse else {
             LogManager.error("Invalid response — not an HTTPURLResponse")
             throw APIError.invalidResponse
@@ -448,9 +452,27 @@ private extension APIClient {
             LogManager.warning("HTTP 429 Rate Limited")
             throw APIError.rateLimited
         default:
-            LogManager.error("HTTP \(httpResponse.statusCode) error")
-            throw APIError.httpError(statusCode: httpResponse.statusCode)
+            let message = data.flatMap { parseErrorMessage(from: $0) }
+            LogManager.error("HTTP \(httpResponse.statusCode) error\(message.map { ": \($0)" } ?? "")")
+            throw APIError.httpError(statusCode: httpResponse.statusCode, message: message)
         }
+    }
+
+    func parseErrorMessage(from data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        if let error = json["error"] as? [String: Any], let message = error["message"] as? String {
+            return message
+        }
+        if let error = json["error"] as? String {
+            return error
+        }
+        if let message = json["message"] as? String {
+            return message
+        }
+        if let detail = json["detail"] as? String {
+            return detail
+        }
+        return nil
     }
 
     func mapError(_ error: Error) -> Error {

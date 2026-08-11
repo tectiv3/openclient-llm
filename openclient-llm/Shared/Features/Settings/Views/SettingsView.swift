@@ -25,6 +25,7 @@ struct SettingsView: View {
     @State private var isShowingUserProfile = false
     @State private var isShowingMemory = false
     @State private var isShowingDefaultSystemPrompt = false
+    @State private var isShowingPromptLibrary = false
     @State var isShowingHelp = false
     @State var isShowingTipJar = false
     @State private var showResetAlert = false
@@ -469,6 +470,23 @@ private extension SettingsView {
         NavigationStack {
             Form {
                 Section {
+                    HStack(alignment: .center) {
+                        Text(String(localized: "Pre-fills new conversations. Can be changed per conversation."))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+
+                        Spacer()
+
+                        Button {
+                            isShowingPromptLibrary = true
+                        } label: {
+                            Label(String(localized: "Browse Library"), systemImage: "books.vertical")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+
                     TextEditor(text: Binding(
                         get: {
                             guard case .loaded(let loadedState) = viewModel.state else { return "" }
@@ -479,8 +497,6 @@ private extension SettingsView {
                     .frame(minHeight: 200)
                 } header: {
                     Text(String(localized: "Default System Prompt"))
-                } footer: {
-                    Text(String(localized: "Pre-fills new conversations. Can be changed per conversation."))
                 }
             }
             .navigationTitle(String(localized: "Default System Prompt"))
@@ -494,6 +510,11 @@ private extension SettingsView {
                 }
             }
 #endif
+            .sheet(isPresented: $isShowingPromptLibrary) {
+                PromptTemplatesView { template in
+                    viewModel.send(.defaultSystemPromptChanged(template.content))
+                }
+            }
         }
     }
 

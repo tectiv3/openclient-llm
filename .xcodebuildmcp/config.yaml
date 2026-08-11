@@ -13,7 +13,7 @@ sessionDefaults:
   simulatorName: "iPhone 17 Pro Max"
   useLatestOS: true
   suppressWarnings: true
-  bundleId: "com.artcc.openclient-llm"
+  bundleId: "com.kinchaku.openclient-llm"
 
 # Telemetry
 sentryDisabled: true

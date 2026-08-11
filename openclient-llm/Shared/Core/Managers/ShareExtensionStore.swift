@@ -16,7 +16,7 @@ import Foundation
 enum ShareExtensionStore {
     // MARK: - Properties
 
-    static let groupIdentifier = "group.com.artcc.openclient-llm"
+    static let groupIdentifier = "group.com.kinchaku.openclient-llm"
 
     private static let pendingItemFileName = "share_pending.json"
     private static let attachmentsFolderName = "SharePending"

@@ -12,7 +12,7 @@ import Foundation
 nonisolated struct SpotlightManager: Sendable {
     // MARK: - Properties
 
-    private static let domainIdentifier = "com.artcc.openclient-llm.conversations"
+    private static let domainIdentifier = "com.kinchaku.openclient-llm.conversations"
 
     // MARK: - Public
 

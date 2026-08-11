@@ -11,7 +11,7 @@ import Foundation
 enum APIError: LocalizedError, Sendable, Equatable {
     case invalidURL
     case invalidResponse
-    case httpError(statusCode: Int)
+    case httpError(statusCode: Int, message: String?)
     case decodingError
     case networkError(String)
     case serverUnreachable
@@ -29,8 +29,12 @@ enum APIError: LocalizedError, Sendable, Equatable {
             String(localized: "The server URL is not valid.")
         case .invalidResponse:
             String(localized: "The server returned an invalid response.")
-        case .httpError(let statusCode):
-            String(localized: "Server error (code \(statusCode)).")
+        case .httpError(let statusCode, let message):
+            if let message {
+                "\(message) (\(statusCode))"
+            } else {
+                String(localized: "Server error (code \(statusCode)).")
+            }
         case .decodingError:
             String(localized: "Could not read the server response.")
         case .networkError(let message):

@@ -11,9 +11,9 @@ import Foundation
 // MARK: - ShortcutAction
 
 enum ShortcutAction: String, Sendable {
-    case newChat = "com.artcc.openclient-llm.shortcut.newChat"
-    case newPrivateChat = "com.artcc.openclient-llm.shortcut.newPrivateChat"
-    case search = "com.artcc.openclient-llm.shortcut.search"
+    case newChat = "com.kinchaku.openclient-llm.shortcut.newChat"
+    case newPrivateChat = "com.kinchaku.openclient-llm.shortcut.newPrivateChat"
+    case search = "com.kinchaku.openclient-llm.shortcut.search"
 }
 
 // MARK: - ShortcutManager

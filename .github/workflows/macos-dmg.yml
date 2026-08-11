@@ -107,7 +107,7 @@ jobs:
             <string>manual</string>
             <key>provisioningProfiles</key>
             <dict>
-              <key>com.artcc.openclient-llm</key>
+              <key>com.kinchaku.openclient-llm</key>
               <string>OpenClient</string>
             </dict>
           </dict>

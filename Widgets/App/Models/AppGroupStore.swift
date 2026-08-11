@@ -15,11 +15,11 @@ import Foundation
 enum AppGroupStore {
     // MARK: - Properties
 
-    static let suiteName = "group.com.artcc.openclient-llm"
-    static let conversationsWidgetKind = "com.artcc.openclient-llm.widget.conversations-overview"
-    static let pinnedConversationsWidgetKind = "com.artcc.openclient-llm.widget.pinned-conversations"
-    static let latestConversationWidgetKind = "com.artcc.openclient-llm.widget.latest-conversation"
-    static let taggedConversationsWidgetKind = "com.artcc.openclient-llm.widget.tagged-conversations"
+    static let suiteName = "group.com.kinchaku.openclient-llm"
+    static let conversationsWidgetKind = "com.kinchaku.openclient-llm.widget.conversations-overview"
+    static let pinnedConversationsWidgetKind = "com.kinchaku.openclient-llm.widget.pinned-conversations"
+    static let latestConversationWidgetKind = "com.kinchaku.openclient-llm.widget.latest-conversation"
+    static let taggedConversationsWidgetKind = "com.kinchaku.openclient-llm.widget.tagged-conversations"
 
     private static let conversationsKey = "widgetConversations"
     private static let pinnedConversationsKey = "widgetPinnedConversations"

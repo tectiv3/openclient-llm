@@ -24,7 +24,7 @@ struct ConversationExportDocument: Codable, Equatable, Sendable {
 
     // MARK: - Properties
 
-    static let formatIdentifier = "com.artcc.openclient-llm.conversations"
+    static let formatIdentifier = "com.kinchaku.openclient-llm.conversations"
     static let currentVersion = 1
 
     let format: String

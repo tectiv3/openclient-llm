@@ -15,7 +15,7 @@ import WidgetKit
 struct SearchWidget: Widget {
     // MARK: - Properties
 
-    static let kind: String = "com.artcc.openclient-llm.widget.search"
+    static let kind: String = "com.kinchaku.openclient-llm.widget.search"
 
     // MARK: - Body
 

@@ -16,7 +16,7 @@ import WidgetKit
 struct NewChatWidget: Widget {
     // MARK: - Properties
 
-    static let kind: String = "com.artcc.openclient-llm.widget.new-chat"
+    static let kind: String = "com.kinchaku.openclient-llm.widget.new-chat"
 
     // MARK: - Body
 

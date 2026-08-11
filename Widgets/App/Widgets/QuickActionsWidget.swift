@@ -17,7 +17,7 @@ import WidgetKit
 struct QuickActionsWidget: Widget {
     // MARK: - Properties
 
-    static let kind: String = "com.artcc.openclient-llm.widget.quick-actions"
+    static let kind: String = "com.kinchaku.openclient-llm.widget.quick-actions"
 
     // MARK: - Body
 

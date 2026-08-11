@@ -18,7 +18,7 @@ import WidgetKit
 struct NewChatControlWidget: ControlWidget {
     // MARK: - Properties
 
-    static let kind: String = "com.artcc.openclient-llm.control.new-chat"
+    static let kind: String = "com.kinchaku.openclient-llm.control.new-chat"
 
     // MARK: - Body
 

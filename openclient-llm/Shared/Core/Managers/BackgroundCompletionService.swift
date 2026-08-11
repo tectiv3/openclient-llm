@@ -50,7 +50,7 @@ private final class BackgroundSessionDelegate: NSObject,
 @MainActor
 final class BackgroundCompletionService {
     static let shared = BackgroundCompletionService()
-    static let sessionIdentifier = "com.arturocarretero.openclient-llm.background-completion"
+    static let sessionIdentifier = "com.kinchaku.openclient-llm.background-completion"
 
     private let settingsManager: SettingsManagerProtocol = SettingsManager()
     private let notificationManager = LocalNotificationManager()
