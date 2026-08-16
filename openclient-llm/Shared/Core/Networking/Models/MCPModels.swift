@@ -167,12 +167,12 @@ enum MCPIntegration: Codable, Sendable, Hashable {
     }
 
     func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .plugin(let id):
-            var container = encoder.singleValueContainer()
-            try container.encode(id)
+            try container.encode(IntegrationType.plugin, forKey: .type)
+            try container.encode(id, forKey: .id)
         case .ephemeral(let label, let url, let allowedTools, let headers):
-            var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(IntegrationType.ephemeralMcp, forKey: .type)
             try container.encode(label, forKey: .serverLabel)
             try container.encode(url, forKey: .serverUrl)
