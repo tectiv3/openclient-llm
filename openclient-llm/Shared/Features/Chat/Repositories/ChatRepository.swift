@@ -17,7 +17,8 @@ protocol ChatRepositoryProtocol: Sendable {
     func streamMessage(
         messages: [ChatMessage],
         model: String,
-        parameters: ModelParameters
+        parameters: ModelParameters,
+        integrations: [MCPIntegration]?
     ) -> AsyncThrowingStream<StreamChunk, Error>
     func agentCompletion(
         messages: [ChatMessage],
@@ -104,7 +105,8 @@ struct ChatRepository: ChatRepositoryProtocol {
     func streamMessage(
         messages: [ChatMessage],
         model: String,
-        parameters: ModelParameters
+        parameters: ModelParameters,
+        integrations: [MCPIntegration]? = nil
     ) -> AsyncThrowingStream<StreamChunk, Error> {
         LogManager.info("streamMessage model=\(model) messages=\(messages.count)")
         let request = ChatCompletionRequest(
@@ -119,7 +121,7 @@ struct ChatRepository: ChatRepositoryProtocol {
             tools: nil,
             toolChoice: nil,
             thinking: parameters.thinkingEnabled == false ? ThinkingConfig(enabled: false) : nil,
-            integrations: nil
+            integrations: integrations
         )
 
         let decoder = JSONDecoder()

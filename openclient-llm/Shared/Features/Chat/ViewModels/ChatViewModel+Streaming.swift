@@ -37,13 +37,16 @@ extension ChatViewModel {
                 selectedModel: sendContext.selectedModel,
                 assistantMessageId: assistantMessageId
             )
+            let activeIntegrations = sendContext.mcpIntegrations.isEmpty
+                ? nil : sendContext.mcpIntegrations
             let stream = streamMessageUseCase.execute(
                 messages: allMessages,
                 model: sendContext.modelId,
                 parameters: parametersCappedToModelOutput(
                     sendContext.parameters,
                     model: sendContext.selectedModel
-                )
+                ),
+                integrations: activeIntegrations
             )
             streamStartTime = ContinuousClock.now
             for try await chunk in stream {

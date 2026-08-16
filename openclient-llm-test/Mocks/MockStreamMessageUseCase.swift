@@ -24,7 +24,8 @@ final class MockStreamMessageUseCase: StreamMessageUseCaseProtocol, @unchecked S
     func execute(
         messages: [ChatMessage],
         model: String,
-        parameters: ModelParameters
+        parameters: ModelParameters,
+        integrations: [MCPIntegration]?
     ) -> AsyncThrowingStream<StreamChunk, Error> {
         receivedMessages.append(messages)
         onExecute?()

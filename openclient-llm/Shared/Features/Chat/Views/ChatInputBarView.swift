@@ -332,17 +332,20 @@ private extension ChatInputBarView {
         let modelSupportsTools = loadedState.selectedModel.map {
             $0.capabilities.contains(.functionCalling)
         } ?? false
+        let hasIntegrations = !loadedState.mcpIntegrations.isEmpty
+        let hasLiteLLMTools = loadedState.isMCPSupported && modelSupportsTools
+        let isActive = hasIntegrations || hasLiteLLMTools
 
         return Button {
             AppTips.mcpServers.invalidate(reason: .actionPerformed)
             onMCPButtonTapped()
         } label: {
-            Image(systemName: mcpIcon(modelSupportsTools))
+            Image(systemName: "server.rack")
                 .font(.title2)
                 .foregroundStyle(
                     mcpColor(
-                        supported: loadedState.isMCPSupported && modelSupportsTools,
-                        hasEnabled: !loadedState.enabledMCPToolIds.isEmpty
+                        supported: isActive,
+                        hasEnabled: hasIntegrations || !loadedState.enabledMCPToolIds.isEmpty
                     )
                 )
                 .frame(minWidth: 44, minHeight: 44)
@@ -351,15 +354,12 @@ private extension ChatInputBarView {
         .buttonStyle(.plain)
         .popoverTip(canShowMCPTip ? AppTips.mcpServers : nil, arrowEdge: .bottom)
         .accessibilityLabel(
-            loadedState.isMCPSupported && modelSupportsTools
+            isActive
             ? String(localized: "MCP Servers")
             : String(localized: "MCP Servers Unavailable")
         )
         .animation(.easeInOut(duration: 0.2), value: loadedState.enabledMCPToolIds)
-    }
-
-    func mcpIcon(_ modelSupportsTools: Bool) -> String {
-        "server.rack"
+        .animation(.easeInOut(duration: 0.2), value: loadedState.mcpIntegrations.count)
     }
 
     func mcpColor(supported: Bool, hasEnabled: Bool) -> Color {

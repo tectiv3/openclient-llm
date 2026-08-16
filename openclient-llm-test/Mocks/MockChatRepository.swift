@@ -48,7 +48,8 @@ final class MockChatRepository: ChatRepositoryProtocol, @unchecked Sendable {
     func streamMessage(
         messages: [ChatMessage],
         model: String,
-        parameters: ModelParameters
+        parameters: ModelParameters,
+        integrations: [MCPIntegration]?
     ) -> AsyncThrowingStream<StreamChunk, Error> {
         let chunks = streamChunks
         let error = streamError
