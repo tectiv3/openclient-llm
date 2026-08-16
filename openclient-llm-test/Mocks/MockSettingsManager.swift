@@ -29,7 +29,7 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
     var isPrivacyScreenEnabled: Bool = true
     var hasEnoughConversationsForMemoryTip: Bool = false
     var enabledMCPToolIds: [String] = []
-    var dismissedRemoteBannerKey: String?
+    var defaultSystemPrompt: String = ""
     var deleteAllCalled: Bool = false
 
     // MARK: - Public
@@ -162,12 +162,12 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         enabledMCPToolIds = ids
     }
 
-    func getDismissedRemoteBannerKey() -> String? {
-        dismissedRemoteBannerKey
+    func getDefaultSystemPrompt() -> String {
+        defaultSystemPrompt
     }
 
-    func setDismissedRemoteBannerKey(_ value: String?) {
-        dismissedRemoteBannerKey = value
+    func setDefaultSystemPrompt(_ value: String) {
+        defaultSystemPrompt = value
     }
 
     func deleteAll() {
@@ -179,7 +179,6 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         selectedSTTModelId = nil
         ttsVoices = [:]
         hasEnoughConversationsForMemoryTip = false
-        dismissedRemoteBannerKey = nil
         deleteAllCalled = true
     }
 }

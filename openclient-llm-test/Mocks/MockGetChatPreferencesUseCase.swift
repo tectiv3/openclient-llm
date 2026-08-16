@@ -18,6 +18,7 @@ final class MockGetChatPreferencesUseCase: GetChatPreferencesUseCaseProtocol, @u
     var isWebSearchEnabled: Bool = false
     var webSearchToolName: String = ""
     var ttsVoice: String = ""
+    var defaultSystemPrompt: String = ""
 
     // MARK: - GetChatPreferencesUseCaseProtocol
 
@@ -39,5 +40,9 @@ final class MockGetChatPreferencesUseCase: GetChatPreferencesUseCaseProtocol, @u
 
     func getSelectedTTSVoice(forModelId modelId: String) -> String {
         ttsVoice
+    }
+
+    func getDefaultSystemPrompt() -> String {
+        defaultSystemPrompt
     }
 }

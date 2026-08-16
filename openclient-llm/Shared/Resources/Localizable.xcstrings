@@ -12404,6 +12404,9 @@
         }
       }
     },
+    "Image generation requires a text prompt without attachments." : {
+
+    },
     "Images" : {
       "comment" : "A section header for a list of images.",
       "localizations" : {
@@ -17403,6 +17406,9 @@
         }
       }
     },
+    "Not Now" : {
+
+    },
     "Notifications disabled" : {
       "comment" : "A label that indicates that notifications are disabled.",
       "localizations" : {
@@ -18829,6 +18835,9 @@
         }
       }
     },
+    "OpenClient version %@ is available. Would you like to update now?" : {
+
+    },
     "Opens a new conversation in OpenClient." : {
       "comment" : "Description of the control center widget that opens a new conversation in OpenClient.",
       "localizations" : {
@@ -20071,6 +20080,9 @@
           }
         }
       }
+    },
+    "Preparing image" : {
+
     },
     "Pricing" : {
       "comment" : "A section that displays the pricing information for a model.",
@@ -29709,6 +29721,12 @@
         }
       }
     },
+    "The selected file is not a valid image." : {
+
+    },
+    "The selected image could not be prepared. Please choose another image." : {
+
+    },
     "The server certificate is not trusted." : {
       "localizations" : {
         "de" : {
@@ -31582,6 +31600,18 @@
         }
       }
     },
+    "Update" : {
+
+    },
+    "Update available" : {
+
+    },
+    "Update OpenClient" : {
+
+    },
+    "Update OpenClient to version %@ to continue using the app." : {
+
+    },
     "URL Scheme" : {
       "comment" : "A label that describes the URL scheme feature.",
       "localizations" : {
@@ -32294,6 +32324,9 @@
           }
         }
       }
+    },
+    "We're making a few improvements. Please try again later." : {
+
     },
     "Web Search" : {
       "comment" : "A section of the settings view that allows the user to configure the web search tool.",

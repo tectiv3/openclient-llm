@@ -41,8 +41,6 @@ protocol SettingsManagerProtocol: Sendable {
     func setHasEnoughConversationsForMemoryTip(_ value: Bool)
     func getEnabledMCPToolIds() -> [String]
     func setEnabledMCPToolIds(_ ids: [String])
-    func getDismissedRemoteBannerKey() -> String?
-    func setDismissedRemoteBannerKey(_ value: String?)
     func getDefaultSystemPrompt() -> String
     func setDefaultSystemPrompt(_ value: String)
     func deleteAll()
@@ -67,7 +65,6 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         static let isPrivacyScreenEnabled = "isPrivacyScreenEnabled"
         static let hasEnoughConversationsForMemoryTip = "hasEnoughConversationsForMemoryTip"
         static let enabledMCPToolIds = "enabledMCPToolIds"
-        static let dismissedRemoteBannerKey = "dismissedRemoteBannerKey"
         static let defaultSystemPrompt = "defaultSystemPrompt"
 
         static func ttsVoiceKey(forModelId modelId: String) -> String {
@@ -232,14 +229,6 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.set(ids, forKey: Keys.enabledMCPToolIds)
     }
 
-    func getDismissedRemoteBannerKey() -> String? {
-        defaults.string(forKey: Keys.dismissedRemoteBannerKey)
-    }
-
-    func setDismissedRemoteBannerKey(_ value: String?) {
-        defaults.set(value, forKey: Keys.dismissedRemoteBannerKey)
-    }
-
     func getDefaultSystemPrompt() -> String {
         defaults.string(forKey: Keys.defaultSystemPrompt) ?? ""
     }
@@ -262,7 +251,6 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.removeObject(forKey: Keys.isPrivacyScreenEnabled)
         defaults.removeObject(forKey: Keys.hasEnoughConversationsForMemoryTip)
         defaults.removeObject(forKey: Keys.enabledMCPToolIds)
-        defaults.removeObject(forKey: Keys.dismissedRemoteBannerKey)
         defaults.removeObject(forKey: Keys.defaultSystemPrompt)
         defaults.removeObject(forKey: LegacyKeys.serverBaseURL)
         defaults.removeObject(forKey: LegacyKeys.apiKey)

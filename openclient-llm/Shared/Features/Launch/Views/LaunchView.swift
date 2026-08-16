@@ -11,9 +11,7 @@ import SwiftUI
 struct LaunchView: View {
     // MARK: - Properties
 
-    @Environment(\.openURL) private var openURL
     @State private var viewModel = LaunchViewModel()
-    @State private var presentedBannerWebDestination: BannerWebDestination?
 
     // MARK: - View
 
@@ -27,25 +25,6 @@ struct LaunchView: View {
         }
         .task {
             viewModel.send(.viewAppeared)
-        }
-        .alert(
-            String(localized: "Update available"),
-            isPresented: availableUpdateAlertBinding
-        ) {
-            Button(String(localized: "Not Now"), role: .cancel) {
-                viewModel.send(.availableUpdateDismissed)
-            }
-            Button(String(localized: "Update")) {
-                if let update = viewModel.availableUpdate {
-                    openURL(update.updateURL)
-                }
-                viewModel.send(.availableUpdateDismissed)
-            }
-        } message: {
-            Text(availableUpdateMessage)
-        }
-        .sheet(item: $presentedBannerWebDestination) { destination in
-            WebContentView(title: destination.title, url: destination.url)
         }
     }
 
@@ -63,11 +42,7 @@ struct LaunchView: View {
                     }
                 }
             case .home:
-                homeView
-            case .maintenance:
-                MaintenanceView()
-            case .forceUpdate(let update):
-                ForceUpdateView(update: update)
+                HomeView()
             }
         }
     }
@@ -76,7 +51,7 @@ struct LaunchView: View {
 
     var macOSBody: some View {
         ZStack {
-            homeView
+            HomeView()
                 .allowsHitTesting(viewModel.state == .home)
                 .accessibilityHidden(viewModel.state != .home)
 #if os(macOS)
@@ -101,16 +76,6 @@ struct LaunchView: View {
                 }
                 .transition(.opacity)
             }
-
-            if viewModel.state == .maintenance {
-                MaintenanceView()
-                    .transition(.opacity)
-            }
-
-            if case .forceUpdate(let update) = viewModel.state {
-                ForceUpdateView(update: update)
-                    .transition(.opacity)
-            }
         }
         .animation(.smooth, value: viewModel.state)
     }
@@ -119,63 +84,13 @@ struct LaunchView: View {
 // MARK: - Private
 
 private extension LaunchView {
-    var homeView: some View {
-        HomeView(
-            remoteBanner: viewModel.remoteBanner,
-            onRemoteBannerDismiss: {
-                viewModel.send(.remoteBannerDismissed)
-            },
-            onRemoteBannerAction: handleRemoteBannerAction
-        )
-    }
-
-    func handleRemoteBannerAction() {
-        guard let remoteBanner = viewModel.remoteBanner else { return }
-
-        if remoteBanner.item.action == .openURL,
-           let url = URL(string: remoteBanner.item.url),
-           let scheme = url.scheme?.lowercased(),
-           ["http", "https"].contains(scheme) {
-            presentedBannerWebDestination = BannerWebDestination(
-                title: remoteBanner.item.title,
-                url: url
-            )
-        }
-        viewModel.send(.remoteBannerDismissed)
-    }
-
-    var availableUpdateAlertBinding: Binding<Bool> {
-        Binding(
-            get: { viewModel.state == .home && viewModel.availableUpdate != nil },
-            set: { isPresented in
-                if !isPresented {
-                    viewModel.send(.availableUpdateDismissed)
-                }
-            }
-        )
-    }
-
-    var availableUpdateMessage: String {
-        guard let version = viewModel.availableUpdate?.latestVersion else { return "" }
-        return String(
-            localized: "OpenClient version \(version) is available. Would you like to update now?"
-        )
-    }
-
     var shouldCoverMacOSHome: Bool {
         switch viewModel.state {
-        case .loading, .maintenance, .forceUpdate:
+        case .loading:
             true
         case .onboarding, .home:
             false
         }
-    }
-
-    struct BannerWebDestination: Identifiable {
-        let title: String
-        let url: URL
-
-        var id: URL { url }
     }
 }
 

@@ -45,7 +45,6 @@ enum Constants {
         }
 
         static let authorGitHub = URL(string: "https://github.com/ArtCC")
-        static let remoteConfig = URL(string: "https://openclient-artcc05.web.app/config.json")
         static let serverUrl = "http://localhost:4000"
     }
 }
