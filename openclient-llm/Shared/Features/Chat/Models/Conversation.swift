@@ -40,6 +40,7 @@ struct Conversation: Identifiable, Equatable, Sendable, Codable {
     var isPinned: Bool
     var tags: [ConversationTag]
     var mcpIntegrations: [MCPIntegration]
+    var lmStudioResponseId: String?
     var parentConversationId: UUID?
     var branchedFromMessageId: UUID?
     let createdAt: Date
@@ -60,6 +61,7 @@ struct Conversation: Identifiable, Equatable, Sendable, Codable {
         isPinned: Bool = false,
         tags: [ConversationTag] = [],
         mcpIntegrations: [MCPIntegration] = [],
+        lmStudioResponseId: String? = nil,
         parentConversationId: UUID? = nil,
         branchedFromMessageId: UUID? = nil,
         createdAt: Date = Date(),
@@ -77,6 +79,7 @@ struct Conversation: Identifiable, Equatable, Sendable, Codable {
         self.isPinned = isPinned
         self.tags = tags
         self.mcpIntegrations = mcpIntegrations
+        self.lmStudioResponseId = lmStudioResponseId
         self.parentConversationId = parentConversationId
         self.branchedFromMessageId = branchedFromMessageId
         self.createdAt = createdAt
@@ -96,6 +99,7 @@ struct Conversation: Identifiable, Equatable, Sendable, Codable {
         modelParameters = try container.decodeIfPresent(ModelParameters.self, forKey: .modelParameters) ?? .default
         isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         mcpIntegrations = try container.decodeIfPresent([MCPIntegration].self, forKey: .mcpIntegrations) ?? []
+        lmStudioResponseId = try container.decodeIfPresent(String.self, forKey: .lmStudioResponseId)
         let tagNames = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
         let tagColors = try container.decodeIfPresent([String: TagColor].self, forKey: .tagColors) ?? [:]
         tags = tagNames.map { ConversationTag(name: $0, color: tagColors[$0] ?? .orange) }
@@ -120,6 +124,7 @@ struct Conversation: Identifiable, Equatable, Sendable, Codable {
         if !mcpIntegrations.isEmpty {
             try container.encode(mcpIntegrations, forKey: .mcpIntegrations)
         }
+        try container.encodeIfPresent(lmStudioResponseId, forKey: .lmStudioResponseId)
         try container.encode(tags.map(\.name), forKey: .tags)
         let tagColors = tags.reduce(into: [String: TagColor]()) { colors, tag in
             colors[tag.name] = tag.color
@@ -180,6 +185,7 @@ private extension Conversation {
         case modelParameters
         case isPinned
         case mcpIntegrations
+        case lmStudioResponseId
         case tags
         case tagColors
         case parentConversationId

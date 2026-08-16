@@ -351,7 +351,7 @@ private extension APIClient {
 
         let url: URL
         if let queryItems, !queryItems.isEmpty {
-            guard let endpointURL = URL(string: baseURL)?.appendingPathComponent(endpoint),
+            guard let endpointURL = endpointURL(baseURL: baseURL, endpoint: endpoint),
                   var components = URLComponents(
                       url: endpointURL,
                       resolvingAgainstBaseURL: false
@@ -364,7 +364,7 @@ private extension APIClient {
             }
             url = builtURL
         } else {
-            guard let builtURL = URL(string: baseURL)?.appendingPathComponent(endpoint) else {
+            guard let builtURL = endpointURL(baseURL: baseURL, endpoint: endpoint) else {
                 throw APIError.invalidURL
             }
             url = builtURL
@@ -385,6 +385,19 @@ private extension APIClient {
         }
 
         return request
+    }
+
+    func endpointURL(baseURL: String, endpoint: String) -> URL? {
+        guard let configuredURL = URL(string: baseURL) else { return nil }
+        guard endpoint.hasPrefix("/") else {
+            return configuredURL.appendingPathComponent(endpoint)
+        }
+        guard var components = URLComponents(url: configuredURL, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        components.path = endpoint
+        components.query = nil
+        return components.url
     }
 
     func request<T: Decodable & Sendable>(

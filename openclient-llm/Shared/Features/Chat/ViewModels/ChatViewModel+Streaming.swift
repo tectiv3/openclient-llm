@@ -110,11 +110,6 @@ extension ChatViewModel {
         }
     }
 
-}
-
-// MARK: - Private
-
-private extension ChatViewModel {
     func finishStreaming(_ assistantMessageId: UUID, model: String) async {
         guard isActiveStream(assistantMessageId), case .loaded(var currentState) = state else { return }
         currentState.isStreaming = false
@@ -131,7 +126,11 @@ private extension ChatViewModel {
         if didPersist { scheduleCompactionIfNeeded() }
         await notifyStreamingCompletedUseCase.execute()
     }
+}
 
+// MARK: - Private
+
+private extension ChatViewModel {
     func removeEmptyAssistantMessage(_ assistantMessageId: UUID, from state: inout LoadedState) {
         guard let index = state.messages.firstIndex(where: { $0.id == assistantMessageId }),
               state.messages[index].content.isEmpty,

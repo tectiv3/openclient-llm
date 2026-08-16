@@ -27,11 +27,34 @@ protocol ChatRepositoryProtocol: Sendable {
         tools: [ToolDefinition]?,
         integrations: [MCPIntegration]?
     ) async throws -> ChatCompletionResponse
+    func lmStudioCompletion(
+        input: String,
+        model: String,
+        systemPrompt: String,
+        parameters: ModelParameters,
+        contextWindowTokens: Int?,
+        previousResponseId: String?,
+        integrations: [MCPIntegration]
+    ) async throws -> LMStudioChatResponse
     func buildNonStreamingRequestBody(
         messages: [ChatMessage],
         model: String,
         parameters: ModelParameters
     ) -> Data?
+}
+
+extension ChatRepositoryProtocol {
+    func lmStudioCompletion(
+        input: String,
+        model: String,
+        systemPrompt: String,
+        parameters: ModelParameters,
+        contextWindowTokens: Int?,
+        previousResponseId: String?,
+        integrations: [MCPIntegration]
+    ) async throws -> LMStudioChatResponse {
+        throw APIError.networkError("LM Studio chat is not configured")
+    }
 }
 
 enum StreamChunk: Sendable {
@@ -167,6 +190,36 @@ struct ChatRepository: ChatRepositoryProtocol {
         )
         LogManager.success("agentCompletion done finishReason=\(response.choices.first?.finishReason ?? "nil")")
         return response
+    }
+
+    func lmStudioCompletion(
+        input: String,
+        model: String,
+        systemPrompt: String,
+        parameters: ModelParameters,
+        contextWindowTokens: Int?,
+        previousResponseId: String?,
+        integrations: [MCPIntegration]
+    ) async throws -> LMStudioChatResponse {
+        let request = LMStudioChatRequest(
+            model: model,
+            input: input,
+            systemPrompt: systemPrompt.isEmpty ? nil : systemPrompt,
+            integrations: integrations,
+            temperature: parameters.temperature,
+            maxOutputTokens: parameters.maxTokens,
+            topP: parameters.topP,
+            reasoning: parameters.thinkingEnabled == false ? "off" : nil,
+            contextLength: contextWindowTokens,
+            previousResponseId: previousResponseId,
+            store: true
+        )
+        return try await apiClient.request(
+            endpoint: "/api/v1/chat",
+            method: .post,
+            body: request,
+            timeoutInterval: 125
+        )
     }
 
     func buildNonStreamingRequestBody(

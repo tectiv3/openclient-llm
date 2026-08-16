@@ -182,6 +182,10 @@ enum MCPIntegration: Codable, Sendable, Hashable {
     }
 
     init(from decoder: Decoder) throws {
+        if let id = try? decoder.singleValueContainer().decode(String.self) {
+            self = .plugin(id: id)
+            return
+        }
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let type = try container.decode(IntegrationType.self, forKey: .type)
         switch type {

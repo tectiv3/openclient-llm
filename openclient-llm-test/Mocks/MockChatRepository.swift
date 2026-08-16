@@ -18,6 +18,9 @@ final class MockChatRepository: ChatRepositoryProtocol, @unchecked Sendable {
     var streamError: Error?
     var agentCompletionDelay: Duration?
     var agentCompletionCallCount = 0
+    var lmStudioCompletionResult: Result<LMStudioChatResponse, Error> = .success(
+        LMStudioChatResponse(output: [], stats: nil, responseId: nil)
+    )
     var agentCompletionResult: Result<ChatCompletionResponse, Error> = .success(
         ChatCompletionResponse(
             id: "mock-id",
@@ -79,6 +82,18 @@ final class MockChatRepository: ChatRepositoryProtocol, @unchecked Sendable {
             try? await Task.sleep(for: agentCompletionDelay)
         }
         return try agentCompletionResult.get()
+    }
+
+    func lmStudioCompletion(
+        input: String,
+        model: String,
+        systemPrompt: String,
+        parameters: ModelParameters,
+        contextWindowTokens: Int?,
+        previousResponseId: String?,
+        integrations: [MCPIntegration]
+    ) async throws -> LMStudioChatResponse {
+        try lmStudioCompletionResult.get()
     }
 
     func buildNonStreamingRequestBody(

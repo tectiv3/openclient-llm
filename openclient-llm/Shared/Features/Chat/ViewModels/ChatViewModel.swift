@@ -102,6 +102,7 @@ final class ChatViewModel {
     let streamMessageUseCase: StreamMessageUseCaseProtocol
     let generateImageUseCase: GenerateImageUseCaseProtocol
     let agentStreamUseCase: AgentStreamUseCaseProtocol
+    let lmStudioChatUseCase: LMStudioChatUseCaseProtocol
     let webSearchUseCase: WebSearchUseCaseProtocol
     let saveConversationUseCase: SaveConversationUseCaseProtocol
     private let synthesizeSpeechUseCase: SynthesizeSpeechUseCaseProtocol
@@ -147,6 +148,7 @@ final class ChatViewModel {
         streamMessageUseCase: StreamMessageUseCaseProtocol = StreamMessageUseCase(),
         generateImageUseCase: GenerateImageUseCaseProtocol = GenerateImageUseCase(),
         agentStreamUseCase: AgentStreamUseCaseProtocol = AgentStreamUseCase(),
+        lmStudioChatUseCase: LMStudioChatUseCaseProtocol = LMStudioChatUseCase(),
         webSearchUseCase: WebSearchUseCaseProtocol = WebSearchUseCase(),
         saveConversationUseCase: SaveConversationUseCaseProtocol = SaveConversationUseCase(),
         synthesizeSpeechUseCase: SynthesizeSpeechUseCaseProtocol = SynthesizeSpeechUseCase(),
@@ -180,6 +182,7 @@ final class ChatViewModel {
         self.streamMessageUseCase = streamMessageUseCase
         self.generateImageUseCase = generateImageUseCase
         self.agentStreamUseCase = agentStreamUseCase
+        self.lmStudioChatUseCase = lmStudioChatUseCase
         self.webSearchUseCase = webSearchUseCase
         self.saveConversationUseCase = saveConversationUseCase
         self.synthesizeSpeechUseCase = synthesizeSpeechUseCase

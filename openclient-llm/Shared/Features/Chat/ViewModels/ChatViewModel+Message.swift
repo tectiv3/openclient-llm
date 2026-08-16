@@ -25,6 +25,7 @@ extension ChatViewModel {
         let contextSummary: String?
         let contextSummaryCursorMessageId: UUID?
         let mcpIntegrations: [MCPIntegration]
+        let lmStudioResponseId: String?
     }
 
     func streamWithWebSearch(_ context: SendMessageContext) async {
@@ -32,8 +33,9 @@ extension ChatViewModel {
             await performImageGeneration(context)
             return
         }
-        let useAgentMode = context.modelCapabilities.contains(.functionCalling)
-        if useAgentMode {
+        if !context.mcpIntegrations.isEmpty {
+            await performLMStudioChat(context)
+        } else if context.modelCapabilities.contains(.functionCalling) {
             await performAgentStreaming(context)
         } else {
             await performStreaming(context)
@@ -104,6 +106,7 @@ extension ChatViewModel {
         let contextSummary = loadedState.conversation?.contextSummary
         let contextSummaryCursorMessageId = loadedState.conversation?.contextSummaryCursorMessageId
         let mcpIntegrations = loadedState.mcpIntegrations
+        let lmStudioResponseId = loadedState.conversation?.lmStudioResponseId
 
         cancelCompaction()
         streamTask?.cancel()
@@ -123,7 +126,8 @@ extension ChatViewModel {
                 contextWindowTokens: contextWindowTokens,
                 contextSummary: contextSummary,
                 contextSummaryCursorMessageId: contextSummaryCursorMessageId,
-                mcpIntegrations: mcpIntegrations
+                mcpIntegrations: mcpIntegrations,
+                lmStudioResponseId: lmStudioResponseId
             ))
         }
     }
