@@ -207,7 +207,7 @@ private extension ConversationListView {
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                newChatToolbarMenu
+                newChatToolbarButton
             }
 #if os(macOS)
             ToolbarItem(placement: .primaryAction) {
@@ -226,6 +226,15 @@ private extension ConversationListView {
             }
 #endif
 #if os(iOS)
+            ToolbarItem(placement: .secondaryAction) {
+                Button {
+                    AppTips.privateChat.invalidate(reason: .actionPerformed)
+                    onPrivateChatSelected()
+                } label: {
+                    Label(String(localized: "New Private Chat"), systemImage: "lock.fill")
+                }
+                .keyboardShortcut("p", modifiers: .command)
+            }
             ToolbarItem(placement: .secondaryAction) {
                 Button {
                     viewModel.send(.exportBackupTapped)

@@ -8,12 +8,23 @@
 
 #if os(macOS)
 import SwiftUI
+import TipKit
 
 extension ConversationListView {
     // MARK: - macOS Toolbar
 
     var overflowMenu: some View {
         Menu {
+            Button {
+                AppTips.privateChat.invalidate(reason: .actionPerformed)
+                onPrivateChatSelected()
+            } label: {
+                Label(String(localized: "New Private Chat"), systemImage: "lock.fill")
+            }
+            .keyboardShortcut("p", modifiers: .command)
+
+            Divider()
+
             Button {
                 viewModel.send(.exportBackupTapped)
             } label: {
