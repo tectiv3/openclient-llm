@@ -77,7 +77,8 @@ extension ChatViewModel {
                 selectedModel: model,
                 contextWindowTokens: loadedState.contextWindowTokens,
                 contextSummary: loadedState.conversation?.contextSummary,
-                contextSummaryCursorMessageId: loadedState.conversation?.contextSummaryCursorMessageId
+                contextSummaryCursorMessageId: loadedState.conversation?.contextSummaryCursorMessageId,
+                mcpIntegrations: loadedState.mcpIntegrations
             ))
         }
     }
@@ -132,7 +133,8 @@ extension ChatViewModel {
                 selectedModel: model,
                 contextWindowTokens: loadedState.contextWindowTokens,
                 contextSummary: loadedState.conversation?.contextSummary,
-                contextSummaryCursorMessageId: loadedState.conversation?.contextSummaryCursorMessageId
+                contextSummaryCursorMessageId: loadedState.conversation?.contextSummaryCursorMessageId,
+                mcpIntegrations: loadedState.mcpIntegrations
             ))
         }
     }

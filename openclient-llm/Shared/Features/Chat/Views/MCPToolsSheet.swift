@@ -11,6 +11,8 @@ import SwiftUI
 struct MCPToolsSheet: View {
     @Bindable var viewModel: ChatViewModel
     @Binding var isPresented: Bool
+    @State private var isAddingIntegration = false
+    @State private var newIntegrationId = ""
 
     var body: some View {
         Group {
@@ -24,13 +26,23 @@ struct MCPToolsSheet: View {
 private extension MCPToolsSheet {
     func loadedContent(_ loadedState: ChatViewModel.LoadedState) -> some View {
         NavigationStack {
-            Group {
+            List {
+                integrationsSection(loadedState)
                 if loadedState.isLoadingMCPTools {
-                    loadingContent
-                } else if loadedState.availableMCPServers.isEmpty {
-                    emptyContent
-                } else {
-                    serverListView(loadedState)
+                    Section {
+                        HStack {
+                            Spacer()
+                            VStack {
+                                ProgressView().tint(.secondary)
+                                Text(String(localized: "Loading tools..."))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.top, 8)
+                            }
+                            Spacer()
+                        }
+                    }
+                } else if !loadedState.availableMCPServers.isEmpty {
+                    discoveredServersSection(loadedState)
                 }
             }
             .navigationTitle(String(localized: "MCP Servers"))
@@ -39,48 +51,92 @@ private extension MCPToolsSheet {
             #endif
             .toolbar { doneToolbar }
             .toolbar { refreshToolbar(loadedState: loadedState) }
+            .alert(String(localized: "Add Integration"), isPresented: $isAddingIntegration) {
+                TextField(String(localized: "mcp/server-name"), text: $newIntegrationId)
+                    .autocorrectionDisabled()
+                Button(String(localized: "Add")) {
+                    let id = newIntegrationId.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !id.isEmpty else { return }
+                    viewModel.send(.mcpIntegrationAdded(.plugin(id: id)))
+                    newIntegrationId = ""
+                }
+                Button(String(localized: "Cancel"), role: .cancel) {
+                    newIntegrationId = ""
+                }
+            } message: {
+                Text(String(localized: "Enter the MCP plugin ID as configured in your LM Studio mcp.json."))
+            }
         }
     }
 
-    var loadingContent: some View {
-        VStack {
-            Spacer()
-            ProgressView()
-                .tint(.secondary)
-            Text(String(localized: "Loading tools..."))
+    func integrationsSection(_ loadedState: ChatViewModel.LoadedState) -> some View {
+        Section {
+            if loadedState.mcpIntegrations.isEmpty {
+                Label(
+                    String(localized: "No integrations configured for this conversation."),
+                    systemImage: "puzzlepiece.extension"
+                )
                 .foregroundStyle(.secondary)
-                .padding(.top, 8)
-            Spacer()
-        }
-    }
-
-    var emptyContent: some View {
-        VStack {
-            Spacer()
-            Label(
-                String(localized: "No MCP servers configured. Add them in your LiteLLM server's config.yaml."),
-                systemImage: "server.rack"
-            )
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 20)
-            Spacer()
-        }
-    }
-
-    func serverListView(_ loadedState: ChatViewModel.LoadedState) -> some View {
-        List {
-            Section(String(localized: "Available Servers")) {
-                ForEach(loadedState.availableMCPServers) { server in
-                    let serverTools = loadedState.toolsForServer(server.serverId)
-                    NavigationLink {
-                        serverDetailView(
-                            server: server,
-                            tools: serverTools,
-                            loadedState: loadedState
-                        )
-                    } label: {
-                        serverRow(server: server, tools: serverTools, loadedState: loadedState)
+                .font(.subheadline)
+            } else {
+                ForEach(loadedState.mcpIntegrations, id: \.self) { integration in
+                    integrationRow(integration)
+                }
+                .onDelete { indexSet in
+                    let integrations = loadedState.mcpIntegrations
+                    for index in indexSet {
+                        viewModel.send(.mcpIntegrationRemoved(integrations[index]))
                     }
+                }
+            }
+            Button {
+                isAddingIntegration = true
+            } label: {
+                Label(String(localized: "Add Integration"), systemImage: "plus")
+            }
+        } header: {
+            Text(String(localized: "LM Studio Integrations"))
+        } footer: {
+            Text(String(
+                localized: "Server-side MCP tools handled by LM Studio. Register servers in LM Studio's mcp.json first."
+            ))
+        }
+    }
+
+    func integrationRow(_ integration: MCPIntegration) -> some View {
+        HStack {
+            Image(systemName: "puzzlepiece.extension")
+                .foregroundStyle(Color.appAccent)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(integration.displayName)
+                    .font(.body)
+                switch integration {
+                case .plugin:
+                    Text(String(localized: "Plugin"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .ephemeral(_, let url, _, _):
+                    Text(url)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+
+    func discoveredServersSection(_ loadedState: ChatViewModel.LoadedState) -> some View {
+        Section(String(localized: "Discovered Servers")) {
+            ForEach(loadedState.availableMCPServers) { server in
+                let serverTools = loadedState.toolsForServer(server.serverId)
+                NavigationLink {
+                    serverDetailView(
+                        server: server,
+                        tools: serverTools,
+                        loadedState: loadedState
+                    )
+                } label: {
+                    serverRow(server: server, tools: serverTools, loadedState: loadedState)
                 }
             }
         }

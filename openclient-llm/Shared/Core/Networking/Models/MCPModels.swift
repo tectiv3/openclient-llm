@@ -146,6 +146,65 @@ final class MCPJSONSchema: Codable, Equatable, @unchecked Sendable {
     }
 }
 
+// MARK: - MCPIntegration
+
+enum MCPIntegration: Codable, Sendable, Hashable {
+    case plugin(id: String)
+    case ephemeral(label: String, url: String, allowedTools: [String]?, headers: [String: String]?)
+
+    private enum IntegrationType: String, Codable {
+        case plugin
+        case ephemeralMcp = "ephemeral_mcp"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case id
+        case serverLabel = "server_label"
+        case serverUrl = "server_url"
+        case allowedTools = "allowed_tools"
+        case headers
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .plugin(let id):
+            try container.encode(IntegrationType.plugin, forKey: .type)
+            try container.encode(id, forKey: .id)
+        case .ephemeral(let label, let url, let allowedTools, let headers):
+            try container.encode(IntegrationType.ephemeralMcp, forKey: .type)
+            try container.encode(label, forKey: .serverLabel)
+            try container.encode(url, forKey: .serverUrl)
+            try container.encodeIfPresent(allowedTools, forKey: .allowedTools)
+            try container.encodeIfPresent(headers, forKey: .headers)
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(IntegrationType.self, forKey: .type)
+        switch type {
+        case .plugin:
+            let id = try container.decode(String.self, forKey: .id)
+            self = .plugin(id: id)
+        case .ephemeralMcp:
+            let label = try container.decode(String.self, forKey: .serverLabel)
+            let url = try container.decode(String.self, forKey: .serverUrl)
+            let allowedTools = try container.decodeIfPresent([String].self, forKey: .allowedTools)
+            let headers = try container.decodeIfPresent([String: String].self, forKey: .headers)
+            self = .ephemeral(label: label, url: url, allowedTools: allowedTools, headers: headers)
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .plugin(let id): id
+        case .ephemeral(let label, _, _, _): label
+        }
+    }
+}
+
 // MARK: - MCPCallRequest
 
 nonisolated struct MCPCallRequest: Codable, Sendable {

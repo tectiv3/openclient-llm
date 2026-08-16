@@ -70,7 +70,8 @@ final class MockChatRepository: ChatRepositoryProtocol, @unchecked Sendable {
         messages: [ChatMessage],
         model: String,
         parameters: ModelParameters,
-        tools: [ToolDefinition]?
+        tools: [ToolDefinition]?,
+        integrations: [MCPIntegration]?
     ) async throws -> ChatCompletionResponse {
         agentCompletionCallCount += 1
         if let agentCompletionDelay {

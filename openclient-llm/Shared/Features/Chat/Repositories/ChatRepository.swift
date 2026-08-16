@@ -23,7 +23,8 @@ protocol ChatRepositoryProtocol: Sendable {
         messages: [ChatMessage],
         model: String,
         parameters: ModelParameters,
-        tools: [ToolDefinition]?
+        tools: [ToolDefinition]?,
+        integrations: [MCPIntegration]?
     ) async throws -> ChatCompletionResponse
     func buildNonStreamingRequestBody(
         messages: [ChatMessage],
@@ -74,7 +75,8 @@ struct ChatRepository: ChatRepositoryProtocol {
             modalities: nil,
             tools: nil,
             toolChoice: nil,
-            thinking: parameters.thinkingEnabled == false ? ThinkingConfig(enabled: false) : nil
+            thinking: parameters.thinkingEnabled == false ? ThinkingConfig(enabled: false) : nil,
+            integrations: nil
         )
 
         let response: ChatCompletionResponse = try await apiClient.request(
@@ -116,7 +118,8 @@ struct ChatRepository: ChatRepositoryProtocol {
             modalities: nil,
             tools: nil,
             toolChoice: nil,
-            thinking: parameters.thinkingEnabled == false ? ThinkingConfig(enabled: false) : nil
+            thinking: parameters.thinkingEnabled == false ? ThinkingConfig(enabled: false) : nil,
+            integrations: nil
         )
 
         let decoder = JSONDecoder()
@@ -137,7 +140,8 @@ struct ChatRepository: ChatRepositoryProtocol {
         messages: [ChatMessage],
         model: String,
         parameters: ModelParameters,
-        tools: [ToolDefinition]?
+        tools: [ToolDefinition]?,
+        integrations: [MCPIntegration]? = nil
     ) async throws -> ChatCompletionResponse {
         LogManager.info("agentCompletion model=\(model) messages=\(messages.count) tools=\(tools?.count ?? 0)")
         let request = ChatCompletionRequest(
@@ -151,7 +155,8 @@ struct ChatRepository: ChatRepositoryProtocol {
             modalities: nil,
             tools: tools,
             toolChoice: tools != nil ? "auto" : nil,
-            thinking: parameters.thinkingEnabled == false ? ThinkingConfig(enabled: false) : nil
+            thinking: parameters.thinkingEnabled == false ? ThinkingConfig(enabled: false) : nil,
+            integrations: integrations
         )
         let response: ChatCompletionResponse = try await apiClient.request(
             endpoint: "chat/completions",
@@ -178,7 +183,8 @@ struct ChatRepository: ChatRepositoryProtocol {
             modalities: nil,
             tools: nil,
             toolChoice: nil,
-            thinking: parameters.thinkingEnabled == false ? ThinkingConfig(enabled: false) : nil
+            thinking: parameters.thinkingEnabled == false ? ThinkingConfig(enabled: false) : nil,
+            integrations: nil
         )
         return try? JSONEncoder().encode(request)
     }

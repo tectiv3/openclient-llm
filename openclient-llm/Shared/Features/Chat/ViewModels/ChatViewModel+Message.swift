@@ -24,6 +24,7 @@ extension ChatViewModel {
         let contextWindowTokens: Int?
         let contextSummary: String?
         let contextSummaryCursorMessageId: UUID?
+        let mcpIntegrations: [MCPIntegration]
     }
 
     func streamWithWebSearch(_ context: SendMessageContext) async {
@@ -68,7 +69,8 @@ extension ChatViewModel {
             loadedState.conversation = Conversation(
                 modelId: model.id,
                 systemPrompt: loadedState.systemPrompt,
-                contextWindowTokens: loadedState.contextWindowTokens
+                contextWindowTokens: loadedState.contextWindowTokens,
+                mcpIntegrations: loadedState.mcpIntegrations
             )
         }
         let userMessage = ChatMessage(role: .user, content: text, attachments: loadedState.pendingAttachments)
@@ -101,6 +103,7 @@ extension ChatViewModel {
         let contextWindowTokens = loadedState.contextWindowTokens
         let contextSummary = loadedState.conversation?.contextSummary
         let contextSummaryCursorMessageId = loadedState.conversation?.contextSummaryCursorMessageId
+        let mcpIntegrations = loadedState.mcpIntegrations
 
         cancelCompaction()
         streamTask?.cancel()
@@ -119,7 +122,8 @@ extension ChatViewModel {
                 selectedModel: model,
                 contextWindowTokens: contextWindowTokens,
                 contextSummary: contextSummary,
-                contextSummaryCursorMessageId: contextSummaryCursorMessageId
+                contextSummaryCursorMessageId: contextSummaryCursorMessageId,
+                mcpIntegrations: mcpIntegrations
             ))
         }
     }

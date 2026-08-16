@@ -16,12 +16,14 @@ extension ChatViewModel {
 
         do {
             let allMessages = try agentRequestMessages(context: context, registry: registry)
+            let activeIntegrations = context.mcpIntegrations.isEmpty ? nil : context.mcpIntegrations
             let stream = agentStreamUseCase.execute(
                 messages: allMessages,
                 model: context.modelId,
                 parameters: parametersCappedToModelOutput(context.parameters, model: context.selectedModel),
                 contextWindowTokens: context.contextWindowTokens ?? context.selectedModel.maxInputTokens,
-                toolRegistry: registry
+                toolRegistry: registry,
+                integrations: activeIntegrations
             )
             streamStartTime = ContinuousClock.now
 

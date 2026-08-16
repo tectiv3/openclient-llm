@@ -42,6 +42,8 @@ final class ChatViewModel {
         case mcpButtonTapped
         case mcpToolsRefreshed
         case mcpToolToggled(toolId: String, enabled: Bool)
+        case mcpIntegrationAdded(MCPIntegration)
+        case mcpIntegrationRemoved(MCPIntegration)
         case toggleFavourite(UUID)
     }
 
@@ -85,6 +87,7 @@ final class ChatViewModel {
         var availableMCPServers: [MCPServerInfo] = []
         var enabledMCPToolIds: Set<String> = []
         var isLoadingMCPTools: Bool = false
+        var mcpIntegrations: [MCPIntegration] = []
     }
 
     var state: State
@@ -259,7 +262,8 @@ final class ChatViewModel {
             handlePhase6Event(event)
         case .webSearchToggled:
             toggleWebSearch()
-        case .mcpButtonTapped, .mcpToolsRefreshed, .mcpToolToggled:
+        case .mcpButtonTapped, .mcpToolsRefreshed, .mcpToolToggled,
+             .mcpIntegrationAdded, .mcpIntegrationRemoved:
             handleMCPEvent(event)
         case .viewDisappeared, .viewAppeared, .conversationLoaded, .inputChanged, .sendTapped, .stopStreamingTapped:
             return
@@ -335,6 +339,7 @@ private extension ChatViewModel {
             : conversation.systemPrompt
         loadedState.modelParameters = conversation.modelParameters
         loadedState.contextWindowTokens = conversation.contextWindowTokens
+        loadedState.mcpIntegrations = conversation.mcpIntegrations
         let selectedModel = loadedState.availableModels.first(where: { $0.id == conversation.modelId })
             ?? loadedState.selectedModel
         loadedState.selectedModel = selectedModel

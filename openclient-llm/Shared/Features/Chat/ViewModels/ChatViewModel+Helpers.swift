@@ -261,6 +261,7 @@ extension ChatViewModel {
         conversation.systemPrompt = loadedState.systemPrompt
         conversation.modelParameters = loadedState.modelParameters
         conversation.contextWindowTokens = loadedState.contextWindowTokens
+        conversation.mcpIntegrations = loadedState.mcpIntegrations
         conversation.updatedAt = Date()
         if let model = loadedState.selectedModel {
             conversation.modelId = model.id

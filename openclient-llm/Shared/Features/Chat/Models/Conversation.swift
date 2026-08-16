@@ -39,6 +39,7 @@ struct Conversation: Identifiable, Equatable, Sendable, Codable {
     var modelParameters: ModelParameters
     var isPinned: Bool
     var tags: [ConversationTag]
+    var mcpIntegrations: [MCPIntegration]
     var parentConversationId: UUID?
     var branchedFromMessageId: UUID?
     let createdAt: Date
@@ -58,6 +59,7 @@ struct Conversation: Identifiable, Equatable, Sendable, Codable {
         modelParameters: ModelParameters = .default,
         isPinned: Bool = false,
         tags: [ConversationTag] = [],
+        mcpIntegrations: [MCPIntegration] = [],
         parentConversationId: UUID? = nil,
         branchedFromMessageId: UUID? = nil,
         createdAt: Date = Date(),
@@ -74,6 +76,7 @@ struct Conversation: Identifiable, Equatable, Sendable, Codable {
         self.modelParameters = modelParameters
         self.isPinned = isPinned
         self.tags = tags
+        self.mcpIntegrations = mcpIntegrations
         self.parentConversationId = parentConversationId
         self.branchedFromMessageId = branchedFromMessageId
         self.createdAt = createdAt
@@ -92,6 +95,7 @@ struct Conversation: Identifiable, Equatable, Sendable, Codable {
         messages = try container.decode([ChatMessage].self, forKey: .messages)
         modelParameters = try container.decodeIfPresent(ModelParameters.self, forKey: .modelParameters) ?? .default
         isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+        mcpIntegrations = try container.decodeIfPresent([MCPIntegration].self, forKey: .mcpIntegrations) ?? []
         let tagNames = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
         let tagColors = try container.decodeIfPresent([String: TagColor].self, forKey: .tagColors) ?? [:]
         tags = tagNames.map { ConversationTag(name: $0, color: tagColors[$0] ?? .orange) }
@@ -113,6 +117,9 @@ struct Conversation: Identifiable, Equatable, Sendable, Codable {
         try container.encode(messages, forKey: .messages)
         try container.encode(modelParameters, forKey: .modelParameters)
         try container.encode(isPinned, forKey: .isPinned)
+        if !mcpIntegrations.isEmpty {
+            try container.encode(mcpIntegrations, forKey: .mcpIntegrations)
+        }
         try container.encode(tags.map(\.name), forKey: .tags)
         let tagColors = tags.reduce(into: [String: TagColor]()) { colors, tag in
             colors[tag.name] = tag.color
@@ -172,6 +179,7 @@ private extension Conversation {
         case messages
         case modelParameters
         case isPinned
+        case mcpIntegrations
         case tags
         case tagColors
         case parentConversationId

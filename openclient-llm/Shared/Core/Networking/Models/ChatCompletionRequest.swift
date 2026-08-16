@@ -38,6 +38,7 @@ nonisolated struct ChatCompletionRequest: Encodable, Sendable {
     let tools: [ToolDefinition]?
     let toolChoice: String?
     let thinking: ThinkingConfig?
+    let integrations: [MCPIntegration]?
 
     enum CodingKeys: String, CodingKey {
         case model
@@ -51,6 +52,7 @@ nonisolated struct ChatCompletionRequest: Encodable, Sendable {
         case tools
         case toolChoice = "tool_choice"
         case thinking
+        case integrations
     }
 
     func encode(to encoder: Encoder) throws {
@@ -66,6 +68,7 @@ nonisolated struct ChatCompletionRequest: Encodable, Sendable {
         try container.encodeIfPresent(tools, forKey: .tools)
         try container.encodeIfPresent(toolChoice, forKey: .toolChoice)
         try container.encodeIfPresent(thinking, forKey: .thinking)
+        try container.encodeIfPresent(integrations, forKey: .integrations)
     }
 }
 

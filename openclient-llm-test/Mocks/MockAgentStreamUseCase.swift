@@ -25,7 +25,8 @@ final class MockAgentStreamUseCase: AgentStreamUseCaseProtocol, @unchecked Senda
         model: String,
         parameters: ModelParameters,
         contextWindowTokens: Int?,
-        toolRegistry: ToolRegistry
+        toolRegistry: ToolRegistry,
+        integrations: [MCPIntegration]?
     ) -> AsyncThrowingStream<AgentEvent, Error> {
         receivedToolNames = toolRegistry.definitions.map(\.function.name)
         onExecute?()

@@ -57,7 +57,8 @@ protocol AgentStreamUseCaseProtocol: Sendable {
         model: String,
         parameters: ModelParameters,
         contextWindowTokens: Int?,
-        toolRegistry: ToolRegistry
+        toolRegistry: ToolRegistry,
+        integrations: [MCPIntegration]?
     ) -> AsyncThrowingStream<AgentEvent, Error>
 }
 
@@ -87,7 +88,8 @@ struct AgentStreamUseCase: AgentStreamUseCaseProtocol {
         model: String,
         parameters: ModelParameters,
         contextWindowTokens: Int? = nil,
-        toolRegistry: ToolRegistry
+        toolRegistry: ToolRegistry,
+        integrations: [MCPIntegration]? = nil
     ) -> AsyncThrowingStream<AgentEvent, Error> {
         AsyncThrowingStream { continuation in
             let context = AgentLoopContext(
@@ -95,6 +97,7 @@ struct AgentStreamUseCase: AgentStreamUseCaseProtocol {
                 parameters: parameters,
                 contextWindowTokens: contextWindowTokens,
                 toolRegistry: toolRegistry,
+                integrations: integrations,
                 continuation: continuation
             )
             let task = Task {
@@ -126,6 +129,7 @@ private nonisolated struct AgentLoopContext: Sendable {
     let parameters: ModelParameters
     let contextWindowTokens: Int?
     let toolRegistry: ToolRegistry
+    let integrations: [MCPIntegration]?
     let continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
 }
 
@@ -186,7 +190,8 @@ private extension AgentStreamUseCase {
             messages: messages,
             model: context.model,
             parameters: context.parameters,
-            tools: tools.isEmpty ? nil : tools
+            tools: tools.isEmpty ? nil : tools,
+            integrations: context.integrations
         )
     }
 

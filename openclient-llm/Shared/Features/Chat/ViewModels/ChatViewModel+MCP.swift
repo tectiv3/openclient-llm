@@ -55,7 +55,8 @@ extension ChatViewModel {
             enabledMCPToolIds: enabledMCPToolIds(
                 savedIds: settingsManager.getEnabledMCPToolIds(),
                 tools: mcpTools
-            )
+            ),
+            mcpIntegrations: pending?.mcpIntegrations ?? []
         )
         refreshContextUsage(in: &loadedState)
         return loadedState
@@ -68,9 +69,28 @@ extension ChatViewModel {
             refreshMCPTools()
         case .mcpToolToggled(let toolId, let enabled):
             toggleMCPTool(toolId: toolId, enabled: enabled)
+        case .mcpIntegrationAdded(let integration):
+            addMCPIntegration(integration)
+        case .mcpIntegrationRemoved(let integration):
+            removeMCPIntegration(integration)
         default:
             break
         }
+    }
+
+    func addMCPIntegration(_ integration: MCPIntegration) {
+        guard case .loaded(var loadedState) = state else { return }
+        guard !loadedState.mcpIntegrations.contains(integration) else { return }
+        loadedState.mcpIntegrations.append(integration)
+        state = .loaded(loadedState)
+        persistConversation()
+    }
+
+    func removeMCPIntegration(_ integration: MCPIntegration) {
+        guard case .loaded(var loadedState) = state else { return }
+        loadedState.mcpIntegrations.removeAll { $0 == integration }
+        state = .loaded(loadedState)
+        persistConversation()
     }
 
     func refreshMCPTools() {
