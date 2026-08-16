@@ -30,6 +30,7 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
     var hasEnoughConversationsForMemoryTip: Bool = false
     var enabledMCPToolIds: [String] = []
     var defaultSystemPrompt: String = ""
+    var serverType: ServerType = .liteLLM
     var capabilityOverrides: [String: [String]] = [:]
     var deleteAllCalled: Bool = false
 
@@ -169,6 +170,14 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
 
     func setDefaultSystemPrompt(_ value: String) {
         defaultSystemPrompt = value
+    }
+
+    func getServerType() -> ServerType {
+        serverType
+    }
+
+    func setServerType(_ value: ServerType) {
+        serverType = value
     }
 
     func getCapabilityOverrides(forModelId modelId: String) -> [String]? {

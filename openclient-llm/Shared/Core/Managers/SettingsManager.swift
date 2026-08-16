@@ -43,6 +43,8 @@ protocol SettingsManagerProtocol: Sendable {
     func setEnabledMCPToolIds(_ ids: [String])
     func getDefaultSystemPrompt() -> String
     func setDefaultSystemPrompt(_ value: String)
+    func getServerType() -> ServerType
+    func setServerType(_ value: ServerType)
     func getCapabilityOverrides(forModelId modelId: String) -> [String]?
     func setCapabilityOverrides(_ capabilities: [String]?, forModelId modelId: String)
     func deleteAll()
@@ -68,6 +70,7 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         static let hasEnoughConversationsForMemoryTip = "hasEnoughConversationsForMemoryTip"
         static let enabledMCPToolIds = "enabledMCPToolIds"
         static let defaultSystemPrompt = "defaultSystemPrompt"
+        static let serverType = "serverType"
         static let capabilityOverrides = "capabilityOverrides"
 
         static func ttsVoiceKey(forModelId modelId: String) -> String {
@@ -240,6 +243,18 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.set(value, forKey: Keys.defaultSystemPrompt)
     }
 
+    func getServerType() -> ServerType {
+        guard let raw = defaults.string(forKey: Keys.serverType),
+              let type = ServerType(rawValue: raw) else {
+            return .liteLLM
+        }
+        return type
+    }
+
+    func setServerType(_ value: ServerType) {
+        defaults.set(value.rawValue, forKey: Keys.serverType)
+    }
+
     func getCapabilityOverrides(forModelId modelId: String) -> [String]? {
         guard let data = defaults.data(forKey: Keys.capabilityOverrides),
               let dict = try? JSONDecoder().decode([String: [String]].self, from: data) else {
@@ -275,6 +290,7 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.removeObject(forKey: Keys.hasEnoughConversationsForMemoryTip)
         defaults.removeObject(forKey: Keys.enabledMCPToolIds)
         defaults.removeObject(forKey: Keys.defaultSystemPrompt)
+        defaults.removeObject(forKey: Keys.serverType)
         defaults.removeObject(forKey: Keys.capabilityOverrides)
         defaults.removeObject(forKey: LegacyKeys.serverBaseURL)
         defaults.removeObject(forKey: LegacyKeys.apiKey)

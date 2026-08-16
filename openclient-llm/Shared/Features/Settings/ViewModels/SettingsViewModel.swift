@@ -32,6 +32,7 @@ final class SettingsViewModel {
         case notificationStatusRefresh
         case privacyScreenToggled(Bool)
         case defaultSystemPromptChanged(String)
+        case serverTypeChanged(ServerType)
         case fetchMCPToolsTapped
         case mcpToolToggled(toolId: String, enabled: Bool)
     }
@@ -55,6 +56,7 @@ final class SettingsViewModel {
         var availableSearchTools: [SearchToolItem] = []
         var isLoadingSearchTools: Bool = false
         var searchToolsError: String?
+        var serverType: ServerType = .liteLLM
         var showLiteLLMHint: Bool = false
         var notificationPermissionStatus: NotificationPermissionStatus = .notDetermined
         var isPrivacyScreenEnabled: Bool = true
@@ -137,7 +139,7 @@ final class SettingsViewModel {
             saveSettings()
         case .cloudSyncToggled, .cloudSyncConflictResolved, .cloudSyncConflictCancelled, .syncConversationsTapped:
             handleCloudSyncEvent(event)
-        case .showTokenUsageToggled, .privacyScreenToggled, .defaultSystemPromptChanged:
+        case .showTokenUsageToggled, .privacyScreenToggled, .defaultSystemPromptChanged, .serverTypeChanged:
             handlePreferenceToggleEvent(event)
         case .webSearchToolNameChanged, .webSearchMaxResultsChanged, .fetchSearchToolsTapped,
              .fetchMCPToolsTapped, .mcpToolToggled:
@@ -163,6 +165,7 @@ private extension SettingsViewModel {
         let loadedState = LoadedState(
             serverURL: getServerBaseURL,
             apiKey: settingsManager.getAPIKey(),
+            serverType: settingsManager.getServerType(),
             isCloudSyncEnabled: settingsManager.getIsCloudSyncEnabled(),
             isCloudAvailable: cloudSyncManager.isCloudAvailable(),
             showTokenUsage: settingsManager.getShowTokenUsage(),
@@ -175,13 +178,15 @@ private extension SettingsViewModel {
         )
         state = .loaded(loadedState)
         let serverURL = loadedState.serverURL
-        if !serverURL.isEmpty {
+        if !serverURL.isEmpty, loadedState.serverType == .liteLLM {
             Task {
                 await updateLiteLLMHint(serverURL: serverURL)
             }
         }
         refreshNotificationStatus()
-        fetchMCPTools()
+        if loadedState.serverType == .liteLLM {
+            fetchMCPTools()
+        }
     }
 
     func updateServerURL(_ url: String) {
@@ -221,7 +226,9 @@ private extension SettingsViewModel {
                 state = .loaded(currentState)
                 LogManager.error("testConnection failed url=\(serverURL): \(error)")
             }
-            await updateLiteLLMHint(serverURL: serverURL)
+            if case .loaded(let currentState) = state, currentState.serverType == .liteLLM {
+                await updateLiteLLMHint(serverURL: serverURL)
+            }
         }
     }
 
@@ -234,8 +241,10 @@ private extension SettingsViewModel {
         loadedState.isSaved = true
         state = .loaded(loadedState)
         LogManager.success("saveSettings done")
-        Task {
-            await updateLiteLLMHint(serverURL: serverURL)
+        if loadedState.serverType == .liteLLM {
+            Task {
+                await updateLiteLLMHint(serverURL: serverURL)
+            }
         }
     }
 
@@ -312,6 +321,8 @@ private extension SettingsViewModel {
 #endif
         case .defaultSystemPromptChanged(let prompt):
             updateDefaultSystemPrompt(prompt)
+        case .serverTypeChanged(let type):
+            updateServerType(type)
         default:
             break
         }
@@ -325,6 +336,17 @@ private extension SettingsViewModel {
         state = .loaded(loadedState)
     }
 #endif
+
+    func updateServerType(_ type: ServerType) {
+        guard case .loaded(var loadedState) = state else { return }
+        settingsManager.setServerType(type)
+        loadedState.serverType = type
+        loadedState.showLiteLLMHint = false
+        state = .loaded(loadedState)
+        if type == .liteLLM {
+            Task { await updateLiteLLMHint(serverURL: loadedState.serverURL) }
+        }
+    }
 
     func updateDefaultSystemPrompt(_ prompt: String) {
         guard case .loaded(var loadedState) = state else { return }

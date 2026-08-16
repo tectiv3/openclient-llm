@@ -11,6 +11,7 @@ import Foundation
 protocol ModelsRepositoryProtocol: Sendable {
     func fetchModels() async throws -> [LLMModel]
     func fetchModelInfo() async throws -> [LLMModel]
+    func fetchLMStudioModels() async throws -> [LLMModel]
     func fetchOllamaModelDetails(for modelId: String, rootURL: String) async -> OllamaShowResponse?
 }
 
@@ -90,6 +91,31 @@ struct ModelsRepository: ModelsRepositoryProtocol {
         return result
     }
 
+    func fetchLMStudioModels() async throws -> [LLMModel] {
+        LogManager.info("fetchLMStudioModels")
+        let response: LMStudioModelsResponse = try await apiClient.request(
+            endpoint: "/api/v1/models",
+            method: .get,
+            body: nil
+        )
+
+        let models = response.models.compactMap { model -> LLMModel? in
+            guard model.type == "llm" else { return nil }
+            return LLMModel(
+                id: model.key,
+                capabilities: Self.capabilitiesFromLMStudio(model.capabilities),
+                provider: .local,
+                mode: .chat,
+                providerName: "LM Studio",
+                maxInputTokens: model.maxContextLength
+            )
+        }
+        .sorted { $0.id.localizedCaseInsensitiveCompare($1.id) == .orderedAscending }
+
+        LogManager.success("fetchLMStudioModels returned \(models.count) models")
+        return models
+    }
+
     func fetchOllamaModelDetails(for modelId: String, rootURL: String) async -> OllamaShowResponse? {
         guard let url = URL(string: rootURL)?.appendingPathComponent("api/show") else { return nil }
 
@@ -131,6 +157,17 @@ private struct OllamaSupplementItem {
 }
 
 private extension ModelsRepository {
+    nonisolated static func capabilitiesFromLMStudio(
+        _ capabilities: LMStudioModel.Capabilities?
+    ) -> [LLMModel.Capability] {
+        guard let capabilities else { return [] }
+        var caps: [LLMModel.Capability] = []
+        if capabilities.vision == true { caps.append(.vision) }
+        if capabilities.trainedForToolUse == true { caps.append(.functionCalling) }
+        if capabilities.reasoning != nil { caps.append(.thinking) }
+        return caps
+    }
+
     nonisolated static func capabilitiesFromModelInfo(
         _ modelInfo: ModelInfoResponse.ModelInfo?,
         includeFunctionCalling: Bool

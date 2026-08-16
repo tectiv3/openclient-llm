@@ -31,6 +31,13 @@ struct FetchModelsUseCase: FetchModelsUseCaseProtocol {
     // MARK: - Execute
 
     func execute() async throws -> [LLMModel] {
+        let serverType = settingsManager.getServerType()
+
+        if serverType == .lmStudio {
+            let models = try await repository.fetchLMStudioModels()
+            return applyCapabilityOverrides(models)
+        }
+
         var models = try await repository.fetchModels()
 
         if let modelInfoList = try? await repository.fetchModelInfo(), !modelInfoList.isEmpty {

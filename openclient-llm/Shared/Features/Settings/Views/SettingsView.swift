@@ -180,7 +180,9 @@ private extension SettingsView {
                 personalizationSection()
                 chatSection(loadedState)
                 webSearchSection(loadedState)
-                mcpSection(loadedState)
+                if loadedState.serverType == .liteLLM {
+                    mcpSection(loadedState)
+                }
                 supportSection()
                 legalSection()
                 dangerSection()
@@ -203,6 +205,7 @@ private extension SettingsView {
         Section {
             serverURLField()
             apiKeyField()
+            serverTypePicker(loadedState)
             connectionStatusView(loadedState.connectionStatus)
             Button {
                 focusedField = nil
@@ -241,7 +244,7 @@ private extension SettingsView {
         } header: {
             Text(String(localized: "Server"))
         } footer: {
-            if loadedState.showLiteLLMHint {
+            if loadedState.serverType == .liteLLM, loadedState.showLiteLLMHint {
                 Label(liteLLMHintText, systemImage: "info.circle").foregroundStyle(.secondary)
             }
         }
@@ -299,6 +302,19 @@ private extension SettingsView {
         }
         .onChange(of: apiKey) { _, newValue in
             viewModel.send(.apiKeyChanged(newValue))
+        }
+    }
+
+    func serverTypePicker(_ loadedState: SettingsViewModel.LoadedState) -> some View {
+        Picker(selection: Binding(
+            get: { loadedState.serverType },
+            set: { viewModel.send(.serverTypeChanged($0)) }
+        )) {
+            ForEach(ServerType.allCases, id: \.self) { type in
+                Text(type.displayName).tag(type)
+            }
+        } label: {
+            Label(String(localized: "Server Type"), systemImage: "server.rack")
         }
     }
 

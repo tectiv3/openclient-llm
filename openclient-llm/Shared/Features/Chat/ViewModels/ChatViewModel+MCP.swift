@@ -49,7 +49,7 @@ extension ChatViewModel {
             transcriptionModelId: audioModelIDs.transcriptionModelId,
             isWebSearchEnabled: getChatPreferencesUseCase.getIsWebSearchEnabled(),
             isWebSearchToolConfigured: !getChatPreferencesUseCase.getWebSearchToolName().isEmpty,
-            isMCPSupported: !mcpTools.isEmpty,
+            isMCPSupported: settingsManager.getServerType() == .lmStudio || !mcpTools.isEmpty,
             availableMCPTools: mcpTools,
             availableMCPServers: mcpServers,
             enabledMCPToolIds: enabledMCPToolIds(
@@ -95,6 +95,7 @@ extension ChatViewModel {
 
     func refreshMCPTools() {
         guard case .loaded(let loadedState) = state, !loadedState.isLoadingMCPTools else { return }
+        if settingsManager.getServerType() == .lmStudio { return }
         var update = loadedState
         update.isLoadingMCPTools = true
         state = .loaded(update)
