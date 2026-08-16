@@ -35,6 +35,8 @@ final class SettingsViewModel {
         case serverTypeChanged(ServerType)
         case fetchMCPToolsTapped
         case mcpToolToggled(toolId: String, enabled: Bool)
+        case globalIntegrationAdded(MCPIntegration)
+        case globalIntegrationRemoved(MCPIntegration)
     }
 
     enum State: Equatable {
@@ -62,6 +64,7 @@ final class SettingsViewModel {
         var isPrivacyScreenEnabled: Bool = true
         var defaultSystemPrompt: String = ""
         var conversationSyncResult: ConversationSyncResult?
+        var globalMCPIntegrations: [MCPIntegration] = []
         var availableMCPTools: [MCPToolInfo] = []
         var availableMCPServers: [MCPServerInfo] = []
         var enabledMCPToolIds: Set<String> = []
@@ -142,7 +145,8 @@ final class SettingsViewModel {
         case .showTokenUsageToggled, .privacyScreenToggled, .defaultSystemPromptChanged, .serverTypeChanged:
             handlePreferenceToggleEvent(event)
         case .webSearchToolNameChanged, .webSearchMaxResultsChanged, .fetchSearchToolsTapped,
-             .fetchMCPToolsTapped, .mcpToolToggled:
+             .fetchMCPToolsTapped, .mcpToolToggled,
+             .globalIntegrationAdded, .globalIntegrationRemoved:
             handleServerDiscoveryEvent(event)
         case .resetConfirmed:
             resetApp()
@@ -165,15 +169,16 @@ private extension SettingsViewModel {
         let loadedState = LoadedState(
             serverURL: getServerBaseURL,
             apiKey: settingsManager.getAPIKey(),
-            serverType: settingsManager.getServerType(),
             isCloudSyncEnabled: settingsManager.getIsCloudSyncEnabled(),
             isCloudAvailable: cloudSyncManager.isCloudAvailable(),
             showTokenUsage: settingsManager.getShowTokenUsage(),
             webSearchToolName: settingsManager.getWebSearchToolName(),
             webSearchMaxResults: settingsManager.getWebSearchMaxResults(),
             availableSearchTools: settingsManager.getAvailableSearchTools(),
+            serverType: settingsManager.getServerType(),
             isPrivacyScreenEnabled: settingsManager.getIsPrivacyScreenEnabled(),
             defaultSystemPrompt: settingsManager.getDefaultSystemPrompt(),
+            globalMCPIntegrations: settingsManager.getGlobalMCPIntegrations(),
             enabledMCPToolIds: Set(settingsManager.getEnabledMCPToolIds())
         )
         state = .loaded(loadedState)
@@ -478,6 +483,10 @@ private extension SettingsViewModel {
             fetchMCPTools()
         case .mcpToolToggled(let toolId, let enabled):
             toggleMCPTool(toolId: toolId, enabled: enabled)
+        case .globalIntegrationAdded(let integration):
+            addGlobalIntegration(integration)
+        case .globalIntegrationRemoved(let integration):
+            removeGlobalIntegration(integration)
         default:
             break
         }
@@ -525,6 +534,21 @@ private extension SettingsViewModel {
         settingsManager.setEnabledMCPToolIds(Array(loadedState.enabledMCPToolIds))
         state = .loaded(loadedState)
     }
+    func addGlobalIntegration(_ integration: MCPIntegration) {
+        guard case .loaded(var loadedState) = state else { return }
+        guard !loadedState.globalMCPIntegrations.contains(integration) else { return }
+        loadedState.globalMCPIntegrations.append(integration)
+        settingsManager.setGlobalMCPIntegrations(loadedState.globalMCPIntegrations)
+        state = .loaded(loadedState)
+    }
+
+    func removeGlobalIntegration(_ integration: MCPIntegration) {
+        guard case .loaded(var loadedState) = state else { return }
+        loadedState.globalMCPIntegrations.removeAll { $0 == integration }
+        settingsManager.setGlobalMCPIntegrations(loadedState.globalMCPIntegrations)
+        state = .loaded(loadedState)
+    }
+
     func enabledMCPToolIds(savedIds: [String], tools: [MCPToolInfo]) -> Set<String> {
         let currentIds = Set(tools.map(\.id))
         let legacyIds = Dictionary(uniqueKeysWithValues: tools.map { ($0.prefixedName, $0.id) })

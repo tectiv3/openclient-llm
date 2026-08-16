@@ -223,6 +223,53 @@ extension SettingsView {
     }
 }
 
+// MARK: - Global Integrations (LM Studio)
+
+extension SettingsView {
+    func globalIntegrationsSection(_ loadedState: SettingsViewModel.LoadedState) -> some View {
+        Section {
+            if loadedState.globalMCPIntegrations.isEmpty {
+                Label(
+                    String(localized: "No integrations configured."),
+                    systemImage: "puzzlepiece.extension"
+                )
+                .foregroundStyle(.secondary)
+                .font(.subheadline)
+            } else {
+                ForEach(loadedState.globalMCPIntegrations, id: \.self) { integration in
+                    globalIntegrationRow(integration)
+                }
+                .onDelete { indexSet in
+                    let integrations = loadedState.globalMCPIntegrations
+                    for index in indexSet {
+                        viewModel.send(.globalIntegrationRemoved(integrations[index]))
+                    }
+                }
+            }
+            Button {
+                isAddingGlobalIntegration = true
+            } label: {
+                Label(String(localized: "Add Integration"), systemImage: "plus")
+            }
+        } header: {
+            Text(String(localized: "MCP Integrations"))
+        } footer: {
+            Text(String(localized: """
+                Register MCP servers in LM Studio's mcp.json first, \
+                then add them here. They will be available in all chats.
+                """))
+        }
+    }
+
+    func globalIntegrationRow(_ integration: MCPIntegration) -> some View {
+        HStack {
+            Image(systemName: "puzzlepiece.extension")
+                .foregroundStyle(Color.appAccent)
+            Text(integration.displayName)
+        }
+    }
+}
+
 extension SettingsViewModel.LoadedState {
     func toolsForServer(_ serverId: String) -> [MCPToolInfo] {
         availableMCPTools.filter { $0.serverId == serverId }

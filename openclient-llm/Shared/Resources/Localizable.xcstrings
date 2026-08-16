@@ -13071,6 +13071,9 @@
       "comment" : "A label for the maximum number of input tokens for a model.",
       "shouldTranslate" : false
     },
+    "Integrations" : {
+
+    },
     "Invalid API key. Please check your credentials." : {
       "localizations" : {
         "de" : {
@@ -13720,6 +13723,12 @@
           }
         }
       }
+    },
+    "LiteLLM" : {
+
+    },
+    "LM Studio" : {
+
     },
     "LM Studio Integrations" : {
 
@@ -14501,6 +14510,9 @@
           }
         }
       }
+    },
+    "MCP Integrations" : {
+
     },
     "MCP Servers" : {
       "comment" : "A button that dismisses the MCP Tools sheet.",
@@ -16645,6 +16657,12 @@
       }
     },
     "No integrations configured for this conversation." : {
+
+    },
+    "No integrations configured." : {
+
+    },
+    "No integrations configured. Add them in Settings." : {
 
     },
     "No internet connection. Please check your network." : {
@@ -21465,6 +21483,9 @@
         }
       }
     },
+    "Register MCP servers in LM Studio's mcp.json first, then add them here. They will be available in all chats." : {
+
+    },
     "Rejected" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -23857,6 +23878,9 @@
           }
         }
       }
+    },
+    "Server Type" : {
+
     },
     "Server URL" : {
       "localizations" : {
@@ -30785,6 +30809,9 @@
           }
         }
       }
+    },
+    "Toggle integrations for this conversation. Manage the list in Settings." : {
+
     },
     "Too many requests. Please try again later." : {
       "localizations" : {

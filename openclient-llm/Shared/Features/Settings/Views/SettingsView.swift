@@ -28,6 +28,8 @@ struct SettingsView: View {
     @State var isShowingTipJar = false
     @State private var showResetAlert = false
     @State var mcpServerSheet: MCPServerInfo?
+    @State var isAddingGlobalIntegration = false
+    @State private var newGlobalIntegrationId = ""
     @State var presentedWebURL: WebDestination?
     @State private var canShowMemoryTip = false
     @State private var shouldRequestReviewAfterSync = false
@@ -131,6 +133,21 @@ private extension SettingsView {
                 localized: "All local settings and credentials will be deleted. iCloud data will not be affected."
             ))
         }
+        .alert(String(localized: "Add Integration"), isPresented: $isAddingGlobalIntegration) {
+            TextField(String(localized: "mcp/server-name"), text: $newGlobalIntegrationId)
+                .autocorrectionDisabled()
+            Button(String(localized: "Add")) {
+                let id = newGlobalIntegrationId.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !id.isEmpty else { return }
+                viewModel.send(.globalIntegrationAdded(.plugin(id: id)))
+                newGlobalIntegrationId = ""
+            }
+            Button(String(localized: "Cancel"), role: .cancel) {
+                newGlobalIntegrationId = ""
+            }
+        } message: {
+            Text(String(localized: "Enter the MCP plugin ID as configured in your LM Studio mcp.json."))
+        }
         .task {
             viewModel.send(.viewAppeared)
             if case .loaded(let initialState) = viewModel.state {
@@ -182,6 +199,8 @@ private extension SettingsView {
                 webSearchSection(loadedState)
                 if loadedState.serverType == .liteLLM {
                     mcpSection(loadedState)
+                } else {
+                    globalIntegrationsSection(loadedState)
                 }
                 supportSection()
                 legalSection()

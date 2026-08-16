@@ -24,25 +24,33 @@ struct MCPToolsSheet: View {
 }
 
 private extension MCPToolsSheet {
+    var isLMStudioMode: Bool {
+        viewModel.settingsManager.getServerType() == .lmStudio
+    }
+
     func loadedContent(_ loadedState: ChatViewModel.LoadedState) -> some View {
         NavigationStack {
             List {
-                integrationsSection(loadedState)
-                if loadedState.isLoadingMCPTools {
-                    Section {
-                        HStack {
-                            Spacer()
-                            VStack {
-                                ProgressView().tint(.secondary)
-                                Text(String(localized: "Loading tools..."))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.top, 8)
+                if isLMStudioMode {
+                    globalIntegrationsToggleSection(loadedState)
+                } else {
+                    integrationsSection(loadedState)
+                    if loadedState.isLoadingMCPTools {
+                        Section {
+                            HStack {
+                                Spacer()
+                                VStack {
+                                    ProgressView().tint(.secondary)
+                                    Text(String(localized: "Loading tools..."))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.top, 8)
+                                }
+                                Spacer()
                             }
-                            Spacer()
                         }
+                    } else if !loadedState.availableMCPServers.isEmpty {
+                        discoveredServersSection(loadedState)
                     }
-                } else if !loadedState.availableMCPServers.isEmpty {
-                    discoveredServersSection(loadedState)
                 }
             }
             .navigationTitle(String(localized: "MCP Servers"))
@@ -50,7 +58,7 @@ private extension MCPToolsSheet {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar { doneToolbar }
-            .toolbar { refreshToolbar(loadedState: loadedState) }
+            .toolbar { refreshToolbar(loadedState: isLMStudioMode ? nil : loadedState) }
             .alert(String(localized: "Add Integration"), isPresented: $isAddingIntegration) {
                 TextField(String(localized: "mcp/server-name"), text: $newIntegrationId)
                     .autocorrectionDisabled()
@@ -68,6 +76,48 @@ private extension MCPToolsSheet {
             }
         }
     }
+
+    // MARK: - LM Studio: Toggle global integrations per-chat
+
+    func globalIntegrationsToggleSection(_ loadedState: ChatViewModel.LoadedState) -> some View {
+        let globalIntegrations = viewModel.settingsManager.getGlobalMCPIntegrations()
+        return Section {
+            if globalIntegrations.isEmpty {
+                Label(
+                    String(localized: "No integrations configured. Add them in Settings."),
+                    systemImage: "puzzlepiece.extension"
+                )
+                .foregroundStyle(.secondary)
+                .font(.subheadline)
+            } else {
+                ForEach(globalIntegrations, id: \.self) { integration in
+                    let isEnabled = loadedState.mcpIntegrations.contains(integration)
+                    Toggle(isOn: Binding(
+                        get: { isEnabled },
+                        set: { enabled in
+                            if enabled {
+                                viewModel.send(.mcpIntegrationAdded(integration))
+                            } else {
+                                viewModel.send(.mcpIntegrationRemoved(integration))
+                            }
+                        }
+                    )) {
+                        HStack {
+                            Image(systemName: "puzzlepiece.extension")
+                                .foregroundStyle(Color.appAccent)
+                            Text(integration.displayName)
+                        }
+                    }
+                }
+            }
+        } header: {
+            Text(String(localized: "Integrations"))
+        } footer: {
+            Text(String(localized: "Toggle integrations for this conversation. Manage the list in Settings."))
+        }
+    }
+
+    // MARK: - LiteLLM: Per-chat integration management
 
     func integrationsSection(_ loadedState: ChatViewModel.LoadedState) -> some View {
         Section {
@@ -149,7 +199,7 @@ private extension MCPToolsSheet {
     ) -> some View {
         let enabled = tools.filter { loadedState.enabledMCPToolIds.contains($0.id) }.count
         return HStack {
-            Image(systemName: enabled > 0 ? "server.rack" : "server.rack")
+            Image(systemName: "server.rack")
                 .foregroundStyle(enabled > 0 ? Color.appAccent : .secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.serverName)
@@ -247,19 +297,21 @@ private extension MCPToolsSheet {
     func refreshToolbar(loadedState: ChatViewModel.LoadedState?) -> some ToolbarContent {
         let isLoading = loadedState?.isLoadingMCPTools ?? false
         ToolbarItem(placement: .cancellationAction) {
-            Button {
-                viewModel.send(.mcpToolsRefreshed)
-            } label: {
-                if isLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(.secondary)
-                } else {
-                    Image(systemName: "arrow.clockwise")
+            if loadedState != nil {
+                Button {
+                    viewModel.send(.mcpToolsRefreshed)
+                } label: {
+                    if isLoading {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.secondary)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
                 }
+                .disabled(isLoading)
+                .accessibilityLabel(String(localized: "Refresh"))
             }
-            .disabled(isLoading)
-            .accessibilityLabel(String(localized: "Refresh"))
         }
     }
 }

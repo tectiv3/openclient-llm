@@ -45,6 +45,8 @@ protocol SettingsManagerProtocol: Sendable {
     func setDefaultSystemPrompt(_ value: String)
     func getServerType() -> ServerType
     func setServerType(_ value: ServerType)
+    func getGlobalMCPIntegrations() -> [MCPIntegration]
+    func setGlobalMCPIntegrations(_ integrations: [MCPIntegration])
     func getCapabilityOverrides(forModelId modelId: String) -> [String]?
     func setCapabilityOverrides(_ capabilities: [String]?, forModelId modelId: String)
     func deleteAll()
@@ -71,6 +73,7 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         static let enabledMCPToolIds = "enabledMCPToolIds"
         static let defaultSystemPrompt = "defaultSystemPrompt"
         static let serverType = "serverType"
+        static let globalMCPIntegrations = "globalMCPIntegrations"
         static let capabilityOverrides = "capabilityOverrides"
 
         static func ttsVoiceKey(forModelId modelId: String) -> String {
@@ -255,6 +258,19 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.set(value.rawValue, forKey: Keys.serverType)
     }
 
+    func getGlobalMCPIntegrations() -> [MCPIntegration] {
+        guard let data = defaults.data(forKey: Keys.globalMCPIntegrations),
+              let integrations = try? JSONDecoder().decode([MCPIntegration].self, from: data) else {
+            return []
+        }
+        return integrations
+    }
+
+    func setGlobalMCPIntegrations(_ integrations: [MCPIntegration]) {
+        guard let data = try? JSONEncoder().encode(integrations) else { return }
+        defaults.set(data, forKey: Keys.globalMCPIntegrations)
+    }
+
     func getCapabilityOverrides(forModelId modelId: String) -> [String]? {
         guard let data = defaults.data(forKey: Keys.capabilityOverrides),
               let dict = try? JSONDecoder().decode([String: [String]].self, from: data) else {
@@ -291,6 +307,7 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.removeObject(forKey: Keys.enabledMCPToolIds)
         defaults.removeObject(forKey: Keys.defaultSystemPrompt)
         defaults.removeObject(forKey: Keys.serverType)
+        defaults.removeObject(forKey: Keys.globalMCPIntegrations)
         defaults.removeObject(forKey: Keys.capabilityOverrides)
         defaults.removeObject(forKey: LegacyKeys.serverBaseURL)
         defaults.removeObject(forKey: LegacyKeys.apiKey)

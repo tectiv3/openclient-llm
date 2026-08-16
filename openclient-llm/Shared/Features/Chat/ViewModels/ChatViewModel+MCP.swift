@@ -56,7 +56,10 @@ extension ChatViewModel {
                 savedIds: settingsManager.getEnabledMCPToolIds(),
                 tools: mcpTools
             ),
-            mcpIntegrations: pending?.mcpIntegrations ?? []
+            mcpIntegrations: pending?.mcpIntegrations
+                ?? (settingsManager.getServerType() == .lmStudio
+                    ? settingsManager.getGlobalMCPIntegrations()
+                    : [])
         )
         refreshContextUsage(in: &loadedState)
         return loadedState

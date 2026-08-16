@@ -31,6 +31,7 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
     var enabledMCPToolIds: [String] = []
     var defaultSystemPrompt: String = ""
     var serverType: ServerType = .liteLLM
+    var globalMCPIntegrations: [MCPIntegration] = []
     var capabilityOverrides: [String: [String]] = [:]
     var deleteAllCalled: Bool = false
 
@@ -178,6 +179,14 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
 
     func setServerType(_ value: ServerType) {
         serverType = value
+    }
+
+    func getGlobalMCPIntegrations() -> [MCPIntegration] {
+        globalMCPIntegrations
+    }
+
+    func setGlobalMCPIntegrations(_ integrations: [MCPIntegration]) {
+        globalMCPIntegrations = integrations
     }
 
     func getCapabilityOverrides(forModelId modelId: String) -> [String]? {
