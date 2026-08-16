@@ -13,8 +13,11 @@ import Foundation
 extension ChatViewModel {
     func performLMStudioChat(_ context: SendMessageContext) async {
         do {
+            let input = context.text.isEmpty
+                ? context.messages.last(where: { $0.role == .user })?.content ?? ""
+                : context.text
             let response = try await lmStudioChatUseCase.execute(
-                input: context.text,
+                input: input,
                 model: context.modelId,
                 systemPrompt: context.systemPrompt,
                 parameters: parametersCappedToModelOutput(context.parameters, model: context.selectedModel),
