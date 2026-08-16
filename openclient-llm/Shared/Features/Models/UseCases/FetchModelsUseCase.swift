@@ -74,13 +74,24 @@ struct FetchModelsUseCase: FetchModelsUseCaseProtocol {
             }
         }
 
-        return models
+        return applyCapabilityOverrides(models)
     }
 }
 
 // MARK: - Private
 
 private extension FetchModelsUseCase {
+    func applyCapabilityOverrides(_ models: [LLMModel]) -> [LLMModel] {
+        models.map { model in
+            guard let overrides = settingsManager.getCapabilityOverrides(forModelId: model.id) else {
+                return model
+            }
+            var updated = model
+            updated.capabilities = overrides.compactMap { LLMModel.Capability(rawValue: $0) }
+            return updated
+        }
+    }
+
     func fetchOllamaDetails(for models: [LLMModel], rootURL: String) async -> [String: OllamaShowResponse] {
         await withTaskGroup(of: (String, OllamaShowResponse?).self) { group in
             for model in models {

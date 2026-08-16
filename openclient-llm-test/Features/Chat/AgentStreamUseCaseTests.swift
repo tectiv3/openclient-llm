@@ -224,7 +224,8 @@ final class AgentStreamUseCaseTests: XCTestCase {
             func streamMessage(
                 messages: [ChatMessage],
                 model: String,
-                parameters: ModelParameters
+                parameters: ModelParameters,
+                integrations: [MCPIntegration]?
             ) -> AsyncThrowingStream<StreamChunk, Error> {
                 AsyncThrowingStream { continuation in Task { continuation.finish() } }
             }
@@ -233,11 +234,18 @@ final class AgentStreamUseCaseTests: XCTestCase {
                 messages: [ChatMessage],
                 model: String,
                 parameters: ModelParameters,
-                tools: [ToolDefinition]?
+                tools: [ToolDefinition]?,
+                integrations: [MCPIntegration]?
             ) async throws -> ChatCompletionResponse {
                 callCount += 1
                 return toolCallResponse
             }
+
+            func buildNonStreamingRequestBody(
+                messages: [ChatMessage],
+                model: String,
+                parameters: ModelParameters
+            ) -> Data? { nil }
         }
 
         let infiniteRepo = InfiniteToolRepo(response: toolCallResponse)
@@ -381,7 +389,8 @@ final class SequentialMockRepo: ChatRepositoryProtocol, @unchecked Sendable {
     func streamMessage(
         messages: [ChatMessage],
         model: String,
-        parameters: ModelParameters
+        parameters: ModelParameters,
+        integrations: [MCPIntegration]?
     ) -> AsyncThrowingStream<StreamChunk, Error> {
         let chunks = streamChunks
         return AsyncThrowingStream { continuation in
@@ -393,12 +402,19 @@ final class SequentialMockRepo: ChatRepositoryProtocol, @unchecked Sendable {
         messages: [ChatMessage],
         model: String,
         parameters: ModelParameters,
-        tools: [ToolDefinition]?
+        tools: [ToolDefinition]?,
+        integrations: [MCPIntegration]?
     ) async throws -> ChatCompletionResponse {
         let response = responses[callIndex]
         callIndex += 1
         return response
     }
+
+    func buildNonStreamingRequestBody(
+        messages: [ChatMessage],
+        model: String,
+        parameters: ModelParameters
+    ) -> Data? { nil }
 }
 
 // MARK: - RecordingAgentRepository
@@ -424,7 +440,8 @@ final class RecordingAgentRepository: ChatRepositoryProtocol, @unchecked Sendabl
     func streamMessage(
         messages: [ChatMessage],
         model: String,
-        parameters: ModelParameters
+        parameters: ModelParameters,
+        integrations: [MCPIntegration]?
     ) -> AsyncThrowingStream<StreamChunk, Error> {
         AsyncThrowingStream { $0.finish() }
     }
@@ -433,10 +450,17 @@ final class RecordingAgentRepository: ChatRepositoryProtocol, @unchecked Sendabl
         messages: [ChatMessage],
         model: String,
         parameters: ModelParameters,
-        tools: [ToolDefinition]?
+        tools: [ToolDefinition]?,
+        integrations: [MCPIntegration]?
     ) async throws -> ChatCompletionResponse {
         requests.append(messages)
         toolRequests.append(tools)
         return responses.removeFirst()
     }
+
+    func buildNonStreamingRequestBody(
+        messages: [ChatMessage],
+        model: String,
+        parameters: ModelParameters
+    ) -> Data? { nil }
 }

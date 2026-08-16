@@ -16,4 +16,5 @@ extension Notification.Name {
     /// ConversationListViewModel observes this to reload the list without recreating views.
     static let conversationDidUpdate = Notification.Name("openclient.conversationDidUpdate")
     nonisolated static let conversationCloudDidChange = Notification.Name("openclient.conversationCloudDidChange")
+    static let modelCapabilitiesDidChange = Notification.Name("openclient.modelCapabilitiesDidChange")
 }

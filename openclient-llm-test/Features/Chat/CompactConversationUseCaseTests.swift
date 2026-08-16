@@ -173,7 +173,8 @@ private final class RecordingChatRepository: ChatRepositoryProtocol, @unchecked 
     func streamMessage(
         messages: [ChatMessage],
         model: String,
-        parameters: ModelParameters
+        parameters: ModelParameters,
+        integrations: [MCPIntegration]?
     ) -> AsyncThrowingStream<StreamChunk, Error> {
         AsyncThrowingStream { $0.finish() }
     }
@@ -182,8 +183,15 @@ private final class RecordingChatRepository: ChatRepositoryProtocol, @unchecked 
         messages: [ChatMessage],
         model: String,
         parameters: ModelParameters,
-        tools: [ToolDefinition]?
+        tools: [ToolDefinition]?,
+        integrations: [MCPIntegration]?
     ) async throws -> ChatCompletionResponse {
         throw APIError.networkError("Not configured")
     }
+
+    func buildNonStreamingRequestBody(
+        messages: [ChatMessage],
+        model: String,
+        parameters: ModelParameters
+    ) -> Data? { nil }
 }

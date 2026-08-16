@@ -1381,6 +1381,9 @@
         }
       }
     },
+    "Add Integration" : {
+
+    },
     "Add tag..." : {
       "comment" : "A placeholder for a text field that adds a tag to a conversation.",
       "localizations" : {
@@ -2938,6 +2941,7 @@
     },
     "Available Servers" : {
       "comment" : "A section title for the list of MCP servers available to the user.",
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -7667,6 +7671,9 @@
         }
       }
     },
+    "Discovered Servers" : {
+
+    },
     "Document" : {
       "localizations" : {
         "de" : {
@@ -9228,6 +9235,9 @@
           }
         }
       }
+    },
+    "Enter the MCP plugin ID as configured in your LM Studio mcp.json." : {
+
     },
     "Enter your LiteLLM proxy URL, the gateway to any AI model." : {
       "comment" : "A description of the purpose of the server URL field.",
@@ -13711,6 +13721,9 @@
         }
       }
     },
+    "LM Studio Integrations" : {
+
+    },
     "Load Available Tools" : {
       "comment" : "A button that fetches the list of search tools configured in the user's LiteLLM server.",
       "localizations" : {
@@ -14683,6 +14696,9 @@
           }
         }
       }
+    },
+    "mcp/server-name" : {
+
     },
     "Media & Files" : {
       "comment" : "A button that displays a sheet for selecting and viewing media files and attachments.",
@@ -16628,6 +16644,9 @@
         }
       }
     },
+    "No integrations configured for this conversation." : {
+
+    },
     "No internet connection. Please check your network." : {
       "localizations" : {
         "de" : {
@@ -16694,6 +16713,7 @@
     },
     "No MCP servers configured. Add them in your LiteLLM server's config.yaml." : {
       "comment" : "A message that appears when there are no MCP servers configured.",
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -19359,6 +19379,9 @@
       "comment" : "A label for the maximum number of output tokens a model can generate.",
       "shouldTranslate" : false
     },
+    "Override capabilities when the server does not report them." : {
+
+    },
     "PDF Document" : {
       "localizations" : {
         "de" : {
@@ -19941,6 +19964,9 @@
           }
         }
       }
+    },
+    "Plugin" : {
+
     },
     "Post" : {
       "extractionState" : "stale",
@@ -21958,6 +21984,9 @@
         }
       }
     },
+    "Reset to Defaults" : {
+
+    },
     "Response interrupted" : {
       "comment" : "Text displayed in a notification when the response to a prompt was cut short.",
       "localizations" : {
@@ -23892,6 +23921,9 @@
           }
         }
       }
+    },
+    "Server-side MCP tools handled by LM Studio. Register servers in LM Studio's mcp.json first." : {
+
     },
     "Set instructions for the assistant's behavior in this conversation." : {
       "localizations" : {

@@ -208,6 +208,7 @@ final class ChatViewModel {
         self.compactConversationUseCase = compactConversationUseCase
         self.buildFallbackRequestUseCase = buildFallbackRequestUseCase
         observeAppDataReset()
+        observeModelCapabilityChanges()
     }
 
     // MARK: - Input functions
@@ -436,5 +437,33 @@ private extension ChatViewModel {
                 await MainActor.run { self.loadInitialData() }
             }
         }
+    }
+
+    func observeModelCapabilityChanges() {
+        Task { [weak self] in
+            let notifications = NotificationCenter.default
+                .notifications(named: .modelCapabilitiesDidChange)
+            for await _ in notifications {
+                guard let self else { return }
+                await MainActor.run { self.applyCapabilityOverrides() }
+            }
+        }
+    }
+
+    func applyCapabilityOverrides() {
+        guard case .loaded(var loadedState) = state else { return }
+        for index in loadedState.availableModels.indices {
+            let modelId = loadedState.availableModels[index].id
+            if let overrides = settingsManager.getCapabilityOverrides(forModelId: modelId) {
+                loadedState.availableModels[index].capabilities = overrides.compactMap {
+                    LLMModel.Capability(rawValue: $0)
+                }
+            }
+        }
+        if let selected = loadedState.selectedModel,
+           let updated = loadedState.availableModels.first(where: { $0.id == selected.id }) {
+            loadedState.selectedModel = updated
+        }
+        state = .loaded(loadedState)
     }
 }

@@ -43,6 +43,8 @@ protocol SettingsManagerProtocol: Sendable {
     func setEnabledMCPToolIds(_ ids: [String])
     func getDefaultSystemPrompt() -> String
     func setDefaultSystemPrompt(_ value: String)
+    func getCapabilityOverrides(forModelId modelId: String) -> [String]?
+    func setCapabilityOverrides(_ capabilities: [String]?, forModelId modelId: String)
     func deleteAll()
 }
 
@@ -66,6 +68,7 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         static let hasEnoughConversationsForMemoryTip = "hasEnoughConversationsForMemoryTip"
         static let enabledMCPToolIds = "enabledMCPToolIds"
         static let defaultSystemPrompt = "defaultSystemPrompt"
+        static let capabilityOverrides = "capabilityOverrides"
 
         static func ttsVoiceKey(forModelId modelId: String) -> String {
             "tts_voice_\(modelId)"
@@ -237,6 +240,26 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.set(value, forKey: Keys.defaultSystemPrompt)
     }
 
+    func getCapabilityOverrides(forModelId modelId: String) -> [String]? {
+        guard let data = defaults.data(forKey: Keys.capabilityOverrides),
+              let dict = try? JSONDecoder().decode([String: [String]].self, from: data) else {
+            return nil
+        }
+        return dict[modelId]
+    }
+
+    func setCapabilityOverrides(_ capabilities: [String]?, forModelId modelId: String) {
+        var dict: [String: [String]] = [:]
+        if let data = defaults.data(forKey: Keys.capabilityOverrides),
+           let existing = try? JSONDecoder().decode([String: [String]].self, from: data) {
+            dict = existing
+        }
+        dict[modelId] = capabilities
+        if let data = try? JSONEncoder().encode(dict) {
+            defaults.set(data, forKey: Keys.capabilityOverrides)
+        }
+    }
+
     func deleteAll() {
         defaults.removeObject(forKey: Keys.isOnboardingCompleted)
         defaults.removeObject(forKey: Keys.selectedModelId)
@@ -252,6 +275,7 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.removeObject(forKey: Keys.hasEnoughConversationsForMemoryTip)
         defaults.removeObject(forKey: Keys.enabledMCPToolIds)
         defaults.removeObject(forKey: Keys.defaultSystemPrompt)
+        defaults.removeObject(forKey: Keys.capabilityOverrides)
         defaults.removeObject(forKey: LegacyKeys.serverBaseURL)
         defaults.removeObject(forKey: LegacyKeys.apiKey)
         keychainManager.deleteAll()

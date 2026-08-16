@@ -57,7 +57,20 @@ private extension ModelsView {
             viewModel.send(.viewAppeared)
         }
         .sheet(item: $modelForDetail) { model in
-            ModelDetailView(model: model)
+            ModelDetailView(
+                model: model,
+                hasOverrides: viewModel.hasCapabilityOverrides(forModelId: model.id),
+                onCapabilityToggled: { capability, enabled in
+                    viewModel.send(.capabilityToggled(
+                        modelId: model.id,
+                        capability: capability,
+                        enabled: enabled
+                    ))
+                },
+                onCapabilitiesReset: {
+                    viewModel.send(.capabilitiesReset(modelId: model.id))
+                }
+            )
         }
     }
 

@@ -80,4 +80,10 @@ final class MockChatRepository: ChatRepositoryProtocol, @unchecked Sendable {
         }
         return try agentCompletionResult.get()
     }
+
+    func buildNonStreamingRequestBody(
+        messages: [ChatMessage],
+        model: String,
+        parameters: ModelParameters
+    ) -> Data? { nil }
 }

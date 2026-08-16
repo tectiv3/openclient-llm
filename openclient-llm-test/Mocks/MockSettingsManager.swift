@@ -30,6 +30,7 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
     var hasEnoughConversationsForMemoryTip: Bool = false
     var enabledMCPToolIds: [String] = []
     var defaultSystemPrompt: String = ""
+    var capabilityOverrides: [String: [String]] = [:]
     var deleteAllCalled: Bool = false
 
     // MARK: - Public
@@ -168,6 +169,14 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
 
     func setDefaultSystemPrompt(_ value: String) {
         defaultSystemPrompt = value
+    }
+
+    func getCapabilityOverrides(forModelId modelId: String) -> [String]? {
+        capabilityOverrides[modelId]
+    }
+
+    func setCapabilityOverrides(_ capabilities: [String]?, forModelId modelId: String) {
+        capabilityOverrides[modelId] = capabilities
     }
 
     func deleteAll() {

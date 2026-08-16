@@ -20,6 +20,8 @@ final class ModelsViewModel {
         case ttsModelTapped(LLMModel)
         case sttModelTapped(LLMModel)
         case voiceSelected(String, forModelId: String)
+        case capabilityToggled(modelId: String, capability: LLMModel.Capability, enabled: Bool)
+        case capabilitiesReset(modelId: String)
     }
 
     enum State: Equatable {
@@ -72,7 +74,15 @@ final class ModelsViewModel {
             selectSTTModel(model)
         case .voiceSelected(let voice, let modelId):
             selectVoice(voice, forModelId: modelId)
+        case .capabilityToggled(let modelId, let capability, let enabled):
+            toggleCapability(capability, enabled: enabled, forModelId: modelId)
+        case .capabilitiesReset(let modelId):
+            resetCapabilities(forModelId: modelId)
         }
+    }
+
+    func hasCapabilityOverrides(forModelId modelId: String) -> Bool {
+        settingsManager.getCapabilityOverrides(forModelId: modelId) != nil
     }
 
     func refreshAsync() async {
@@ -149,6 +159,31 @@ private extension ModelsViewModel {
         loadedState.selectedTTSVoices[modelId] = voice
         state = .loaded(loadedState)
         settingsManager.setSelectedTTSVoice(voice, forModelId: modelId)
+    }
+
+    func toggleCapability(_ capability: LLMModel.Capability, enabled: Bool, forModelId modelId: String) {
+        guard case .loaded(var loadedState) = state,
+              let index = loadedState.models.firstIndex(where: { $0.id == modelId }) else { return }
+
+        var model = loadedState.models[index]
+        if enabled {
+            if !model.capabilities.contains(capability) {
+                model.capabilities.append(capability)
+            }
+        } else {
+            model.capabilities.removeAll { $0 == capability }
+        }
+        loadedState.models[index] = model
+        state = .loaded(loadedState)
+
+        settingsManager.setCapabilityOverrides(model.capabilities.map(\.rawValue), forModelId: modelId)
+        NotificationCenter.default.post(name: .modelCapabilitiesDidChange, object: nil)
+    }
+
+    func resetCapabilities(forModelId modelId: String) {
+        settingsManager.setCapabilityOverrides(nil, forModelId: modelId)
+        refreshModels()
+        NotificationCenter.default.post(name: .modelCapabilitiesDidChange, object: nil)
     }
 
     func performRefresh() async {

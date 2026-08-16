@@ -12,7 +12,11 @@ struct ModelDetailView: View {
     // MARK: - Properties
 
     let model: LLMModel
+    var hasOverrides: Bool = false
+    var onCapabilityToggled: ((LLMModel.Capability, Bool) -> Void)?
+    var onCapabilitiesReset: (() -> Void)?
 
+    @State private var enabledCapabilities: Set<LLMModel.Capability> = []
     @Environment(\.dismiss) private var dismiss
 
     // MARK: - View
@@ -167,16 +171,41 @@ private extension ModelDetailView {
     }
 
     var capabilitiesSection: some View {
-        let capabilities = model.capabilities.isEmpty ? [LLMModel.Capability.text] : model.capabilities
-        return Section(String(localized: "Capabilities")) {
-            ForEach(capabilities.sorted { $0.label < $1.label }, id: \.self) { capability in
-                Label {
-                    Text(capability.label)
-                } icon: {
-                    Image(systemName: capability.icon)
-                        .foregroundStyle(capability.color)
+        let toggleable = LLMModel.Capability.allCases.filter { $0 != .text }
+        return Section {
+            ForEach(toggleable, id: \.self) { capability in
+                Toggle(isOn: Binding(
+                    get: { enabledCapabilities.contains(capability) },
+                    set: { enabled in
+                        if enabled {
+                            enabledCapabilities.insert(capability)
+                        } else {
+                            enabledCapabilities.remove(capability)
+                        }
+                        onCapabilityToggled?(capability, enabled)
+                    }
+                )) {
+                    Label {
+                        Text(capability.label)
+                    } icon: {
+                        Image(systemName: capability.icon)
+                            .foregroundStyle(capability.color)
+                    }
                 }
             }
+            if hasOverrides {
+                Button(String(localized: "Reset to Defaults"), role: .destructive) {
+                    onCapabilitiesReset?()
+                    dismiss()
+                }
+            }
+        } header: {
+            Text(String(localized: "Capabilities"))
+        } footer: {
+            Text(String(localized: "Override capabilities when the server does not report them."))
+        }
+        .onAppear {
+            enabledCapabilities = Set(model.capabilities)
         }
     }
 
