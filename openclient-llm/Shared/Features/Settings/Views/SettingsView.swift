@@ -114,7 +114,7 @@ private extension SettingsView {
 
             switch requestedPresentation {
             case .feedback:
-                isShowingVotice = true
+                isShowingHelp = true
             case .tipJar:
                 isShowingTipJar = true
             }

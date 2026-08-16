@@ -330,7 +330,9 @@ private extension ChatViewModel {
         }
         loadedState.conversation = conversation
         loadedState.messages = conversation.messages
-        loadedState.systemPrompt = conversation.systemPrompt
+        loadedState.systemPrompt = conversation.systemPrompt.isEmpty && conversation.messages.isEmpty
+            ? getChatPreferencesUseCase.getDefaultSystemPrompt()
+            : conversation.systemPrompt
         loadedState.modelParameters = conversation.modelParameters
         loadedState.contextWindowTokens = conversation.contextWindowTokens
         let selectedModel = loadedState.availableModels.first(where: { $0.id == conversation.modelId })

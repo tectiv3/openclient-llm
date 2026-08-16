@@ -34,7 +34,14 @@ extension ChatViewModel {
                 ? getConversationStartersUseCase.execute(count: 4)
                 : [],
             errorMessage: errorMessage,
-            systemPrompt: pending?.systemPrompt ?? getChatPreferencesUseCase.getDefaultSystemPrompt(),
+            systemPrompt: {
+                guard let pending, !pending.systemPrompt.isEmpty else {
+                    return pending?.messages.isEmpty ?? true
+                        ? getChatPreferencesUseCase.getDefaultSystemPrompt()
+                        : ""
+                }
+                return pending.systemPrompt
+            }(),
             modelParameters: pending?.modelParameters ?? .default,
             contextWindowTokens: pending?.contextWindowTokens,
             showTokenUsage: getChatPreferencesUseCase.getShowTokenUsage(),
