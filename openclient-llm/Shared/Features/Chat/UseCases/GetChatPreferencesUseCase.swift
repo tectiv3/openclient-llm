@@ -13,6 +13,7 @@ protocol GetChatPreferencesUseCaseProtocol: Sendable {
     func getShowTokenUsage() -> Bool
     func getIsWebSearchEnabled() -> Bool
     func getWebSearchToolName() -> String
+    func getLMStudioWebSearchPluginId() -> String
     func getSelectedTTSVoice(forModelId modelId: String) -> String
     func getDefaultSystemPrompt() -> String
 }
@@ -44,6 +45,10 @@ struct GetChatPreferencesUseCase: GetChatPreferencesUseCaseProtocol {
 
     func getWebSearchToolName() -> String {
         settingsManager.getWebSearchToolName()
+    }
+
+    func getLMStudioWebSearchPluginId() -> String {
+        settingsManager.getLMStudioWebSearchPluginId()
     }
 
     func getSelectedTTSVoice(forModelId modelId: String) -> String {

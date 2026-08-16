@@ -105,7 +105,15 @@ extension ChatViewModel {
         let contextWindowTokens = loadedState.contextWindowTokens
         let contextSummary = loadedState.conversation?.contextSummary
         let contextSummaryCursorMessageId = loadedState.conversation?.contextSummaryCursorMessageId
-        let mcpIntegrations = loadedState.mcpIntegrations
+        var mcpIntegrations = loadedState.mcpIntegrations
+        if settingsManager.getServerType() == .lmStudio,
+           webSearchEnabled {
+            let pluginId = settingsManager.getLMStudioWebSearchPluginId()
+            if !pluginId.isEmpty,
+               !mcpIntegrations.contains(.plugin(id: pluginId)) {
+                mcpIntegrations.append(.plugin(id: pluginId))
+            }
+        }
         let lmStudioResponseId = loadedState.conversation?.lmStudioResponseId
 
         cancelCompaction()

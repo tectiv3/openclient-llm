@@ -13,33 +13,49 @@ import SwiftUI
 extension SettingsView {
     func webSearchSection(_ loadedState: SettingsViewModel.LoadedState) -> some View {
         Section {
-            webSearchToolContent(loadedState)
-            webSearchLoadButton(loadedState)
+            if loadedState.serverType == .lmStudio {
+                TextField(
+                    String(localized: "Plugin ID"),
+                    text: Binding(
+                        get: { loadedState.lmStudioWebSearchPluginId },
+                        set: { viewModel.send(.lmStudioWebSearchPluginIdChanged($0)) }
+                    )
+                )
+                .autocorrectionDisabled()
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                #endif
+            } else {
+                webSearchToolContent(loadedState)
+                webSearchLoadButton(loadedState)
 
-            if let error = loadedState.searchToolsError {
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
+                if let error = loadedState.searchToolsError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
 
-            Stepper(
-                value: Binding(
-                    get: { loadedState.webSearchMaxResults },
-                    set: { viewModel.send(.webSearchMaxResultsChanged($0)) }
-                ),
-                in: 1...20
-            ) {
-                HStack {
-                    Text(String(localized: "Results"))
-                    Spacer()
-                    Text("\(loadedState.webSearchMaxResults)")
-                        .foregroundStyle(.secondary)
+                Stepper(
+                    value: Binding(
+                        get: { loadedState.webSearchMaxResults },
+                        set: { viewModel.send(.webSearchMaxResultsChanged($0)) }
+                    ),
+                    in: 1...20
+                ) {
+                    HStack {
+                        Text(String(localized: "Results"))
+                        Spacer()
+                        Text("\(loadedState.webSearchMaxResults)")
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         } header: {
             Text(String(localized: "Web Search"))
         } footer: {
-            if loadedState.availableSearchTools.isEmpty {
+            if loadedState.serverType == .lmStudio {
+                Text(String(localized: "Enter the plugin ID installed in LM Studio (e.g. npacker/web-tools)."))
+            } else if loadedState.availableSearchTools.isEmpty {
                 Text(String(localized: "Fetch the list of search tools configured in your LiteLLM server."))
             } else {
                 let count = loadedState.availableSearchTools.count

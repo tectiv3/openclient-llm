@@ -47,6 +47,8 @@ protocol SettingsManagerProtocol: Sendable {
     func setServerType(_ value: ServerType)
     func getGlobalMCPIntegrations() -> [MCPIntegration]
     func setGlobalMCPIntegrations(_ integrations: [MCPIntegration])
+    func getLMStudioWebSearchPluginId() -> String
+    func setLMStudioWebSearchPluginId(_ value: String)
     func getCapabilityOverrides(forModelId modelId: String) -> [String]?
     func setCapabilityOverrides(_ capabilities: [String]?, forModelId modelId: String)
     func deleteAll()
@@ -74,6 +76,7 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         static let defaultSystemPrompt = "defaultSystemPrompt"
         static let serverType = "serverType"
         static let globalMCPIntegrations = "globalMCPIntegrations"
+        static let lmStudioWebSearchPluginId = "lmStudioWebSearchPluginId"
         static let capabilityOverrides = "capabilityOverrides"
 
         static func ttsVoiceKey(forModelId modelId: String) -> String {
@@ -271,6 +274,14 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.set(data, forKey: Keys.globalMCPIntegrations)
     }
 
+    func getLMStudioWebSearchPluginId() -> String {
+        defaults.string(forKey: Keys.lmStudioWebSearchPluginId) ?? ""
+    }
+
+    func setLMStudioWebSearchPluginId(_ value: String) {
+        defaults.set(value, forKey: Keys.lmStudioWebSearchPluginId)
+    }
+
     func getCapabilityOverrides(forModelId modelId: String) -> [String]? {
         guard let data = defaults.data(forKey: Keys.capabilityOverrides),
               let dict = try? JSONDecoder().decode([String: [String]].self, from: data) else {
@@ -308,6 +319,7 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.removeObject(forKey: Keys.defaultSystemPrompt)
         defaults.removeObject(forKey: Keys.serverType)
         defaults.removeObject(forKey: Keys.globalMCPIntegrations)
+        defaults.removeObject(forKey: Keys.lmStudioWebSearchPluginId)
         defaults.removeObject(forKey: Keys.capabilityOverrides)
         defaults.removeObject(forKey: LegacyKeys.serverBaseURL)
         defaults.removeObject(forKey: LegacyKeys.apiKey)

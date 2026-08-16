@@ -32,6 +32,7 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
     var defaultSystemPrompt: String = ""
     var serverType: ServerType = .liteLLM
     var globalMCPIntegrations: [MCPIntegration] = []
+    var lmStudioWebSearchPluginId: String = ""
     var capabilityOverrides: [String: [String]] = [:]
     var deleteAllCalled: Bool = false
 
@@ -187,6 +188,14 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
 
     func setGlobalMCPIntegrations(_ integrations: [MCPIntegration]) {
         globalMCPIntegrations = integrations
+    }
+
+    func getLMStudioWebSearchPluginId() -> String {
+        lmStudioWebSearchPluginId
+    }
+
+    func setLMStudioWebSearchPluginId(_ value: String) {
+        lmStudioWebSearchPluginId = value
     }
 
     func getCapabilityOverrides(forModelId modelId: String) -> [String]? {

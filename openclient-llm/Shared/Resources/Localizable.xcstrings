@@ -9239,6 +9239,9 @@
     "Enter the MCP plugin ID as configured in your LM Studio mcp.json." : {
 
     },
+    "Enter the plugin ID installed in LM Studio (e.g. npacker/web-tools)." : {
+
+    },
     "Enter your LiteLLM proxy URL, the gateway to any AI model." : {
       "comment" : "A description of the purpose of the server URL field.",
       "localizations" : {
@@ -19984,6 +19987,9 @@
       }
     },
     "Plugin" : {
+
+    },
+    "Plugin ID" : {
 
     },
     "Post" : {

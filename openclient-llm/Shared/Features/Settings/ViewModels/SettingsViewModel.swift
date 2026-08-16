@@ -26,6 +26,7 @@ final class SettingsViewModel {
         case showTokenUsageToggled(Bool)
         case webSearchToolNameChanged(String)
         case webSearchMaxResultsChanged(Int)
+        case lmStudioWebSearchPluginIdChanged(String)
         case fetchSearchToolsTapped
         case resetConfirmed
         case requestNotificationPermissionTapped
@@ -55,6 +56,7 @@ final class SettingsViewModel {
         var showCloudSyncConflictAlert: Bool = false
         var webSearchToolName: String = ""
         var webSearchMaxResults: Int = 10
+        var lmStudioWebSearchPluginId: String = ""
         var availableSearchTools: [SearchToolItem] = []
         var isLoadingSearchTools: Bool = false
         var searchToolsError: String?
@@ -144,8 +146,8 @@ final class SettingsViewModel {
             handleCloudSyncEvent(event)
         case .showTokenUsageToggled, .privacyScreenToggled, .defaultSystemPromptChanged, .serverTypeChanged:
             handlePreferenceToggleEvent(event)
-        case .webSearchToolNameChanged, .webSearchMaxResultsChanged, .fetchSearchToolsTapped,
-             .fetchMCPToolsTapped, .mcpToolToggled,
+        case .webSearchToolNameChanged, .webSearchMaxResultsChanged, .lmStudioWebSearchPluginIdChanged,
+             .fetchSearchToolsTapped, .fetchMCPToolsTapped, .mcpToolToggled,
              .globalIntegrationAdded, .globalIntegrationRemoved:
             handleServerDiscoveryEvent(event)
         case .resetConfirmed:
@@ -174,6 +176,7 @@ private extension SettingsViewModel {
             showTokenUsage: settingsManager.getShowTokenUsage(),
             webSearchToolName: settingsManager.getWebSearchToolName(),
             webSearchMaxResults: settingsManager.getWebSearchMaxResults(),
+            lmStudioWebSearchPluginId: settingsManager.getLMStudioWebSearchPluginId(),
             availableSearchTools: settingsManager.getAvailableSearchTools(),
             serverType: settingsManager.getServerType(),
             isPrivacyScreenEnabled: settingsManager.getIsPrivacyScreenEnabled(),
@@ -374,6 +377,13 @@ private extension SettingsViewModel {
         state = .loaded(loadedState)
     }
 
+    func updateLMStudioWebSearchPluginId(_ pluginId: String) {
+        guard case .loaded(var loadedState) = state else { return }
+        settingsManager.setLMStudioWebSearchPluginId(pluginId)
+        loadedState.lmStudioWebSearchPluginId = pluginId
+        state = .loaded(loadedState)
+    }
+
     func handleCloudSyncEvent(_ event: Event) {
         switch event {
         case .cloudSyncToggled(let enabled):
@@ -401,6 +411,8 @@ private extension SettingsViewModel {
             updateWebSearchToolName(name)
         case .webSearchMaxResultsChanged(let count):
             updateWebSearchMaxResults(count)
+        case .lmStudioWebSearchPluginIdChanged(let pluginId):
+            updateLMStudioWebSearchPluginId(pluginId)
         case .fetchSearchToolsTapped:
             fetchSearchTools()
         default:

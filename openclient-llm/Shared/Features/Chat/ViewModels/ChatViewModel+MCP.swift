@@ -48,7 +48,9 @@ extension ChatViewModel {
             ttsModelId: audioModelIDs.ttsModelId,
             transcriptionModelId: audioModelIDs.transcriptionModelId,
             isWebSearchEnabled: getChatPreferencesUseCase.getIsWebSearchEnabled(),
-            isWebSearchToolConfigured: !getChatPreferencesUseCase.getWebSearchToolName().isEmpty,
+            isWebSearchToolConfigured: settingsManager.getServerType() == .lmStudio
+                ? !getChatPreferencesUseCase.getLMStudioWebSearchPluginId().isEmpty
+                : !getChatPreferencesUseCase.getWebSearchToolName().isEmpty,
             isMCPSupported: settingsManager.getServerType() == .lmStudio || !mcpTools.isEmpty,
             availableMCPTools: mcpTools,
             availableMCPServers: mcpServers,
