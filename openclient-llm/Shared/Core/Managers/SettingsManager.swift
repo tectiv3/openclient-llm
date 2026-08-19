@@ -49,6 +49,8 @@ protocol SettingsManagerProtocol: Sendable {
     func setGlobalMCPIntegrations(_ integrations: [MCPIntegration])
     func getLMStudioWebSearchPluginId() -> String
     func setLMStudioWebSearchPluginId(_ value: String)
+    func getRequestTimeoutSeconds() -> Int
+    func setRequestTimeoutSeconds(_ value: Int)
     func getCapabilityOverrides(forModelId modelId: String) -> [String]?
     func setCapabilityOverrides(_ capabilities: [String]?, forModelId modelId: String)
     func deleteAll()
@@ -77,6 +79,7 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         static let serverType = "serverType"
         static let globalMCPIntegrations = "globalMCPIntegrations"
         static let lmStudioWebSearchPluginId = "lmStudioWebSearchPluginId"
+        static let requestTimeoutSeconds = "requestTimeoutSeconds"
         static let capabilityOverrides = "capabilityOverrides"
 
         static func ttsVoiceKey(forModelId modelId: String) -> String {
@@ -282,6 +285,15 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.set(value, forKey: Keys.lmStudioWebSearchPluginId)
     }
 
+    func getRequestTimeoutSeconds() -> Int {
+        let stored = defaults.integer(forKey: Keys.requestTimeoutSeconds)
+        return stored > 0 ? stored : 300
+    }
+
+    func setRequestTimeoutSeconds(_ value: Int) {
+        defaults.set(value, forKey: Keys.requestTimeoutSeconds)
+    }
+
     func getCapabilityOverrides(forModelId modelId: String) -> [String]? {
         guard let data = defaults.data(forKey: Keys.capabilityOverrides),
               let dict = try? JSONDecoder().decode([String: [String]].self, from: data) else {
@@ -320,6 +332,7 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.removeObject(forKey: Keys.serverType)
         defaults.removeObject(forKey: Keys.globalMCPIntegrations)
         defaults.removeObject(forKey: Keys.lmStudioWebSearchPluginId)
+        defaults.removeObject(forKey: Keys.requestTimeoutSeconds)
         defaults.removeObject(forKey: Keys.capabilityOverrides)
         defaults.removeObject(forKey: LegacyKeys.serverBaseURL)
         defaults.removeObject(forKey: LegacyKeys.apiKey)

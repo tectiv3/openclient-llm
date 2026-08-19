@@ -150,7 +150,7 @@ final class BackgroundCompletionService {
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 120
+        request.timeoutInterval = 300
         let apiKey = settingsManager.getAPIKey()
         if !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")

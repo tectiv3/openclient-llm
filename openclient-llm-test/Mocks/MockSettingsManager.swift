@@ -33,6 +33,7 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
     var serverType: ServerType = .liteLLM
     var globalMCPIntegrations: [MCPIntegration] = []
     var lmStudioWebSearchPluginId: String = ""
+    var requestTimeoutSeconds: Int = 300
     var capabilityOverrides: [String: [String]] = [:]
     var deleteAllCalled: Bool = false
 
@@ -196,6 +197,14 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
 
     func setLMStudioWebSearchPluginId(_ value: String) {
         lmStudioWebSearchPluginId = value
+    }
+
+    func getRequestTimeoutSeconds() -> Int {
+        requestTimeoutSeconds
+    }
+
+    func setRequestTimeoutSeconds(_ value: Int) {
+        requestTimeoutSeconds = value
     }
 
     func getCapabilityOverrides(forModelId modelId: String) -> [String]? {

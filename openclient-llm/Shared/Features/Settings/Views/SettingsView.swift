@@ -225,6 +225,7 @@ private extension SettingsView {
             serverURLField()
             apiKeyField()
             serverTypePicker(loadedState)
+            requestTimeoutPicker(loadedState)
             connectionStatusView(loadedState.connectionStatus)
             Button {
                 focusedField = nil
@@ -334,6 +335,20 @@ private extension SettingsView {
             }
         } label: {
             Label(String(localized: "Server Type"), systemImage: "server.rack")
+        }
+    }
+
+    func requestTimeoutPicker(_ loadedState: SettingsViewModel.LoadedState) -> some View {
+        Picker(selection: Binding(
+            get: { loadedState.requestTimeoutSeconds },
+            set: { viewModel.send(.requestTimeoutChanged($0)) }
+        )) {
+            Text(String(localized: "2 min")).tag(120)
+            Text(String(localized: "5 min")).tag(300)
+            Text(String(localized: "10 min")).tag(600)
+            Text(String(localized: "15 min")).tag(900)
+        } label: {
+            Label(String(localized: "Request Timeout"), systemImage: "clock")
         }
     }
 

@@ -218,7 +218,6 @@ final class ChatViewModel {
 
     func send(_ event: Event) {
         if case .viewDisappeared = event {
-            stopStreaming()
             cancelCompaction()
             loadTask?.cancel()
             loadTask = nil

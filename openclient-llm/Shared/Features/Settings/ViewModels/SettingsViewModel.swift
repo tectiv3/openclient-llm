@@ -34,6 +34,7 @@ final class SettingsViewModel {
         case privacyScreenToggled(Bool)
         case defaultSystemPromptChanged(String)
         case serverTypeChanged(ServerType)
+        case requestTimeoutChanged(Int)
         case fetchMCPToolsTapped
         case mcpToolToggled(toolId: String, enabled: Bool)
         case globalIntegrationAdded(MCPIntegration)
@@ -66,6 +67,7 @@ final class SettingsViewModel {
         var isPrivacyScreenEnabled: Bool = true
         var defaultSystemPrompt: String = ""
         var conversationSyncResult: ConversationSyncResult?
+        var requestTimeoutSeconds: Int = 300
         var globalMCPIntegrations: [MCPIntegration] = []
         var availableMCPTools: [MCPToolInfo] = []
         var availableMCPServers: [MCPServerInfo] = []
@@ -144,7 +146,8 @@ final class SettingsViewModel {
             saveSettings()
         case .cloudSyncToggled, .cloudSyncConflictResolved, .cloudSyncConflictCancelled, .syncConversationsTapped:
             handleCloudSyncEvent(event)
-        case .showTokenUsageToggled, .privacyScreenToggled, .defaultSystemPromptChanged, .serverTypeChanged:
+        case .showTokenUsageToggled, .privacyScreenToggled, .defaultSystemPromptChanged, .serverTypeChanged,
+             .requestTimeoutChanged:
             handlePreferenceToggleEvent(event)
         case .webSearchToolNameChanged, .webSearchMaxResultsChanged, .lmStudioWebSearchPluginIdChanged,
              .fetchSearchToolsTapped, .fetchMCPToolsTapped, .mcpToolToggled,
@@ -181,6 +184,7 @@ private extension SettingsViewModel {
             serverType: settingsManager.getServerType(),
             isPrivacyScreenEnabled: settingsManager.getIsPrivacyScreenEnabled(),
             defaultSystemPrompt: settingsManager.getDefaultSystemPrompt(),
+            requestTimeoutSeconds: settingsManager.getRequestTimeoutSeconds(),
             globalMCPIntegrations: settingsManager.getGlobalMCPIntegrations(),
             enabledMCPToolIds: Set(settingsManager.getEnabledMCPToolIds())
         )
@@ -331,6 +335,8 @@ private extension SettingsViewModel {
             updateDefaultSystemPrompt(prompt)
         case .serverTypeChanged(let type):
             updateServerType(type)
+        case .requestTimeoutChanged(let seconds):
+            updateRequestTimeout(seconds)
         default:
             break
         }
@@ -354,6 +360,13 @@ private extension SettingsViewModel {
         if type == .liteLLM {
             Task { await updateLiteLLMHint(serverURL: loadedState.serverURL) }
         }
+    }
+
+    func updateRequestTimeout(_ seconds: Int) {
+        guard case .loaded(var loadedState) = state else { return }
+        settingsManager.setRequestTimeoutSeconds(seconds)
+        loadedState.requestTimeoutSeconds = seconds
+        state = .loaded(loadedState)
     }
 
     func updateDefaultSystemPrompt(_ prompt: String) {

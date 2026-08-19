@@ -798,6 +798,18 @@
         }
       }
     },
+    "2 min" : {
+
+    },
+    "5 min" : {
+
+    },
+    "10 min" : {
+
+    },
+    "15 min" : {
+
+    },
     "A brief description about yourself" : {
       "comment" : "A placeholder for a user's description.",
       "localizations" : {
@@ -21816,6 +21828,9 @@
           }
         }
       }
+    },
+    "Request Timeout" : {
+
     },
     "Resend" : {
       "comment" : "A button that resends a message.",

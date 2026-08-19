@@ -52,7 +52,7 @@ extension APIClientProtocol {
         method: HTTPMethod,
         body: (any Encodable & Sendable)?
     ) async throws -> T {
-        try await request(endpoint: endpoint, method: method, body: body, timeoutInterval: 60)
+        try await request(endpoint: endpoint, method: method, body: body, timeoutInterval: 300)
     }
 }
 
@@ -127,7 +127,8 @@ struct APIClient: APIClientProtocol, Sendable {
                     let urlRequest = try buildRequest(
                         endpoint: endpoint,
                         method: .post,
-                        body: body
+                        body: body,
+                        timeoutInterval: TimeInterval(settingsManager.getRequestTimeoutSeconds())
                     )
                     LogManager.network("→ STREAM POST /\(endpoint)")
 

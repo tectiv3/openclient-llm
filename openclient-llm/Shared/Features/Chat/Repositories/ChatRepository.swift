@@ -218,7 +218,7 @@ struct ChatRepository: ChatRepositoryProtocol {
             endpoint: "/api/v1/chat",
             method: .post,
             body: request,
-            timeoutInterval: 125
+            timeoutInterval: 300
         )
     }
 
