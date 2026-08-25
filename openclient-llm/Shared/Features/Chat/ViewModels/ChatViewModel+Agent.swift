@@ -143,7 +143,7 @@ private extension ChatViewModel {
             tools.append(SaveMemoryTool(memoryManager: memoryManager ?? MemoryManager()))
             tools.append(DeleteMemoryTool(memoryManager: memoryManager ?? MemoryManager()))
         }
-        if webSearchEnabled {
+        if webSearchEnabled, settingsManager.getServerType() != .lmStudio {
             tools.append(WebSearchTool(webSearchUseCase: webSearchUseCase))
         }
         if case .loaded(let loadedState) = state {
@@ -168,7 +168,7 @@ private extension ChatViewModel {
         device. Call it whenever the user asks about the current date or time, or when the answer \
         depends on knowing today's date.\n
         """
-        if webSearchEnabled {
+        if webSearchEnabled, settingsManager.getServerType() != .lmStudio {
             toolDescriptions += """
             - `web_search`: Use it when your training knowledge is insufficient or likely outdated to answer \
             the user's question accurately: current events, recent news, real-time data, prices, sports results, \

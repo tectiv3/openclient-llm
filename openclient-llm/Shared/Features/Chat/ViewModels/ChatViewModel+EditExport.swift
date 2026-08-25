@@ -58,6 +58,13 @@ extension ChatViewModel {
         let parameters = loadedState.modelParameters
         let webSearchEnabled = loadedState.isWebSearchEnabled
         let modelCapabilities = model.capabilities
+        var mcpIntegrations = loadedState.mcpIntegrations
+        if settingsManager.getServerType() == .lmStudio, webSearchEnabled {
+            let pluginId = settingsManager.getLMStudioWebSearchPluginId()
+            if !pluginId.isEmpty, !mcpIntegrations.contains(.plugin(id: pluginId)) {
+                mcpIntegrations.append(.plugin(id: pluginId))
+            }
+        }
 
         LogManager.info("regenerateLastResponse model=\(model.id) messages=\(currentMessages.count)")
         cancelCompaction()
@@ -78,7 +85,7 @@ extension ChatViewModel {
                 contextWindowTokens: loadedState.contextWindowTokens,
                 contextSummary: loadedState.conversation?.contextSummary,
                 contextSummaryCursorMessageId: loadedState.conversation?.contextSummaryCursorMessageId,
-                mcpIntegrations: loadedState.mcpIntegrations,
+                mcpIntegrations: mcpIntegrations,
                 lmStudioResponseId: loadedState.conversation?.lmStudioResponseId
             ))
         }
@@ -115,6 +122,13 @@ extension ChatViewModel {
         let parameters = loadedState.modelParameters
         let webSearchEnabled = loadedState.isWebSearchEnabled
         let modelCapabilities = model.capabilities
+        var mcpIntegrations = loadedState.mcpIntegrations
+        if settingsManager.getServerType() == .lmStudio, webSearchEnabled {
+            let pluginId = settingsManager.getLMStudioWebSearchPluginId()
+            if !pluginId.isEmpty, !mcpIntegrations.contains(.plugin(id: pluginId)) {
+                mcpIntegrations.append(.plugin(id: pluginId))
+            }
+        }
 
         LogManager.info("editAndResend id=\(id) model=\(model.id)")
         cancelCompaction()
@@ -135,7 +149,7 @@ extension ChatViewModel {
                 contextWindowTokens: loadedState.contextWindowTokens,
                 contextSummary: loadedState.conversation?.contextSummary,
                 contextSummaryCursorMessageId: loadedState.conversation?.contextSummaryCursorMessageId,
-                mcpIntegrations: loadedState.mcpIntegrations,
+                mcpIntegrations: mcpIntegrations,
                 lmStudioResponseId: loadedState.conversation?.lmStudioResponseId
             ))
         }

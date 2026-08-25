@@ -364,8 +364,9 @@ extension ChatViewModel {
 
     func contextTools(for loadedState: LoadedState) -> [ToolDefinition] {
         guard loadedState.selectedModel?.capabilities.contains(.functionCalling) == true else { return [] }
+        let webSearch = loadedState.isWebSearchEnabled && settingsManager.getServerType() != .lmStudio
         return ToolRegistry.default(
-            webSearchEnabled: loadedState.isWebSearchEnabled,
+            webSearchEnabled: webSearch,
             includesMemoryTools: !isPrivateChat,
             webSearchUseCase: webSearchUseCase,
             memoryManager: memoryManager
