@@ -96,6 +96,34 @@ final class MockChatRepository: ChatRepositoryProtocol, @unchecked Sendable {
         try lmStudioCompletionResult.get()
     }
 
+    var lmStudioStreamChunks: [LMStudioStreamChunk] = []
+    var lmStudioStreamError: Error?
+
+    func streamLMStudioChat(
+        input: String,
+        model: String,
+        systemPrompt: String,
+        parameters: ModelParameters,
+        contextWindowTokens: Int?,
+        previousResponseId: String?,
+        integrations: [MCPIntegration]
+    ) -> AsyncThrowingStream<LMStudioStreamChunk, Error> {
+        let chunks = lmStudioStreamChunks
+        let error = lmStudioStreamError
+        return AsyncThrowingStream { continuation in
+            Task {
+                for chunk in chunks {
+                    continuation.yield(chunk)
+                }
+                if let error {
+                    continuation.finish(throwing: error)
+                } else {
+                    continuation.finish()
+                }
+            }
+        }
+    }
+
     func buildNonStreamingRequestBody(
         messages: [ChatMessage],
         model: String,

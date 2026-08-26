@@ -22,6 +22,7 @@ nonisolated struct LMStudioChatRequest: Encodable, Sendable {
     let contextLength: Int?
     let previousResponseId: String?
     let store: Bool
+    let stream: Bool?
 
     enum CodingKeys: String, CodingKey {
         case model
@@ -35,6 +36,7 @@ nonisolated struct LMStudioChatRequest: Encodable, Sendable {
         case contextLength = "context_length"
         case previousResponseId = "previous_response_id"
         case store
+        case stream
     }
 }
 

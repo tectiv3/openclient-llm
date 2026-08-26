@@ -18,6 +18,16 @@ protocol LMStudioChatUseCaseProtocol: Sendable {
         previousResponseId: String?,
         integrations: [MCPIntegration]
     ) async throws -> LMStudioChatResponse
+
+    func stream(
+        input: String,
+        model: String,
+        systemPrompt: String,
+        parameters: ModelParameters,
+        contextWindowTokens: Int?,
+        previousResponseId: String?,
+        integrations: [MCPIntegration]
+    ) -> AsyncThrowingStream<LMStudioStreamChunk, Error>
 }
 
 struct LMStudioChatUseCase: LMStudioChatUseCaseProtocol {
@@ -43,6 +53,26 @@ struct LMStudioChatUseCase: LMStudioChatUseCaseProtocol {
         integrations: [MCPIntegration]
     ) async throws -> LMStudioChatResponse {
         try await repository.lmStudioCompletion(
+            input: input,
+            model: model,
+            systemPrompt: systemPrompt,
+            parameters: parameters,
+            contextWindowTokens: contextWindowTokens,
+            previousResponseId: previousResponseId,
+            integrations: integrations
+        )
+    }
+
+    func stream(
+        input: String,
+        model: String,
+        systemPrompt: String,
+        parameters: ModelParameters,
+        contextWindowTokens: Int?,
+        previousResponseId: String?,
+        integrations: [MCPIntegration]
+    ) -> AsyncThrowingStream<LMStudioStreamChunk, Error> {
+        repository.streamLMStudioChat(
             input: input,
             model: model,
             systemPrompt: systemPrompt,

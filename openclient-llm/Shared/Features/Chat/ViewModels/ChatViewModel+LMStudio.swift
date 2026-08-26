@@ -12,20 +12,27 @@ import Foundation
 
 extension ChatViewModel {
     func performLMStudioChat(_ context: SendMessageContext) async {
+        let input = context.text.isEmpty
+            ? context.messages.last(where: { $0.role == .user })?.content ?? ""
+            : context.text
+        let stream = lmStudioChatUseCase.stream(
+            input: input,
+            model: context.modelId,
+            systemPrompt: context.systemPrompt,
+            parameters: parametersCappedToModelOutput(context.parameters, model: context.selectedModel),
+            contextWindowTokens: context.contextWindowTokens ?? context.selectedModel.maxInputTokens,
+            previousResponseId: context.lmStudioResponseId,
+            integrations: context.mcpIntegrations
+        )
+        streamStartTime = ContinuousClock.now
+
         do {
-            let input = context.text.isEmpty
-                ? context.messages.last(where: { $0.role == .user })?.content ?? ""
-                : context.text
-            let response = try await lmStudioChatUseCase.execute(
-                input: input,
-                model: context.modelId,
-                systemPrompt: context.systemPrompt,
-                parameters: parametersCappedToModelOutput(context.parameters, model: context.selectedModel),
-                contextWindowTokens: context.contextWindowTokens ?? context.selectedModel.maxInputTokens,
-                previousResponseId: context.lmStudioResponseId,
-                integrations: context.mcpIntegrations
-            )
-            applyLMStudioResponse(response, assistantMessageId: context.assistantId)
+            for try await chunk in stream {
+                guard !Task.isCancelled, isActiveStream(context.assistantId),
+                      case .loaded(var currentState) = state else { return }
+                applyLMStudioChunk(chunk, to: &currentState, assistantMessageId: context.assistantId)
+                state = .loaded(currentState)
+            }
             await finishStreaming(context.assistantId, model: context.modelId)
         } catch {
             handleLMStudioError(error, assistantMessageId: context.assistantId, model: context.modelId)
@@ -36,31 +43,41 @@ extension ChatViewModel {
 // MARK: - Private
 
 private extension ChatViewModel {
-    func applyLMStudioResponse(_ response: LMStudioChatResponse, assistantMessageId: UUID) {
-        guard isActiveStream(assistantMessageId), case .loaded(var currentState) = state,
-              let index = currentState.messages.firstIndex(where: { $0.id == assistantMessageId }) else { return }
-        for output in response.output {
-            switch output.type {
-            case "message":
-                currentState.messages[index].content += output.content ?? ""
-            case "reasoning":
-                currentState.messages[index].reasoningContent =
-                    (currentState.messages[index].reasoningContent ?? "") + (output.content ?? "")
-            default:
-                continue
+    func applyLMStudioChunk(
+        _ chunk: LMStudioStreamChunk,
+        to state: inout LoadedState,
+        assistantMessageId: UUID
+    ) {
+        switch chunk {
+        case .token(let text):
+            guard let index = state.messages.firstIndex(where: { $0.id == assistantMessageId }) else { return }
+            state.messages[index].content += text
+        case .reasoning(let text):
+            guard let index = state.messages.firstIndex(where: { $0.id == assistantMessageId }) else { return }
+            state.messages[index].reasoningContent = (state.messages[index].reasoningContent ?? "") + text
+        case .toolCallStarted:
+            state.isSearchingWeb = true
+        case .toolCallCompleted:
+            state.isSearchingWeb = false
+        case .usage(var usage):
+            if let start = streamStartTime {
+                let elapsed = ContinuousClock.now - start
+                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                if seconds > 0 {
+                    usage = TokenUsage(
+                        promptTokens: usage.promptTokens,
+                        completionTokens: usage.completionTokens,
+                        totalTokens: usage.totalTokens,
+                        tokensPerSecond: Double(usage.completionTokens) / seconds
+                    )
+                }
             }
+            if let index = state.messages.firstIndex(where: { $0.id == assistantMessageId }) {
+                state.messages[index].tokenUsage = usage
+            }
+        case .responseId(let rid):
+            state.conversation?.lmStudioResponseId = rid
         }
-        if let stats = response.stats {
-            let outputTokens = stats.totalOutputTokens ?? 0
-            currentState.messages[index].tokenUsage = TokenUsage(
-                promptTokens: stats.inputTokens ?? 0,
-                completionTokens: outputTokens,
-                totalTokens: (stats.inputTokens ?? 0) + outputTokens,
-                tokensPerSecond: stats.tokensPerSecond
-            )
-        }
-        currentState.conversation?.lmStudioResponseId = response.responseId
-        state = .loaded(currentState)
     }
 
     func handleLMStudioError(_ error: Error, assistantMessageId: UUID, model: String) {
@@ -73,6 +90,7 @@ private extension ChatViewModel {
             currentState.messages.remove(at: index)
         }
         currentState.isStreaming = false
+        currentState.isSearchingWeb = false
         currentState.errorMessage = error.localizedDescription
         state = .loaded(currentState)
         scheduleErrorDismiss()

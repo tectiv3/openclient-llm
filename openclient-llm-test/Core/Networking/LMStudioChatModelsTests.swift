@@ -39,7 +39,8 @@ final class LMStudioChatModelsTests: XCTestCase {
             reasoning: "off",
             contextLength: 8_000,
             previousResponseId: "resp_previous",
-            store: true
+            store: true,
+            stream: nil
         )
 
         // When

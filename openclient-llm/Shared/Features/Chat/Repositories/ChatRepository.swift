@@ -36,6 +36,15 @@ protocol ChatRepositoryProtocol: Sendable {
         previousResponseId: String?,
         integrations: [MCPIntegration]
     ) async throws -> LMStudioChatResponse
+    func streamLMStudioChat(
+        input: String,
+        model: String,
+        systemPrompt: String,
+        parameters: ModelParameters,
+        contextWindowTokens: Int?,
+        previousResponseId: String?,
+        integrations: [MCPIntegration]
+    ) -> AsyncThrowingStream<LMStudioStreamChunk, Error>
     func buildNonStreamingRequestBody(
         messages: [ChatMessage],
         model: String,
@@ -55,6 +64,27 @@ extension ChatRepositoryProtocol {
     ) async throws -> LMStudioChatResponse {
         throw APIError.networkError("LM Studio chat is not configured")
     }
+
+    func streamLMStudioChat(
+        input: String,
+        model: String,
+        systemPrompt: String,
+        parameters: ModelParameters,
+        contextWindowTokens: Int?,
+        previousResponseId: String?,
+        integrations: [MCPIntegration]
+    ) -> AsyncThrowingStream<LMStudioStreamChunk, Error> {
+        AsyncThrowingStream { $0.finish(throwing: APIError.networkError("LM Studio streaming not configured")) }
+    }
+}
+
+enum LMStudioStreamChunk: Sendable {
+    case token(String)
+    case reasoning(String)
+    case toolCallStarted(name: String)
+    case toolCallCompleted
+    case usage(TokenUsage)
+    case responseId(String)
 }
 
 enum StreamChunk: Sendable {
@@ -204,7 +234,7 @@ struct ChatRepository: ChatRepositoryProtocol {
         let request = LMStudioChatRequest(
             model: model,
             input: input,
-            systemPrompt: systemPrompt.isEmpty ? nil : systemPrompt,
+            systemPrompt: previousResponseId != nil ? nil : (systemPrompt.isEmpty ? nil : systemPrompt),
             integrations: integrations,
             temperature: parameters.temperature,
             maxOutputTokens: parameters.maxTokens,
@@ -212,7 +242,8 @@ struct ChatRepository: ChatRepositoryProtocol {
             reasoning: parameters.thinkingEnabled == false ? "off" : nil,
             contextLength: contextWindowTokens,
             previousResponseId: previousResponseId,
-            store: true
+            store: true,
+            stream: nil
         )
         return try await apiClient.request(
             endpoint: "/api/v1/chat",
@@ -220,6 +251,40 @@ struct ChatRepository: ChatRepositoryProtocol {
             body: request,
             timeoutInterval: 300
         )
+    }
+
+    func streamLMStudioChat(
+        input: String,
+        model: String,
+        systemPrompt: String,
+        parameters: ModelParameters,
+        contextWindowTokens: Int?,
+        previousResponseId: String?,
+        integrations: [MCPIntegration]
+    ) -> AsyncThrowingStream<LMStudioStreamChunk, Error> {
+        let request = LMStudioChatRequest(
+            model: model,
+            input: input,
+            systemPrompt: previousResponseId != nil ? nil : (systemPrompt.isEmpty ? nil : systemPrompt),
+            integrations: integrations,
+            temperature: parameters.temperature,
+            maxOutputTokens: parameters.maxTokens,
+            topP: parameters.topP,
+            reasoning: parameters.thinkingEnabled == false ? "off" : nil,
+            contextLength: contextWindowTokens,
+            previousResponseId: previousResponseId,
+            store: true,
+            stream: true
+        )
+
+        let dataStream = apiClient.streamRequest(endpoint: "/api/v1/chat", body: request)
+
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                await runLMStudioStream(dataStream: dataStream, continuation: continuation)
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 
     func buildNonStreamingRequestBody(
@@ -248,6 +313,51 @@ struct ChatRepository: ChatRepositoryProtocol {
 // MARK: - Private
 
 private extension ChatRepository {
+    func runLMStudioStream(
+        dataStream: AsyncThrowingStream<Data, Error>,
+        continuation: AsyncThrowingStream<LMStudioStreamChunk, Error>.Continuation
+    ) async {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        do {
+            for try await data in dataStream {
+                guard !Task.isCancelled else { break }
+                guard let event = try? decoder.decode(LMStudioStreamEvent.self, from: data) else { continue }
+                switch event.type {
+                case "reasoning.delta":
+                    if let content = event.content { continuation.yield(.reasoning(content)) }
+                case "message.delta":
+                    if let content = event.content { continuation.yield(.token(content)) }
+                case "tool_call.name":
+                    continuation.yield(.toolCallStarted(name: event.toolName ?? event.tool ?? "tool"))
+                case "tool_call.success":
+                    continuation.yield(.toolCallCompleted)
+                case "chat.end":
+                    if let result = event.result {
+                        if let rid = result.responseId {
+                            continuation.yield(.responseId(rid))
+                        }
+                        if let stats = result.stats {
+                            let outputTokens = stats.totalOutputTokens ?? 0
+                            continuation.yield(.usage(TokenUsage(
+                                promptTokens: stats.inputTokens ?? 0,
+                                completionTokens: outputTokens,
+                                totalTokens: (stats.inputTokens ?? 0) + outputTokens,
+                                tokensPerSecond: stats.tokensPerSecond
+                            )))
+                        }
+                    }
+                default:
+                    break
+                }
+            }
+            continuation.finish()
+        } catch {
+            LogManager.error("LM Studio stream error: \(error)")
+            continuation.finish(throwing: error)
+        }
+    }
+
     func runStream(
         dataStream: AsyncThrowingStream<Data, Error>,
         decoder: JSONDecoder,
