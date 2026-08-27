@@ -60,6 +60,17 @@ extension ChatView {
         .frame(maxWidth: .infinity)
     }
 
+    func handleSend() {
+        guard case .loaded(let stateBeforeSend) = viewModel.state else { return }
+        let previousMessageCount = stateBeforeSend.messages.count
+        viewModel.send(.sendTapped)
+        if case .loaded(let stateAfterSend) = viewModel.state,
+           stateAfterSend.messages.count > previousMessageCount {
+            shouldAutoScroll = true
+        }
+        showActions = false
+    }
+
     func visibleMessageDate(
         in messages: [ChatMessage],
         visibleMessageIds: [UUID]
