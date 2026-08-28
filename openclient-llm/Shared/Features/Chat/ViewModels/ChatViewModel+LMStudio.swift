@@ -28,13 +28,13 @@ extension ChatViewModel {
 
         do {
             for try await chunk in stream {
-                guard !Task.isCancelled, isActiveStream(context.assistantId),
-                      case .loaded(var currentState) = state else { return }
-                applyLMStudioChunk(chunk, to: &currentState, assistantMessageId: context.assistantId)
-                state = .loaded(currentState)
+                guard !Task.isCancelled, isActiveStream(context.assistantId) else { return }
+                applyLMStudioChunk(chunk, assistantMessageId: context.assistantId)
             }
+            flushStreamingTextUpdates(for: context.assistantId)
             await finishStreaming(context.assistantId, model: context.modelId)
         } catch {
+            flushStreamingTextUpdates(for: context.assistantId)
             handleLMStudioError(error, assistantMessageId: context.assistantId, model: context.modelId)
         }
     }
@@ -45,20 +45,21 @@ extension ChatViewModel {
 private extension ChatViewModel {
     func applyLMStudioChunk(
         _ chunk: LMStudioStreamChunk,
-        to state: inout LoadedState,
         assistantMessageId: UUID
     ) {
         switch chunk {
         case .token(let text):
-            guard let index = state.messages.firstIndex(where: { $0.id == assistantMessageId }) else { return }
-            state.messages[index].content += text
+            enqueueStreamingTextUpdate(.token(text), assistantMessageId: assistantMessageId)
         case .reasoning(let text):
-            guard let index = state.messages.firstIndex(where: { $0.id == assistantMessageId }) else { return }
-            state.messages[index].reasoningContent = (state.messages[index].reasoningContent ?? "") + text
+            enqueueStreamingTextUpdate(.reasoning(text), assistantMessageId: assistantMessageId)
         case .toolCallStarted:
-            state.isSearchingWeb = true
+            guard case .loaded(var currentState) = state else { return }
+            currentState.isSearchingWeb = true
+            state = .loaded(currentState)
         case .toolCallCompleted:
-            state.isSearchingWeb = false
+            guard case .loaded(var currentState) = state else { return }
+            currentState.isSearchingWeb = false
+            state = .loaded(currentState)
         case .usage(var usage):
             if let start = streamStartTime {
                 let elapsed = ContinuousClock.now - start
@@ -72,11 +73,16 @@ private extension ChatViewModel {
                     )
                 }
             }
-            if let index = state.messages.firstIndex(where: { $0.id == assistantMessageId }) {
-                state.messages[index].tokenUsage = usage
+            flushStreamingTextUpdates(for: assistantMessageId)
+            guard case .loaded(var currentState) = state else { return }
+            if let index = currentState.messages.firstIndex(where: { $0.id == assistantMessageId }) {
+                currentState.messages[index].tokenUsage = usage
             }
+            state = .loaded(currentState)
         case .responseId(let rid):
-            state.conversation?.lmStudioResponseId = rid
+            guard case .loaded(var currentState) = state else { return }
+            currentState.conversation?.lmStudioResponseId = rid
+            state = .loaded(currentState)
         }
     }
 

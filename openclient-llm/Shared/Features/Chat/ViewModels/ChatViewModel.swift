@@ -127,6 +127,7 @@ final class ChatViewModel {
     let compactConversationUseCase: CompactConversationUseCaseProtocol
     let buildFallbackRequestUseCase: BuildFallbackRequestUseCaseProtocol
     var streamTask: Task<Void, Never>?
+    @ObservationIgnored var streamingUpdateBuffer = StreamingUpdateBuffer()
     var compactionTask: Task<Void, Never>?
     private var loadTask: Task<Void, Never>?
     var activeAssistantMessageId: UUID?
