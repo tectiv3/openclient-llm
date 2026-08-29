@@ -22,7 +22,7 @@ final class AgentStreamUseCaseTests: XCTestCase {
     override func setUp() async throws {
         try await super.setUp()
         mockRepository = MockChatRepository()
-        sut = AgentStreamUseCase(repository: mockRepository)
+        sut = AgentStreamUseCase(repository: mockRepository, chunkDelay: .zero)
         toolRegistry = ToolRegistry(tools: [])
     }
 
@@ -67,7 +67,7 @@ final class AgentStreamUseCaseTests: XCTestCase {
         let firstResponse = makeToolCallResponse(toolCalls: [toolCall])
         let secondResponse = makeStopResponse(content: "Based on results")
         let seqRepo = makeSequentialRepo(responses: [firstResponse, secondResponse])
-        let seqSut = AgentStreamUseCase(repository: seqRepo)
+        let seqSut = AgentStreamUseCase(repository: seqRepo, chunkDelay: .zero)
 
         // When
         var toolStarted = false
@@ -106,7 +106,7 @@ final class AgentStreamUseCaseTests: XCTestCase {
         let firstResponse = makeStopResponse(content: "{}")
         let secondResponse = makeStopResponse(content: "Hola! Estoy bien, gracias.")
         let seqRepo = makeSequentialRepo(responses: [firstResponse, secondResponse])
-        let seqSut = AgentStreamUseCase(repository: seqRepo)
+        let seqSut = AgentStreamUseCase(repository: seqRepo, chunkDelay: .zero)
 
         var tokens: [String] = []
         let stream = seqSut.execute(
@@ -122,6 +122,68 @@ final class AgentStreamUseCaseTests: XCTestCase {
         XCTAssertFalse(tokens.contains("{}"), "Raw '{}' must never reach the UI")
         XCTAssertEqual(tokens.joined(), "Hola! Estoy bien, gracias.")
         XCTAssertEqual(seqRepo.callIndex, 2, "Should have made a second request without tools")
+    }
+
+    func test_execute_whitespaceOnlyResponse_retriesWithoutEmittingBlankContent() async throws {
+        let firstResponse = makeStopResponse(content: " \n\t ")
+        let secondResponse = makeStopResponse(content: "Final answer")
+        let repository = RecordingAgentRepository(responses: [firstResponse, secondResponse])
+        let whitespaceSUT = AgentStreamUseCase(repository: repository, chunkDelay: .zero)
+
+        var tokens: [String] = []
+        let stream = whitespaceSUT.execute(
+            messages: [ChatMessage(role: .user, content: "Hi")],
+            model: "gpt-4",
+            parameters: .default,
+            toolRegistry: ToolRegistry(tools: [GetCurrentDatetimeTool()])
+        )
+        for try await event in stream {
+            if case .token(let text) = event { tokens.append(text) }
+        }
+
+        XCTAssertEqual(tokens.joined(), "Final answer")
+        XCTAssertEqual(repository.requests.count, 2)
+        XCTAssertFalse(repository.toolRequests[0]?.isEmpty ?? true)
+        XCTAssertNil(repository.toolRequests[1], "Retry should strip tools")
+    }
+
+    func test_execute_responseWithReasoning_emitsReasoningBeforeContent() async throws {
+        let message = ChatCompletionResponse.Message(
+            role: "assistant", content: "Final answer", reasoningContent: "Think first", images: nil, toolCalls: nil
+        )
+        let response = ChatCompletionResponse(
+            id: "resp-reasoning",
+            choices: [ChatCompletionResponse.Choice(message: message, finishReason: "stop")],
+            usage: nil
+        )
+        mockRepository.agentCompletionResult = .success(response)
+
+        var reasoning = ""
+        var content = ""
+        var didReceiveContent = false
+        var reasoningArrivedAfterContent = false
+        let stream = sut.execute(
+            messages: [ChatMessage(role: .user, content: "Hi")],
+            model: "gpt-4",
+            parameters: .default,
+            toolRegistry: toolRegistry
+        )
+        for try await event in stream {
+            switch event {
+            case .reasoning(let text):
+                reasoning += text
+                reasoningArrivedAfterContent = reasoningArrivedAfterContent || didReceiveContent
+            case .token(let text):
+                content += text
+                didReceiveContent = true
+            default:
+                break
+            }
+        }
+
+        XCTAssertEqual(reasoning, "Think first")
+        XCTAssertEqual(content, "Final answer")
+        XCTAssertFalse(reasoningArrivedAfterContent)
     }
 
     func test_execute_toolCallsWithStopFinishReason_executesToolsInsteadOfEmittingContent() async throws {
@@ -141,7 +203,7 @@ final class AgentStreamUseCaseTests: XCTestCase {
         )
         let secondResponse = makeStopResponse(content: "Final grounded answer")
         let seqRepo = makeSequentialRepo(responses: [firstResponse, secondResponse])
-        let seqSut = AgentStreamUseCase(repository: seqRepo)
+        let seqSut = AgentStreamUseCase(repository: seqRepo, chunkDelay: .zero)
 
         var toolStarted = false
         var tokens: [String] = []
@@ -176,7 +238,7 @@ final class AgentStreamUseCaseTests: XCTestCase {
             makeToolCallResponse(toolCalls: [toolCall]),
             makeStopResponse(content: "Final answer")
         ])
-        let agent = AgentStreamUseCase(repository: repository)
+        let agent = AgentStreamUseCase(repository: repository, chunkDelay: .zero)
         let message = ChatMessage(role: .user, content: String(repeating: "a", count: 80))
 
         // When
@@ -249,7 +311,7 @@ final class AgentStreamUseCaseTests: XCTestCase {
         }
 
         let infiniteRepo = InfiniteToolRepo(response: toolCallResponse)
-        let infiniteSut = AgentStreamUseCase(repository: infiniteRepo)
+        let infiniteSut = AgentStreamUseCase(repository: infiniteRepo, chunkDelay: .zero)
 
         // When
         let stream = infiniteSut.execute(

@@ -73,12 +73,18 @@ struct AgentStreamUseCase: AgentStreamUseCaseProtocol {
     private static let maximumToolResultCharacters = 12_000
     private let repository: ChatRepositoryProtocol
     private let timeout: Duration
+    private let chunkDelay: Duration
 
     // MARK: - Init
 
-    init(repository: ChatRepositoryProtocol = ChatRepository(), timeout: Duration = .seconds(600)) {
+    init(
+        repository: ChatRepositoryProtocol = ChatRepository(),
+        timeout: Duration = .seconds(600),
+        chunkDelay: Duration = .milliseconds(20)
+    ) {
         self.repository = repository
         self.timeout = timeout
+        self.chunkDelay = chunkDelay
     }
 
     // MARK: - Execute
@@ -170,7 +176,7 @@ private extension AgentStreamUseCase {
                     toolCallCount: &toolCallCount,
                     context: AgentRoundContext(requestMessages: requestMessages, loop: context)
                 )
-            } else if handleFinalChoice(choice, continuation: context.continuation) {
+            } else if try await handleFinalChoice(choice, continuation: context.continuation, delay: chunkDelay) {
                 guard !forceFinalResponse else { throw AgentStreamError.invalidResponse }
                 forceFinalResponse = true
             } else {
@@ -325,20 +331,27 @@ private extension AgentStreamUseCase {
         )
     }
 
-    func handleFinalChoice(
+    nonisolated func hasPresentableFinalContent(_ choice: ChatCompletionResponse.Choice) -> Bool {
+        let content = choice.message.content?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let reasoning = choice.message.reasoningContent?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return (!content.isEmpty && content != "{}") || !reasoning.isEmpty
+    }
+
+    nonisolated func handleFinalChoice(
         _ choice: ChatCompletionResponse.Choice,
-        continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
-    ) -> Bool {
+        continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation,
+        delay: Duration
+    ) async throws -> Bool {
         let content = choice.message.content ?? ""
         let reasoning = choice.message.reasoningContent
-        if content.trimmingCharacters(in: .whitespacesAndNewlines) == "{}" { return true }
+        guard hasPresentableFinalContent(choice) else { return true }
         if let reasoning, !reasoning.isEmpty {
-            yieldChunked(reasoning, as: { .reasoning($0) }, continuation: continuation)
+            try await yieldChunked(reasoning, as: { .reasoning($0) }, continuation: continuation, delay: delay)
         }
-        if !content.isEmpty {
-            yieldChunked(content, as: { .token($0) }, continuation: continuation)
+        if !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try await yieldChunked(content, as: { .token($0) }, continuation: continuation, delay: delay)
         }
-        return content.isEmpty && (reasoning?.isEmpty ?? true)
+        return false
     }
 
     func emitUsage(
@@ -360,13 +373,26 @@ private extension AgentStreamUseCase {
     nonisolated func yieldChunked(
         _ text: String,
         as event: @Sendable (String) -> AgentEvent,
-        continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
-    ) {
+        continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation,
+        delay: Duration
+    ) async throws {
+        let targetChunkCount = 100
+        let maximumChunkCount = 300
+        let minimumChunkSize = 4
+        let preferredMaximumChunkSize = 48
+        let adaptiveChunkSize = text.count / targetChunkCount + (text.count % targetChunkCount == 0 ? 0 : 1)
+        let preferredChunkSize = min(preferredMaximumChunkSize, max(minimumChunkSize, adaptiveChunkSize))
+        let minimumSizeForChunkLimit = text.count / maximumChunkCount + (text.count % maximumChunkCount == 0 ? 0 : 1)
+        let chunkSize = max(preferredChunkSize, minimumSizeForChunkLimit)
         var index = text.startIndex
         while index < text.endIndex {
-            let end = text.index(index, offsetBy: min(2, text.distance(from: index, to: text.endIndex)))
+            try Task.checkCancellation()
+            let end = text.index(index, offsetBy: min(chunkSize, text.distance(from: index, to: text.endIndex)))
             continuation.yield(event(String(text[index..<end])))
             index = end
+            if index < text.endIndex {
+                try await Task.sleep(for: delay)
+            }
         }
     }
 
