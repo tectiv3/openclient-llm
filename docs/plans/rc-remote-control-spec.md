@@ -383,17 +383,18 @@ mirroring existing feature layout). Tests in `openclient-llm-test/Features/Code/
 `@MainActor`, `send(_:)`):
 
 - States: `.disconnected(ConnectForm)`, `.connecting`, `.connected(SessionView)`,
-  `.reconnecting(SessionView)` (preserves transcript, shows inline banner),
-  `.failed(error)`. Transitions: transport error while connected → `.reconnecting`;
-  auth error (`bad_code`/`rate_limited`) while reconnecting → `.disconnected`
-  (prompt for new code); reconnect success → `.connected`.
+  `.reconnecting(SessionView)` (preserves transcript, shows top amber banner),
+  `.failed(error)`. `ConnectForm` tracks whether host/port are saved (code-only
+  mode) or need initial setup (full form mode). Transitions: transport error while
+  connected → `.reconnecting`; auth error (`bad_code`/`rate_limited`) while
+  reconnecting → `.disconnected` (prompt for new code); reconnect success →
+  `.connected`.
 - Events: `connect(host:port:code:)`, `disconnect()`, `sendPrompt(text)`,
   `sendSteer(text)`, `abort()`, `answer(id, answer)`,
   `answerQuestionnaire(id, answers)`, `refreshState()`.
 - Input bar semantics: idle → Send = `prompt`; streaming → Send = `steer`,
   Stop button = `abort`.
-- Pending question → question card (options + "Type something..." for `question`;
-  list of tabbed questions for `questionnaire`).
+- Pending question → modal overlay (see B3 question modal details).
 
 **File length**: Split via extensions to stay under SwiftLint's 500-line limit:
 - `CodeViewModel.swift` — state, events, connection lifecycle
@@ -402,16 +403,123 @@ mirroring existing feature layout). Tests in `openclient-llm-test/Features/Code/
 
 ### B3. Views
 
-- `CodeView` (root): switches on state. Connect screen = host/port/code fields +
-  Connect button; code field 6 chars, hex, uppercase. Host/port pre-filled from
-  `CodeSettings` if previously connected; code always entered fresh (ephemeral).
-- `CodeSessionView`: header (project path from `cwd`, model name, streaming
-  indicator, context usage as percentage bar), transcript list, input bar, Stop
-  button.
-- Tool step rows collapsible; bash steps show streaming output while running
-  (default collapsed after start, expand to follow).
-- `#Preview` in every view file; localized strings via `String(localized:)`; follow
-  `chat-visual-style`/`design-ui` specs for look.
+General: `#Preview` in every view file; localized strings via `String(localized:)`;
+follow `chat-visual-style`/`design-ui` specs for look; all views theme-aware
+(light/dark).
+
+#### B3.1 `CodeView` (root)
+
+Switches on `CodeViewModel.state`:
+- `.disconnected` → connect screen
+- `.connecting` → connect screen with spinner/disabled controls
+- `.connected` → `CodeSessionView`
+- `.reconnecting` → `CodeSessionView` with reconnect overlay
+- `.failed` → error state with retry
+
+#### B3.2 Connect screen
+
+**Adaptive layout** — first time (no saved host/port) vs repeat:
+
+- **First time**: Centered branded card — terminal icon (SF Symbol
+  `chevron.left.forwardslash.chevron.right`) in a `.glassEffect(.regular, in:
+  .circle)`, title "Connect to pi", three fields: host (text, placeholder
+  `mac.ts.net`), port (numeric, default `47800`), code (6-char hex, monospace,
+  uppercase, auto-advance). Connect button below. On successful connect, host/port
+  saved to `CodeSettings`.
+- **Repeat** (host/port already saved): Shows only the code field (large, centered,
+  monospace) + Connect button. Small "Change host" link below that expands to reveal
+  host/port fields inline. Pre-filled from saved values.
+- **Validation**: code must be exactly 6 hex characters; Connect button disabled
+  until valid. Host non-empty. Port 1–65535.
+- **Error display**: Wrong code → inline error below code field ("Invalid code —
+  check the code shown in pi"). Rate-limited → "Too many attempts — wait 60s" with
+  countdown. Connection refused → "Cannot reach host — check Tailscale connection".
+- **Focus**: auto-focus code field (on repeat) or host field (on first time).
+
+#### B3.3 `CodeSessionView`
+
+- **Header**: Navigation toolbar (`.principal` placement). Shows:
+  - Truncated `cwd` path (last 2 components, e.g. `~/code/myproject`)
+  - Model name pill
+  - Connection status dot (green = connected, amber = reconnecting)
+  - Context usage percentage bar (below toolbar, same pattern as
+    `ChatContextUsageView`)
+
+- **Transcript**: `LazyVStack` with message items, same scroll behavior as Chat
+  (`ScrollTriggerModifier`). Auto-scroll on new events; user scroll up disables
+  auto-scroll + shows floating "jump to bottom" button. Message types:
+  - **User messages**: right-aligned glass bubbles (accent-tinted), same as Chat
+  - **Assistant text**: left-aligned with sparkles icon, streaming markdown with
+    blinking cursor, same as Chat's `MessageBubbleView` pattern
+  - **Thinking/reasoning**: collapsible disclosure (same `ReasoningDisclosureState`
+    pattern as Chat — collapsed by default, expand to see reasoning text)
+  - **Tool steps**: collapsible inline rows within assistant message area. Each row:
+    tool icon (SF Symbol per tool type) + tool name + one-line arg summary (e.g.
+    "Read src/main.ts", "Bash npm test"). Default collapsed after completion;
+    expand shows args + output. Bash steps show streaming monospace output while
+    running (live-updating, capped to last 20 lines collapsed). Matches the
+    collapsible pattern from `agent-tool-calling.instructions.md`.
+  - **Resolved question cards**: compact inline card showing question (truncated, 1
+    line) + selected answer with checkmark. Glass background, left-aligned. Shows
+    "(wrote)" prefix for custom answers. Appears in transcript after a question is
+    answered via the modal.
+  - **Compaction summary**: subtle separator with "Context compacted" label,
+    collapsed summary text.
+
+- **Empty state** (connected but no history): centered glass card — terminal icon
+  in glass circle, "Connected to pi" title, cwd path, model name. Subtitle:
+  "Send a message or use pi directly — activity will appear here."
+
+- **Reconnecting overlay**: amber glass banner pinned to top of session view (below
+  toolbar). Spinner + "Reconnecting..." text. Transcript visible and scrollable
+  underneath. Input bar disabled. Disappears on successful reconnect with brief
+  success animation.
+
+#### B3.4 `CodeInputBarView`
+
+New simplified input bar (NOT reusing `ChatInputBarView` — different semantics, no
+attachments/recording/web search):
+
+- **Structure**: text field + send button + stop button (when streaming). No image
+  picker, document picker, camera picker, recording, or web search indicator.
+- **Idle mode**: placeholder "Message pi...", standard glass capsule bar style
+  (matching `chat-visual-style` input bar pattern), send button (arrow.up icon).
+- **Streaming/steer mode**: placeholder "Steer pi...", bar border/background shifts
+  to accent tint (amber/orange) to signal steer mode. Send icon changes. Stop
+  button (square.fill) appears adjacent to input field.
+- **Disabled states**: during `.connecting` and `.reconnecting`, bar is disabled
+  (greyed out, not interactive).
+- **macOS**: same bar, keyboard shortcut Enter to send, Shift+Enter for newline
+  (same as Chat).
+
+#### B3.5 Question modal overlay
+
+Presented as a centered modal card over the session view (dimmed background,
+dismissable via X button or swipe-down on iOS):
+
+- **Single question (`question`)**: card shows question text at top, options as
+  tappable rows (each row: option label, optional description below in muted text),
+  "Type something..." row at bottom (tapping opens inline text field within the
+  card). X button at top-right to dismiss without answering (sends cancel). After
+  tapping an option → card dismisses, resolved card appears in transcript, answer
+  sent to pi.
+
+- **Questionnaire (multi-question)**: swipeable horizontal pages with page dots at
+  bottom (UIPageControl / TabView with .page style). Each page is one question with
+  its options. Last page has Submit button (enabled when all questions answered).
+  Page header shows "1 of N" with navigation arrows. Same option row style as
+  single question. X button dismisses entire questionnaire (cancel).
+
+- **Custom text input**: when "Type something..." is tapped, the option row expands
+  to show a text field inline. Submit with Enter / Done button. Esc/tap outside to
+  collapse back to option list.
+
+- **Glass styling**: card uses `.glassEffect(.regular)` with rounded corners
+  (`.rect(cornerRadius: 20)`). Options use subtle dividers between rows.
+
+- **Notification-triggered**: if question arrived via local notification (app was
+  backgrounded), tapping the notification foregrounds the app and the modal
+  auto-presents.
 
 ### B4. Tab wiring
 
