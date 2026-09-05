@@ -8,6 +8,10 @@
 
 import Foundation
 
+#if os(iOS)
+import UIKit
+#endif
+
 @Observable
 @MainActor
 final class CodeViewModel {
@@ -26,6 +30,8 @@ final class CodeViewModel {
             answers: [CodeQuestionnaireAnswer]
         )
         case refreshState
+        case appDidEnterBackground
+        case appWillEnterForeground
     }
 
     enum State: Equatable {
@@ -42,6 +48,9 @@ final class CodeViewModel {
         var code: String = ""
         var errorMessage: String?
         var hasSavedHost: Bool = false
+        // When a rate_limited error is received, the date the pairing-code
+        // lockout (fixed 60s per spec A7) lifts, so the UI can show a countdown.
+        var rateLimitedUntil: Date?
     }
 
     struct SessionState: Equatable {
@@ -52,7 +61,6 @@ final class CodeViewModel {
         var contextUsage: CodeContextUsage?
         var items: [CodeTranscriptItem] = []
         var pendingQuestion: PendingQuestion?
-        var reconnectAttempt: Int = 0
     }
 
     struct PendingQuestion: Equatable, Identifiable {
@@ -65,6 +73,14 @@ final class CodeViewModel {
         case questionnaire(CodeQuestionnaireParams)
     }
 
+    /// Last-used connect credentials, retained in-memory because the pairing
+    /// code is ephemeral (not persisted) and needed for auto-reconnect.
+    struct ConnectCredentials: Equatable {
+        let host: String
+        let port: Int
+        let code: String
+    }
+
     // MARK: - Properties
 
     private(set) var state: State
@@ -74,11 +90,36 @@ final class CodeViewModel {
     var eventTask: Task<Void, Never>?
     var queuedAnswer: CodeClientMessage?
 
+    // Shared with the CodeViewModel+Background / +Questions extensions.
+    let backgroundUseCase: CodeBackgroundUseCaseProtocol
+    let notificationManager: LocalNotificationManagerProtocol
+
+    // Last successful-connect credentials (code is ephemeral, so the VM must
+    // retain it to auto-reconnect after a background disconnect).
+    var lastConnect: ConnectCredentials?
+    var backgroundDisconnected = false
+
+    // Transient toast text (e.g. question resolved on another device),
+    // displayed by the session view which clears it after dismissal.
+    var transientToast: String?
+
+    // Testability seam: production reads UIApplication state on every call;
+    // tests override this to simulate backgrounding without UIApplication.
+    var isBackgrounded: @MainActor () -> Bool = {
+        #if os(iOS)
+        UIApplication.shared.applicationState == .background
+        #else
+        false
+        #endif
+    }
+
     // MARK: - Init
 
     init(
         client: CodeServerClientProtocol = CodeServerClient(),
-        settingsManager: SettingsManagerProtocol = SettingsManager()
+        settingsManager: SettingsManagerProtocol = SettingsManager(),
+        backgroundUseCase: CodeBackgroundUseCaseProtocol = CodeBackgroundUseCase(),
+        notificationManager: LocalNotificationManagerProtocol = LocalNotificationManager()
     ) {
         let host = settingsManager.getCodeHost() ?? ""
         let port = settingsManager.getCodePort()
@@ -90,6 +131,8 @@ final class CodeViewModel {
         ))
         self.client = client
         self.settingsManager = settingsManager
+        self.backgroundUseCase = backgroundUseCase
+        self.notificationManager = notificationManager
     }
 
     func send(_ event: Event) {
@@ -115,6 +158,10 @@ final class CodeViewModel {
             handleAnswerQuestionnaire(id: id, answers: answers)
         case .refreshState:
             Task { await client.send(.getState) }
+        case .appDidEnterBackground:
+            handleAppDidEnterBackground()
+        case .appWillEnterForeground:
+            handleAppWillEnterForeground()
         }
     }
 }
@@ -125,35 +172,20 @@ private extension CodeViewModel {
     func handleConnect(host: String, port: Int, code: String) {
         settingsManager.setCodeHost(host)
         settingsManager.setCodePort(port)
-
-        state = .connecting
-        queuedAnswer = nil
-
-        let stream = client.connect(
+        lastConnect = ConnectCredentials(
             host: host, port: port, code: code
         )
-        eventTask?.cancel()
-        eventTask = Task {
-            await client.send(.hello(code: code))
-            for await event in stream {
-                guard !Task.isCancelled else { break }
-                handleEvent(event)
-            }
-        }
+        establishConnection(host: host, port: port, code: code)
     }
 
     func handleCancelConnect() {
         eventTask?.cancel()
         eventTask = nil
         client.disconnect()
+        backgroundUseCase.end()
+        backgroundDisconnected = false
 
-        let host = settingsManager.getCodeHost() ?? ""
-        let port = settingsManager.getCodePort()
-        state = .disconnected(ConnectForm(
-            host: host,
-            port: port > 0 ? port : 47800,
-            hasSavedHost: !host.isEmpty
-        ))
+        resetToDisconnected()
     }
 
     func handleDisconnect() {
@@ -161,14 +193,10 @@ private extension CodeViewModel {
         eventTask = nil
         client.disconnect()
         queuedAnswer = nil
+        backgroundUseCase.end()
+        backgroundDisconnected = false
 
-        let host = settingsManager.getCodeHost() ?? ""
-        let port = settingsManager.getCodePort()
-        state = .disconnected(ConnectForm(
-            host: host,
-            port: port > 0 ? port : 47800,
-            hasSavedHost: !host.isEmpty
-        ))
+        resetToDisconnected()
     }
 
     func handleSendPrompt(_ text: String) {
@@ -192,6 +220,24 @@ private extension CodeViewModel {
 // MARK: - Event Handling
 
 extension CodeViewModel {
+    func establishConnection(host: String, port: Int, code: String) {
+        state = .connecting
+        queuedAnswer = nil
+        backgroundDisconnected = false
+
+        let stream = client.connect(
+            host: host, port: port, code: code
+        )
+        eventTask?.cancel()
+        eventTask = Task {
+            await client.send(.hello(code: code))
+            for await event in stream {
+                guard !Task.isCancelled else { break }
+                handleEvent(event)
+            }
+        }
+    }
+
     func handleEvent(_ event: CodeEvent) {
         switch event {
         case .helloOk:
@@ -227,18 +273,11 @@ extension CodeViewModel {
             handleError(error)
 
         case .connectionFailed(let message):
+            backgroundUseCase.end()
             state = .failed(errorMessage: message)
 
         case .authFailed(let error):
-            let host = settingsManager.getCodeHost() ?? ""
-            let port = settingsManager.getCodePort()
-            let errorMsg = authErrorMessage(error)
-            state = .disconnected(ConnectForm(
-                host: host,
-                port: port > 0 ? port : 47800,
-                errorMessage: errorMsg,
-                hasSavedHost: !host.isEmpty
-            ))
+            handleAuthFailed(error)
 
         case .disconnected:
             transitionToReconnecting()
@@ -276,6 +315,13 @@ extension CodeViewModel {
         session.model = info.model
         session.isStreaming = info.isStreaming
         session.contextUsage = info.contextUsage
+
+        // Authoritative server state: when not streaming, close out any
+        // bubbles still marked as streaming (agent_settled may not arrive,
+        // e.g. after reconnect).
+        if !info.isStreaming {
+            finalizeStreamingBubbles(in: &session)
+        }
 
         updateSession(session)
     }
@@ -331,9 +377,7 @@ extension CodeViewModel {
         }
     }
 
-    func authErrorMessage(
-        _ error: CodeServerError
-    ) -> String {
+    func authErrorMessage(_ error: CodeServerError) -> String {
         switch error.code {
         case "bad_code":
             return String(
@@ -350,6 +394,20 @@ extension CodeViewModel {
         }
     }
 
+    private func handleAuthFailed(_ error: CodeServerError) {
+        backgroundUseCase.end()
+        var form = disconnectedForm(
+            errorMessage: authErrorMessage(error)
+        )
+        if error.code == "rate_limited" {
+            // Server lockout is a fixed 60s (spec A7); expose the lift
+            // date so the connect screen can render a countdown.
+            form.rateLimitedUntil = Date.now
+                .addingTimeInterval(Self.rateLimitSeconds)
+        }
+        state = .disconnected(form)
+    }
+
     private func sendQueuedAnswerIfNeeded() {
         guard let answer = queuedAnswer else { return }
         queuedAnswer = nil
@@ -358,6 +416,8 @@ extension CodeViewModel {
 
     // MARK: - Session Helpers
 
+    private static let rateLimitSeconds: TimeInterval = 60
+
     var currentSession: SessionState? {
         switch state {
         case .connected(let session), .reconnecting(let session):
@@ -365,6 +425,10 @@ extension CodeViewModel {
         default:
             return nil
         }
+    }
+
+    func resetToDisconnected() {
+        state = .disconnected(disconnectedForm())
     }
 
     func updateSession(_ session: SessionState) {
@@ -376,5 +440,18 @@ extension CodeViewModel {
         default:
             break
         }
+    }
+
+    func disconnectedForm(
+        errorMessage: String? = nil
+    ) -> ConnectForm {
+        let host = settingsManager.getCodeHost() ?? ""
+        let port = settingsManager.getCodePort()
+        return ConnectForm(
+            host: host,
+            port: port > 0 ? port : 47800,
+            errorMessage: errorMessage,
+            hasSavedHost: !host.isEmpty
+        )
     }
 }

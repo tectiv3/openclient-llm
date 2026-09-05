@@ -8,6 +8,10 @@
 
 import Foundation
 
+#if os(iOS)
+import SwiftUI
+#endif
+
 // MARK: - Question Handling
 
 extension CodeViewModel {
@@ -48,6 +52,7 @@ extension CodeViewModel {
             kind: .question(question.params)
         )
         updateSession(session)
+        notifyIfBackgrounded()
     }
 
     func handleQuestionnaireReceived(
@@ -62,6 +67,7 @@ extension CodeViewModel {
             kind: .questionnaire(questionnaire.params)
         )
         updateSession(session)
+        notifyIfBackgrounded()
     }
 
     func handleQuestionResolved(
@@ -69,8 +75,13 @@ extension CodeViewModel {
     ) {
         guard var session = currentSession else { return }
 
-        if session.pendingQuestion?.id == resolved.id {
+        // Single questions and questionnaires both resolve through
+        // question_resolved, so one toast branch covers both modal kinds.
+        let modalWasShowing = session.pendingQuestion?.id == resolved.id
+
+        if modalWasShowing {
             session.pendingQuestion = nil
+            transientToast = toastForResolved(by: resolved.resolvedBy)
         }
 
         if resolved.resolvedBy == "client", let value = resolved.value {
@@ -92,6 +103,15 @@ extension CodeViewModel {
 // MARK: - Private
 
 private extension CodeViewModel {
+    /// The question survives disconnect and is re-delivered on reconnect, so
+    /// the notification is opportunistic — only shown while backgrounded.
+    func notifyIfBackgrounded() {
+        #if os(iOS)
+        guard isBackgrounded() else { return }
+        notificationManager.sendQuestionNotification()
+        #endif
+    }
+
     func sendOrQueueAnswer(_ message: CodeClientMessage) {
         switch state {
         case .connected:
@@ -100,6 +120,17 @@ private extension CodeViewModel {
             queuedAnswer = message
         default:
             break
+        }
+    }
+
+    func toastForResolved(by resolvedBy: String) -> String? {
+        switch resolvedBy {
+        case "client":
+            return String(localized: "Answered from another device.")
+        case "cancelled":
+            return String(localized: "Question cancelled.")
+        default:
+            return nil
         }
     }
 

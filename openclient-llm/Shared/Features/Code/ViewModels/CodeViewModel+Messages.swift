@@ -87,8 +87,18 @@ extension CodeViewModel {
         guard event.sessionId == session.sessionId else { return }
 
         switch event.name {
-        case "message_start":
+        case "agent_start":
+            // Only agent-scoped events drive the session-level flag;
+            // message_start/turn_end fire per LLM turn and would flicker
+            // during multi-turn tool runs.
             session.isStreaming = true
+
+        case "agent_settled":
+            session.isStreaming = false
+            finalizeStreamingBubbles(in: &session)
+
+        case "message_start":
+            // Transcript content only — does not touch session.isStreaming.
             session.items.append(.assistant(
                 id: UUID(), content: [], isStreaming: true
             ))
@@ -103,7 +113,8 @@ extension CodeViewModel {
             updateToolOutput(event, in: &session)
 
         case "turn_end":
-            finalizeStreaming(in: &session)
+            // Ends the current LLM turn's bubble, not the whole agent run.
+            finalizeStreamingBubbles(in: &session)
 
         default:
             break
@@ -318,10 +329,14 @@ private extension CodeViewModel {
             )
         }
     }
+}
 
-    func finalizeStreaming(in session: inout SessionState) {
-        session.isStreaming = false
+// MARK: - Session Finalization
 
+extension CodeViewModel {
+    /// Marks all streaming assistant bubbles as complete without touching
+    /// the session-level `isStreaming` flag (driven by agent events).
+    func finalizeStreamingBubbles(in session: inout SessionState) {
         for index in session.items.indices {
             if case .assistant(let id, let content, true)
                 = session.items[index] {
