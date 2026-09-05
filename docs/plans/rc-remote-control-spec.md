@@ -128,8 +128,13 @@ messages — the probe branch contained `model_change`, `thinking_level_change` 
 `message` entries. **The history mapper must filter to the relevant types**
 (`message`, `compaction`, …) and **skip** `model_change` / `thinking_level_change`.
 `sessionManager` keys include `sessionId, sessionFile, entryCount, filePath,
-getBranch, getEntries, getContext, getLeafId, getLeafEntry, getSessionName,
-getLabel, getHeader, getCompactionEntry` (full list logged by the probe).
+getBranch, getEntries, getContext, getLeafId, getLeafEntry, getSessionId,
+getSessionName, getLabel, getHeader, getCompactionEntry` (full list logged by the probe).
+
+> **Correction to the draft**: the protocol `sessionId` is `sessionManager.getSessionId()` —
+> the **Session UUID, stable for the session lifetime**. `getLeafId()` is the
+> **leaf-entry position** and advances as messages are appended; it is **NOT** a session id
+> (using it as `sessionId` broke harness group 10 and would break Swift rebind detection).
 
 `getContextUsage()` returns **`{tokens: number, contextWindow: number, percent: number}`**
 (verified: `{"tokens":7,"contextWindow":400000,"percent":0.00175}`).

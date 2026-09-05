@@ -539,16 +539,8 @@ function buildState(state: RcSingleton): JsonObject {
         model: { provider, id },
         ...(ctx?.thinkingLevel ? { thinkingLevel: ctx.thinkingLevel } : {}),
         isStreaming: ctx ? !ctx.isIdle() : state.isStreaming,
-        ...(usage && usage.tokens !== null && usage.percent !== null
-            ? {
-                  contextUsage: {
-                      tokens: usage.tokens,
-                      contextWindow: usage.contextWindow,
-                      percent: usage.percent,
-                      used: usage.tokens,
-                      total: usage.contextWindow,
-                  },
-              }
+        ...(usage && usage.tokens !== null && usage.contextWindow !== null && usage.percent !== null
+            ? { contextUsage: { tokens: usage.tokens, contextWindow: usage.contextWindow, percent: usage.percent } }
             : {}),
     }
 }
@@ -773,7 +765,8 @@ function eventPayload(event: unknown): JsonObject {
 }
 
 function sessionId(state: RcSingleton): string {
-    return state.binding?.ctx.sessionManager.getLeafId() ?? 'unknown'
+    return (state.binding?.ctx.sessionManager as { getSessionId?: () => string })?.getSessionId?.()
+      ?? 'unknown'
 }
 
 function sessionName(state: RcSingleton): string | undefined {
@@ -871,7 +864,7 @@ function recordFailedHello(state: RcSingleton, ip: string): void {
     const entry = state.rateLimits.get(ip) ?? { failures: 0, lockedUntil: 0, lastSeen: now }
     entry.failures += 1
     entry.lastSeen = now
-    if (entry.failures > RATE_LIMIT_FAILURES) entry.lockedUntil = now + RATE_LIMIT_LOCK_MS
+    if (entry.failures >= RATE_LIMIT_FAILURES) entry.lockedUntil = now + RATE_LIMIT_LOCK_MS
     state.rateLimits.set(ip, entry)
 }
 

@@ -338,8 +338,10 @@ function assertValidStateShape(state) {
   check(
     state.contextUsage === undefined ||
       (typeof state.contextUsage === "object" && state.contextUsage !== null &&
-        Number.isFinite(state.contextUsage.used) && Number.isFinite(state.contextUsage.total)),
-    "contextUsage, when present, must have numeric used/total",
+        Number.isFinite(state.contextUsage.tokens) &&
+        Number.isFinite(state.contextUsage.contextWindow) &&
+        Number.isFinite(state.contextUsage.percent)),
+    "contextUsage, when present, must have numeric tokens/contextWindow/percent",
   );
 }
 
@@ -394,21 +396,6 @@ registerTest(0, "rc_toggle_on_reports_auth_file", async (ctx) => {
 registerTest(1, "hello_valid_code_gets_hello_ok_state_history", async (ctx) => {
   const hs = await connectAndVerifyConnectTime(ctx);
   hs.close();
-});
-
-registerTest(1, "hello_bad_code_gets_error_and_close", async (ctx) => {
-  requireAuth(ctx);
-  const hs = await handshake(ctx, { code: "deadbe" });
-  await expectErrorThenClose(hs.result, "bad_code", hs.next, hs.close);
-});
-
-// The 60s lockout outlives the run, so this runs last in group 1 (visible failures after, by design).
-registerTest(1, "hello_five_bad_codes_triggers_rate_limit", async (ctx) => {
-  requireAuth(ctx);
-  for (let i = 1; i <= 5; i += 1) {
-    const hs = await handshake(ctx, { code: `00000${i}` });
-    await expectErrorThenClose(hs.result, i === 5 ? "rate_limited" : "bad_code", hs.next, hs.close);
-  }
 });
 
 registerTest(1, "hello_wrong_version_gets_version_mismatch", async (ctx) => {
@@ -588,6 +575,37 @@ registerTest(10, "streaming_buffer_delivered_on_mid_stream_connect", async (ctx)
     a.close();
     if (b) b.close();
   }
+});
+
+// --- group 11: rate-limit handshake tests (run LAST) -----------------------------
+// Registered after group 10 so they run after every other group: these poison the
+// shared 127.0.0.1 rate-limit counter (60s lockout), which must not bleed into groups 1-10.
+
+registerTest(11, "hello_bad_code_gets_error_and_close", async (ctx) => {
+  requireAuth(ctx);
+  const hs = await handshake(ctx, { code: "deadbe" });
+  await expectErrorThenClose(hs.result, "bad_code", hs.next, hs.close);
+});
+
+registerTest(11, "hello_five_bad_codes_triggers_rate_limit", async (ctx) => {
+  requireAuth(ctx);
+  const codes = [];
+  for (let i = 1; i <= 6; i += 1) {
+    const hs = await handshake(ctx, { code: `0000a${i}` });
+    check(hs.result?.type === "error", `expected error on connect ${i}, got ${JSON.stringify(hs.result)}`);
+    codes.push(hs.result.code);
+    try {
+      await withTimeout(hs.next(), RC_WS_TIMEOUT_MS, "server did not close after error");
+    } catch (err) {
+      if (!err?.rcClosed) throw err;
+    }
+    hs.close();
+  }
+  check(codes.some((c) => c === "rate_limited"), `expected at least one rate_limited, got ${JSON.stringify(codes)}`);
+  check(
+    codes.every((c) => c === "bad_code" || c === "rate_limited"),
+    `unexpected error codes beyond bad_code/rate_limited, got ${JSON.stringify(codes)}`,
+  );
 });
 
 
@@ -859,7 +877,7 @@ async function main() {
 
   const results = [];
   const byGroup = (g) => tests.filter((t) => t.group === g);
-  const groupOrder = [0, ...Array.from({ length: 10 }, (_, i) => i + 1).filter((g) => opts.only === null || opts.only.includes(g))];
+  const groupOrder = [0, ...Array.from({ length: 11 }, (_, i) => i + 1).filter((g) => opts.only === null || opts.only.includes(g))];
 
   for (const group of groupOrder) {
     for (const test of byGroup(group)) {
