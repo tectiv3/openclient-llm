@@ -127,6 +127,9 @@ private extension CodeTranscriptItemView {
 
         case .toolUse(_, let toolName, let args, _):
             inlineToolLabel(toolName: toolName, args: args)
+
+        case .unknown:
+            EmptyView()
         }
     }
 

@@ -207,16 +207,28 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
 
     // MARK: - Private
 
+    private struct ConnectionParams {
+        let host: String
+        let port: Int
+        let disconnecting: Bool
+        let attempts: Int
+    }
+
     private func startConnection() {
-        let (host, port, disconnecting, attempts) = state.withLock { locked -> (String, Int, Bool, Int) in
+        let params = state.withLock { locked -> ConnectionParams in
             locked.helloAcked = false
             locked.connectionLostInFlight = false
             locked.attemptGeneration += 1
-            return (locked.currentHost, locked.currentPort, locked.isDisconnecting, locked.reconnectAttempts)
+            return ConnectionParams(
+                host: locked.currentHost,
+                port: locked.currentPort,
+                disconnecting: locked.isDisconnecting,
+                attempts: locked.reconnectAttempts
+            )
         }
-        guard !disconnecting else { return }
+        guard !params.disconnecting else { return }
 
-        let urlString = "ws://\(host):\(port)"
+        let urlString = "ws://\(params.host):\(params.port)"
         guard let url = URL(string: urlString) else {
             yield(.connectionFailed("Invalid URL: \(urlString)"))
             return
@@ -228,7 +240,7 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
         task.resume()
         startReceiveLoop(task)
         startPingLoop()
-        if attempts == 0 {
+        if params.attempts == 0 {
             scheduleConnectionTimeout()
         }
     }

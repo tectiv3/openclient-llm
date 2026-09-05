@@ -191,8 +191,8 @@ private extension CodeSessionView {
             hasher.combine(id)
             for block in content {
                 switch block {
-                case .text(let t): hasher.combine(t.count)
-                case .thinking(let t): hasher.combine(t.count)
+                case .text(let text): hasher.combine(text.count)
+                case .thinking(let text): hasher.combine(text.count)
                 case .toolUse(let tcId, _, _, _): hasher.combine(tcId)
                 case .unknown: break
                 }
