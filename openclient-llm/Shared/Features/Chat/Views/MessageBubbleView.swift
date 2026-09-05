@@ -32,8 +32,7 @@ struct MessageBubbleView: View {
     var onForkTapped: (() -> Void)?
     var onFavouriteTapped: (() -> Void)?
     var onLayoutChanged: (() -> Void)?
-    @State var cursorVisible: Bool = false
-    @State var renderedMarkdown = RenderedMarkdown.empty
+    @State private var cursorVisible = false
     @State private var reasoningDisclosureState = ReasoningDisclosureState()
 
     // MARK: - View
@@ -105,13 +104,11 @@ private extension MessageBubbleView {
                 if message.content.isEmpty && isStreaming && (message.reasoningContent ?? "").isEmpty {
                     thinkingIndicator
                 } else if !message.content.isEmpty {
-                    if isStreaming
-                        || renderedMarkdown.source != message.content
-                        || renderedMarkdown.blocks.isEmpty {
-                        unformattedMessageTextView
-                    } else {
-                        blocksView
-                    }
+                    MarkdownBubbleView(
+                        text: message.content,
+                        isStreaming: isStreaming,
+                        onLayoutChanged: onLayoutChanged
+                    )
                 }
 
                 if !message.content.isEmpty || !message.attachments.isEmpty {
@@ -198,9 +195,6 @@ private extension MessageBubbleView {
                 cursorVisible.toggle()
                 try? await Task.sleep(for: .milliseconds(500))
             }
-        }
-        .task(id: isStreaming ? nil : message.content) {
-            await renderMarkdownIfNeeded()
         }
     }
 
