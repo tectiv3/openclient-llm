@@ -17,6 +17,54 @@ protocol CodeServerClientProtocol: Sendable {
     func disconnect()
 }
 
+// MARK: - Transport Seam
+
+/// Minimal abstraction over `URLSessionWebSocketTask` so tests can inject a
+/// mock transport and replay canned server frames. `URLSession` websocket
+/// tasks cannot be faked via `URLProtocol`, hence the seam.
+protocol CodeWebSocketTask: Sendable {
+    func resume()
+    func cancel()
+    func cancel(with code: URLSessionWebSocketTask.CloseCode, reason: Data?)
+    func send(_ message: URLSessionWebSocketTask.Message) async throws
+    func receive() async throws -> URLSessionWebSocketTask.Message
+}
+
+/// Default `CodeWebSocketTask` backed by a real `URLSessionWebSocketTask`.
+struct URLSessionCodeWebSocketTask: CodeWebSocketTask {
+    let task: URLSessionWebSocketTask
+
+    func resume() { task.resume() }
+    func cancel() { task.cancel() }
+
+    func cancel(with code: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        task.cancel(with: code, reason: reason)
+    }
+
+    func send(_ message: URLSessionWebSocketTask.Message) async throws {
+        try await task.send(message)
+    }
+
+    func receive() async throws -> URLSessionWebSocketTask.Message {
+        try await task.receive()
+    }
+}
+
+protocol CodeWebSocketTransport: Sendable {
+    func makeWebSocketTask(with url: URL) -> CodeWebSocketTask
+}
+
+/// Default `CodeWebSocketTransport` backed by a real `URLSession`.
+struct URLSessionCodeWebSocketTransport: CodeWebSocketTransport {
+    let session: URLSession
+
+    func makeWebSocketTask(with url: URL) -> CodeWebSocketTask {
+        URLSessionCodeWebSocketTask(
+            task: session.webSocketTask(with: url)
+        )
+    }
+}
+
 // MARK: - Client Messages
 
 enum CodeClientMessage: Sendable {
@@ -38,13 +86,19 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
     // MARK: - Properties
 
     private struct LockedState: Sendable {
-        var webSocketTask: URLSessionWebSocketTask?
+        var webSocketTask: CodeWebSocketTask?
         var receiveTask: Task<Void, Never>?
         var pingTask: Task<Void, Never>?
         var coalescingTask: Task<Void, Never>?
         var continuation: AsyncStream<CodeEvent>.Continuation?
         var lastPongTime: Date = .now
         var reconnectAttempts = 0
+        // True once the current attempt completed its handshake, so the
+        // 10s connect timeout cannot kill a healthy, connected session.
+        var helloAcked = false
+        // Deduplicates concurrent connection-lost reports (receive-loop
+        // catch + pong deadline) so one loss schedules one reconnect.
+        var connectionLostInFlight = false
         var currentHost = ""
         var currentPort = 0
         var currentCode = ""
@@ -52,21 +106,33 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
         var pendingCoalescedEvents: [CodeEvent] = []
     }
 
-    private let session: URLSession
+    private let transport: CodeWebSocketTransport
+    private let pingIntervalSeconds: TimeInterval
+    private let pongTimeoutSeconds: TimeInterval
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let state = Mutex(LockedState())
 
     private static let maxReconnectAttempts = 10
     private static let connectionTimeoutSeconds: TimeInterval = 10
-    private static let pingIntervalSeconds: TimeInterval = 30
-    private static let pongTimeoutSeconds: TimeInterval = 10
+    private static let defaultPingIntervalSeconds: TimeInterval = 30
+    private static let defaultPongTimeoutSeconds: TimeInterval = 10
     private static let coalesceIntervalMs: UInt64 = 75
 
     // MARK: - Init
 
-    init(session: URLSession = .shared) {
-        self.session = session
+    init(
+        transport: CodeWebSocketTransport = URLSessionCodeWebSocketTransport(
+            session: .shared
+        ),
+        pingIntervalSeconds: TimeInterval =
+            CodeServerClient.defaultPingIntervalSeconds,
+        pongTimeoutSeconds: TimeInterval =
+            CodeServerClient.defaultPongTimeoutSeconds
+    ) {
+        self.transport = transport
+        self.pingIntervalSeconds = pingIntervalSeconds
+        self.pongTimeoutSeconds = pongTimeoutSeconds
     }
 
     // MARK: - Public
@@ -136,8 +202,10 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
     // MARK: - Private
 
     private func startConnection() {
-        let (host, port, disconnecting) = state.withLock {
-            ($0.currentHost, $0.currentPort, $0.isDisconnecting)
+        let (host, port, disconnecting) = state.withLock { locked -> (String, Int, Bool) in
+            locked.helloAcked = false
+            locked.connectionLostInFlight = false
+            return (locked.currentHost, locked.currentPort, locked.isDisconnecting)
         }
         guard !disconnecting else { return }
 
@@ -147,7 +215,7 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
             return
         }
 
-        let task = session.webSocketTask(with: url)
+        let task = transport.makeWebSocketTask(with: url)
         state.withLock { $0.webSocketTask = task }
 
         task.resume()
@@ -156,7 +224,7 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
         scheduleConnectionTimeout()
     }
 
-    private func startReceiveLoop(_ task: URLSessionWebSocketTask) {
+    private func startReceiveLoop(_ task: CodeWebSocketTask) {
         state.withLock { $0.receiveTask?.cancel() }
 
         let recvTask = Task { [weak self] in
@@ -201,7 +269,10 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
     private func processDecodedEvent(_ event: CodeEvent) {
         switch event {
         case .helloOk:
-            state.withLock { $0.reconnectAttempts = 0 }
+            state.withLock {
+                $0.helloAcked = true
+                $0.reconnectAttempts = 0
+            }
             yield(event)
 
         case .error(let serverError):
@@ -257,22 +328,48 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
     }
 
     private func handleConnectionLost(_ error: Error) {
-        let (attempt, code, shouldStop) = state.withLock { locked in
-            guard !locked.isDisconnecting else {
-                return (0, "", true)
+        // Nested type keeps the withLock return tuple within the
+        // two-member lint limit.
+        struct LostConnection {
+            let attempt: Int
+            let code: String
+            let shouldStop: Bool
+            let staleSocket: CodeWebSocketTask?
+        }
+
+        let lost = state.withLock { locked -> LostConnection in
+            guard !locked.isDisconnecting,
+                  !locked.connectionLostInFlight else {
+                return LostConnection(
+                    attempt: 0, code: "", shouldStop: true, staleSocket: nil
+                )
             }
+            locked.connectionLostInFlight = true
             locked.pingTask?.cancel()
             locked.pingTask = nil
             locked.coalescingTask?.cancel()
             locked.coalescingTask = nil
             locked.pendingCoalescedEvents.removeAll()
+            // Cancel the stale socket and receive loop: the old receive Task
+            // would block in receive() forever otherwise. The continuation
+            // is kept because the scheduled reconnect reuses it.
+            locked.receiveTask?.cancel()
+            locked.receiveTask = nil
+            let staleSocket = locked.webSocketTask
+            locked.webSocketTask = nil
             locked.reconnectAttempts += 1
-            return (locked.reconnectAttempts, locked.currentCode, false)
+            return LostConnection(
+                attempt: locked.reconnectAttempts,
+                code: locked.currentCode,
+                shouldStop: false,
+                staleSocket: staleSocket
+            )
         }
 
-        guard !shouldStop else { return }
+        guard !lost.shouldStop else { return }
+        lost.staleSocket?.cancel()
 
-        if attempt > Self.maxReconnectAttempts {
+        if lost.attempt > Self.maxReconnectAttempts {
             yield(.connectionFailed(
                 "Connection lost after \(Self.maxReconnectAttempts) attempts"
             ))
@@ -280,10 +377,10 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
         }
 
         LogManager.warning(
-            "CodeServerClient connection lost (attempt \(attempt)): \(error)"
+            "CodeServerClient connection lost (attempt \(lost.attempt)): \(error)"
         )
 
-        let delay = min(30.0, pow(2.0, Double(attempt - 1)))
+        let delay = min(30.0, pow(2.0, Double(lost.attempt - 1)))
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard let self, !Task.isCancelled else { return }
@@ -294,7 +391,7 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
             self.startConnection()
 
             try? await Task.sleep(for: .milliseconds(500))
-            await self.send(.hello(code: code))
+            await self.send(.hello(code: lost.code))
         }
     }
 
@@ -306,25 +403,31 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
 
         let task = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(
-                    for: .seconds(Self.pingIntervalSeconds)
-                )
-                guard !Task.isCancelled else { return }
-                await self?.send(.ping)
-
-                try? await Task.sleep(
-                    for: .seconds(Self.pongTimeoutSeconds)
-                )
-                guard !Task.isCancelled else { return }
-
                 guard let self else { return }
+                // Cadence sleep + pong wait sum to pingIntervalSeconds, so
+                // pings fire on the configured cadence while the pong
+                // deadline stays pongTimeoutSeconds.
+                try? await Task.sleep(
+                    for: .seconds(
+                        self.pingIntervalSeconds
+                            - self.pongTimeoutSeconds
+                    )
+                )
+                guard !Task.isCancelled else { return }
+
+                // Pong is expected within pongTimeoutSeconds of this ping;
+                // a missed deadline means the transport is dead.
+                self.state.withLock { $0.lastPongTime = .now }
+                await self.send(.ping)
+                try? await Task.sleep(
+                    for: .seconds(self.pongTimeoutSeconds)
+                )
+                guard !Task.isCancelled else { return }
+
                 let elapsed = self.state.withLock {
                     Date.now.timeIntervalSince($0.lastPongTime)
                 }
-
-                let maxInterval = Self.pongTimeoutSeconds
-                    + Self.pingIntervalSeconds
-                if elapsed > maxInterval {
+                if elapsed > self.pongTimeoutSeconds {
                     self.handleConnectionLost(URLError(.timedOut))
                     return
                 }
@@ -341,11 +444,13 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
             )
             guard let self else { return }
 
-            let (attempts, disconnecting) = self.state.withLock {
-                ($0.reconnectAttempts, $0.isDisconnecting)
+            let (acked, disconnecting) = self.state.withLock {
+                ($0.helloAcked, $0.isDisconnecting)
             }
 
-            if attempts == 0, !disconnecting {
+            // Only a handshake that never completed within the window is
+            // fatal; once acked, the ping loop owns keep-alive.
+            if !acked, !disconnecting {
                 self.yield(.connectionFailed("Connection timed out"))
                 self.disconnect()
             }
