@@ -111,6 +111,16 @@ private extension HomeView {
                         .symbolEffect(.bounce, value: selectedTab)
                 }
             }
+            Tab(value: AppTab.code) {
+                CodeView()
+            } label: {
+                Label {
+                    Text(String(localized: "Code"))
+                } icon: {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .symbolEffect(.bounce, value: selectedTab)
+                }
+            }
             Tab(value: AppTab.models) {
                 ModelsView()
             } label: {
@@ -173,6 +183,7 @@ private extension HomeView {
 
     enum AppTab: Hashable {
         case chats
+        case code
         case models
         case settings
         case search
@@ -193,6 +204,7 @@ private extension HomeView {
 #if os(macOS)
     enum SidebarDestination: Hashable {
         case chats
+        case code
         case models
         case settings
     }
@@ -217,6 +229,9 @@ private extension HomeView {
             }
 
             Section {
+                Label(String(localized: "Code"), systemImage: "chevron.left.forwardslash.chevron.right")
+                    .tag(SidebarDestination.code)
+
                 Label(String(localized: "Models"), systemImage: "brain.head.profile")
                     .tag(SidebarDestination.models)
 
@@ -254,6 +269,8 @@ private extension HomeView {
                     ChatView(isPrivateChat: true)
                 }
             }
+        case .code:
+            CodeView()
         case .models:
             ModelsView()
         case .settings:
