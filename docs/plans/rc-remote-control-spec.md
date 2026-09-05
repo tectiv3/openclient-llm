@@ -1,7 +1,7 @@
 # Plan: Remote control of pi (Code tab)
 
-Status: revised (round 2) — pending implementation.
-Date: 2026-09-05 (round 2 revision; original 2026-07-09)
+Status: revised (round 3) — pending implementation.
+Date: 2026-09-05 (round 3 revision; original 2026-07-09)
 
 ## Goal
 
@@ -91,6 +91,13 @@ Location: `pi-extensions/rc/` in this repo; symlink `~/.pi/agent/extensions/rc` 
     - If server is on → stop it:
       - Close server, clear status, cancel pending questions (resolve with
         "cancelled"), notify "rc stopped".
+  - Message handlers (on authenticated client messages):
+    - `prompt`: call pi's message submission API (discovered by probe) when not
+      streaming. Return `not_idle` error if streaming.
+    - `steer`: call pi's steer/mid-turn injection API when streaming. If not
+      streaming, treat as `prompt`.
+    - `abort`: call pi's turn-abort API. No-op if not streaming.
+    - Exact API calls depend on probe findings (Critical unknowns 1-4).
   - Event forwarding (registered in factory, active only while server is on):
     Subscribe via `pi.on(eventName, handler)` for all available agent lifecycle
     events. Known working events: `session_start`, `session_tree`. Full event list
@@ -154,13 +161,13 @@ Client → server:
 | type | fields | effect |
 |------|--------|--------|
 | `hello` | `code`, `version` | Validate 6-hex code. Rate-limit: 5 failures per IP in 60 s → `error {code:"rate_limited"}` + close. OK → `hello_ok` + `state` + `history` (+ pending `question`). Bad → `error {code:"bad_code"}` + close |
-| `prompt` | `text` | Submit user message when idle |
-| `steer` | `text` | Submit message during streaming (steer equivalent) |
-| `abort` | — | Current turn abort (Esc equivalent) |
-| `answer` | `id`, `value` | Resolve pending `question` (first wins). Value is a string (selected option label or custom text) |
-| `answer_questionnaire` | `id`, `answers` | Resolve pending `questionnaire`. `answers` is `[{id, value, wasCustom}]` — one entry per sub-question |
+| `prompt` | `text` | Submit user message when idle. Error `not_idle` if streaming |
+| `steer` | `text` | Submit message during streaming (steer equivalent). If not streaming, treated as `prompt` (no error) |
+| `abort` | — | Current turn abort (Esc equivalent). No-op if not streaming |
+| `answer` | `id`, `value`, `wasCustom`, `index?` | Resolve pending `question` (first wins). `value`: selected label or custom text. `wasCustom`: true if typed. `index`: 1-based option index (omit if custom) |
+| `answer_questionnaire` | `id`, `answers` | Resolve pending `questionnaire`. `answers` is `[{id, value, label, wasCustom, index?}]` — one entry per sub-question, matching the questionnaire's Answer shape |
 | `get_state` | — | Refresh `state` |
-| `get_history` | `cursor?` | Request history page. Without cursor: full history. With cursor from a previous `history` response: older entries before that cutoff |
+| `get_history` | `cursor?` | Request a page of history (200 entries). Without cursor: latest 200. With cursor from a previous `history` response: the 200 entries before that cutoff |
 | `ping` | — | Client keepalive; server responds with `pong` |
 
 Server → client:
@@ -172,15 +179,15 @@ Server → client:
 | `history` | `{sessionId, messages: [...], cursor?}` — see History format below |
 | `event` | `{sessionId, name, ...}` forwarded pi events. Client MUST ignore events whose `sessionId` doesn't match the last received `state.sessionId` (guards against stale events during session rebind) |
 | `streaming_buffer` | `{sessionId, content: ContentBlock[]}` — accumulated content of the in-progress assistant turn. Sent after `state`+`history` on reconnect when `isStreaming` is true. Omitted when not streaming |
-| `question` | `{id, kind: "question", params: {question, options}}` |
-| `questionnaire` | `{id, kind: "questionnaire", params: {questions}}` |
-| `question_resolved` | `{id, by: "client"|"cancelled"}` |
+| `question` | `{sessionId, id, kind: "question", params: {question, options}}` |
+| `questionnaire` | `{sessionId, id, kind: "questionnaire", params: {questions}}` |
+| `question_resolved` | `{id, by: "client"|"cancelled", value?}` — `value` included when `by:"client"` so other clients can display what was answered |
 | `pong` | — |
 | `error` | `{code, message?}` |
 
 Error codes: `bad_code`, `rate_limited`, `version_mismatch`, `invalid_message`,
-`not_idle` (prompt sent while streaming), `unknown_question` (answer for non-pending
-question).
+`not_idle` (prompt sent while streaming), `unknown_question` (answer for
+non-pending question).
 
 **`contextUsage` shape** (when available):
 `{used: number, total: number}` — token counts. UI renders as percentage bar.
@@ -207,17 +214,23 @@ type HistoryMessage =
   | { role: "compaction"; summary: string };
 ```
 
-**Pagination**: If `getBranch()` returns > 200 entries, send the last 200 with
-`cursor` pointing to the cutoff. Client can request older history via
-`get_history {cursor}`. In practice, sessions rarely exceed 200 entries before
-compaction.
+**Pagination**: Always send the last 200 entries. If there are more, include
+`cursor` pointing to the cutoff; the client can request older pages via
+`get_history {cursor}` (each page is 200 entries). In practice, sessions rarely
+exceed 200 entries before compaction.
 
 **Streaming buffer**: The server maintains a `currentTurnBuffer: ContentBlock[]`
-that accumulates content blocks from `message_update` / `tool_execution_update`
-events during an active assistant turn. Reset on `turn_end` / `message_end`.
-On client (re)connect while `isStreaming` is true, send a `streaming_buffer`
-message after `state`+`history` so the client can render the in-progress turn
-immediately rather than showing a blank assistant message.
+that accumulates content from the in-progress assistant turn:
+- `message_start` → reset buffer, begin accumulating
+- `message_update` → append text/thinking blocks
+- `tool_execution_start` → append toolUse block
+- `tool_execution_update` → update the last toolUse's output
+- `turn_end` → reset buffer (turn complete, content is now in `getBranch()`)
+
+The buffer represents a single assistant message in progress. Multi-message turns
+(message → tool → message) reset on each new `message_start`. On client
+(re)connect while `isStreaming` is true, send a `streaming_buffer` message after
+`state`+`history` so the client can render the in-progress turn immediately.
 
 ### A5. Remote-aware questions
 
@@ -235,6 +248,8 @@ first. The TUI shows a non-blocking status ("Question sent to remote client(s).
 Press Esc to answer locally."). If Esc is pressed, the remote ask is cancelled and
 the normal TUI prompt appears. If no clients are connected when the question fires,
 skip straight to the TUI prompt.
+
+Add import: `import { uuidv7 } from "@earendil-works/pi-ai";`
 
 At the top of `execute()`, before the `ctx.mode !== "tui"` check:
 
@@ -320,7 +335,12 @@ mirroring existing feature layout). Tests in `openclient-llm-test/Features/Code/
   `URLSessionWebSocketTask` against `ws://<host>:<port>`; sends JSON commands; emits
   an `AsyncStream<CodeEvent>` (Codable envelope of the A3 protocol). Reconnect with
   exponential backoff (1s, 2s, 4s, 8s, max 30s); on (re)connect always re-`hello` +
-  receive `state`+`history`.
+  receive `state`+`history`. **Auth-error handling**: on `bad_code` or
+  `rate_limited` errors during reconnect, abandon auto-reconnect immediately and
+  emit a `.authFailed` event (the code has changed — server was toggled). The VM
+  transitions to the connect screen so the user can enter the new code. Auto-reconnect
+  only fires on transport errors (TCP close, timeout, pong timeout), never on
+  authentication failures.
 - **Ping/pong**: Client sends application-level JSON `{"type":"ping"}` every 30s
   via a background `Task` (NOT `URLSessionWebSocketTask.sendPing()` which uses
   WS-protocol-level frames — the server handles JSON messages only). Tracks last
@@ -340,17 +360,22 @@ mirroring existing feature layout). Tests in `openclient-llm-test/Features/Code/
   the app's existing agent-loop tool-step UI language (see
   `specs/agent-tool-calling.instructions.md` UI section) but data is live WS events,
   not the LiteLLM loop.
-- **Storage**: `CodeSettings` in `SettingsManager`: `codeHost` (String),
-  `codePort` (Int, default 47800). Code is NOT persisted — entered fresh each
-  session (ephemeral on both sides).
-- **Background behavior** (iOS): When the app enters background, use
-  `UIApplication.beginBackgroundTask` to keep the WS connection alive during the
-  allowed background window (~30s). If a `question`/`questionnaire` arrives while
-  backgrounded, fire a local notification via `LocalNotificationManager` ("pi is
-  asking a question — tap to answer"). If the background task expires before
-  returning to foreground, disconnect gracefully. On foreground, reconnect and
-  receive any pending questions. This matches the existing pattern in
-  `NotifyStreamingCompletedUseCase`.
+- **Storage**: `CodeSettings` in `SettingsManager`: add `getCodeHost()`/
+  `setCodeHost(_:)` and `getCodePort()`/`setCodePort(_:)` to
+  `SettingsManagerProtocol` following the existing getter/setter pattern. Code is
+  NOT persisted — entered fresh each session (ephemeral on both sides).
+- **Background behavior** (iOS): Use the existing `BackgroundTaskManager` (via a
+  new `CodeBackgroundUseCase`) to keep the WS connection alive during the allowed
+  background window (~30s). If a `question`/`questionnaire` arrives while
+  backgrounded, fire a local notification via `LocalNotificationManager` — add a
+  new `sendQuestionNotification()` method to `LocalNotificationManagerProtocol`
+  ("pi is asking a question — tap to answer"). If the background task expires,
+  disconnect gracefully. On foreground, reconnect and receive pending questions.
+  This matches the existing `StreamingBackgroundUseCase` +
+  `NotifyStreamingCompletedUseCase` pattern.
+- **Background behavior** (macOS): No special handling needed. macOS apps do not
+  suspend; the WS connection stays alive indefinitely. No local notifications
+  required (the app window is accessible).
 
 ### B2. ViewModel
 
@@ -358,7 +383,10 @@ mirroring existing feature layout). Tests in `openclient-llm-test/Features/Code/
 `@MainActor`, `send(_:)`):
 
 - States: `.disconnected(ConnectForm)`, `.connecting`, `.connected(SessionView)`,
-  `.failed(error)`.
+  `.reconnecting(SessionView)` (preserves transcript, shows inline banner),
+  `.failed(error)`. Transitions: transport error while connected → `.reconnecting`;
+  auth error (`bad_code`/`rate_limited`) while reconnecting → `.disconnected`
+  (prompt for new code); reconnect success → `.connected`.
 - Events: `connect(host:port:code:)`, `disconnect()`, `sendPrompt(text)`,
   `sendSteer(text)`, `abort()`, `answer(id, answer)`,
   `answerQuestionnaire(id, answers)`, `refreshState()`.
