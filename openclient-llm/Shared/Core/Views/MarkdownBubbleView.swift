@@ -17,6 +17,7 @@ struct MarkdownBubbleView: View {
 
     @State private var cursorVisible = false
     @State private var renderedMarkdown = RenderedMarkdown.empty
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // MARK: - View
 
@@ -33,6 +34,12 @@ struct MarkdownBubbleView: View {
         .task(id: shouldBlink) {
             guard shouldBlink else {
                 cursorVisible = false
+                return
+            }
+            // Reduce motion: keep the cursor statically visible instead of
+            // blinking.
+            if reduceMotion {
+                cursorVisible = true
                 return
             }
             while !Task.isCancelled {

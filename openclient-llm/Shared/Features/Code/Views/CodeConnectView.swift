@@ -8,17 +8,20 @@
 
 import SwiftUI
 
+/// Connect form for the Code tab. Field values are owned by the parent
+/// (`CodeView`) so they survive the `.disconnected` → `.connecting` transition.
 struct CodeConnectView: View {
     // MARK: - Properties
 
     let form: CodeViewModel.ConnectForm
+    @Binding var host: String
+    @Binding var portText: String
+    @Binding var code: String
     var isConnecting: Bool = false
     let onConnect: (String, Int, String) -> Void
 
-    @State private var host: String = ""
-    @State private var portText: String = ""
-    @State private var code: String = ""
     @State private var showHostFields: Bool = false
+    @State private var now: Date = .now
     @FocusState private var focusedField: Field?
 
     private enum Field: Hashable {
@@ -48,16 +51,11 @@ struct CodeConnectView: View {
                     firstTimeLayout
                 }
 
-                if let errorMessage = form.errorMessage {
-                    Text(errorMessage)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .multilineTextAlignment(.center)
-                }
+                statusMessage
 
                 connectButton
 
-                if form.hasSavedHost && !showHostFields {
+                if form.hasSavedHost && !showHostFields && !isConnecting {
                     Button {
                         showHostFields = true
                         focusedField = .host
@@ -75,26 +73,38 @@ struct CodeConnectView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .onAppear {
-            host = form.host
-            portText = form.port > 0 ? "\(form.port)" : "47800"
             if form.hasSavedHost {
                 focusedField = .code
             } else {
                 focusedField = .host
             }
         }
-        .disabled(isConnecting)
-        .overlay {
-            if isConnecting {
-                connectingOverlay
-            }
+        .task(id: form.rateLimitedUntil) {
+            await tickRateLimit()
         }
+        .disabled(isConnecting)
     }
 }
 
 // MARK: - Private
 
 private extension CodeConnectView {
+    @ViewBuilder
+    var statusMessage: some View {
+        if let until = form.rateLimitedUntil {
+            let remaining = max(0, Int(until.timeIntervalSince(now).rounded(.up)))
+            Text(String(localized: "Too many attempts — wait \(remaining)s"))
+                .font(.caption)
+                .foregroundStyle(.red)
+                .multilineTextAlignment(.center)
+        } else if let errorMessage = form.errorMessage {
+            Text(errorMessage)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .multilineTextAlignment(.center)
+        }
+    }
+
     var repeatConnectLayout: some View {
         VStack(spacing: 16) {
             Text(String(localized: "Enter the 6-digit code shown in pi"))
@@ -166,20 +176,20 @@ private extension CodeConnectView {
         Button {
             submitConnect()
         } label: {
-            Text(String(localized: "Connect"))
-                .frame(maxWidth: 200)
-                .padding(.vertical, 10)
+            HStack(spacing: 8) {
+                if isConnecting {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(String(localized: "Connecting..."))
+                } else {
+                    Text(String(localized: "Connect"))
+                }
+            }
+            .frame(maxWidth: 200)
+            .padding(.vertical, 10)
         }
         .buttonStyle(.borderedProminent)
-        .disabled(!isValid || isConnecting)
-    }
-
-    var connectingOverlay: some View {
-        VStack(spacing: 12) {
-            ProgressView()
-            Text(String(localized: "Connecting..."))
-                .foregroundStyle(.secondary)
-        }
+        .disabled(!isValid || isConnecting || isRateLimited)
     }
 
     var isValid: Bool {
@@ -190,21 +200,45 @@ private extension CodeConnectView {
             && code.count == 6
     }
 
+    var isRateLimited: Bool {
+        guard let until = form.rateLimitedUntil else { return false }
+        return now < until
+    }
+
     func submitConnect() {
         let portValue = Int(portText) ?? 47800
         onConnect(host, portValue, code)
+    }
+
+    /// Ticks `now` once per second while the pairing-code lockout is active so
+    /// the countdown and Connect button re-evaluate.
+    func tickRateLimit() async {
+        guard let until = form.rateLimitedUntil else { return }
+        while !Task.isCancelled && Date.now < until {
+            try? await Task.sleep(for: .seconds(1))
+            now = .now
+        }
+        if !Task.isCancelled {
+            now = .now
+        }
     }
 }
 
 #Preview("First Time") {
     CodeConnectView(
-        form: .init()
+        form: .init(),
+        host: .constant(""),
+        portText: .constant("47800"),
+        code: .constant("")
     ) { _, _, _ in }
 }
 
 #Preview("Repeat") {
     CodeConnectView(
-        form: .init(host: "mac.ts.net", port: 47800, hasSavedHost: true)
+        form: .init(host: "mac.ts.net", port: 47800, hasSavedHost: true),
+        host: .constant("mac.ts.net"),
+        portText: .constant("47800"),
+        code: .constant("")
     ) { _, _, _ in }
 }
 
@@ -215,6 +249,34 @@ private extension CodeConnectView {
             port: 47800,
             errorMessage: "Invalid code — check the code shown in pi",
             hasSavedHost: true
-        )
+        ),
+        host: .constant("mac.ts.net"),
+        portText: .constant("47800"),
+        code: .constant("")
+    ) { _, _, _ in }
+}
+
+#Preview("Connecting") {
+    CodeConnectView(
+        form: .init(host: "mac.ts.net", port: 47800, hasSavedHost: true),
+        host: .constant("mac.ts.net"),
+        portText: .constant("47800"),
+        code: .constant("1A2B3C"),
+        isConnecting: true
+    ) { _, _, _ in }
+}
+
+#Preview("Rate Limited") {
+    CodeConnectView(
+        form: .init(
+            host: "mac.ts.net",
+            port: 47800,
+            errorMessage: "Too many attempts — wait 60s",
+            hasSavedHost: true,
+            rateLimitedUntil: .now.addingTimeInterval(45)
+        ),
+        host: .constant("mac.ts.net"),
+        portText: .constant("47800"),
+        code: .constant("1A2B3C")
     ) { _, _, _ in }
 }

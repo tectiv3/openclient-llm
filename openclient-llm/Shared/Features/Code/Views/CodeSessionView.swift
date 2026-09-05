@@ -21,6 +21,8 @@ struct CodeSessionView: View {
     @State private var scrollToMessageId: UUID?
     @State private var isManuallyScrolling: Bool = false
     @State private var scrollEdgeMetrics = ScrollEdgeMetrics()
+    @State private var showReconnectSuccess = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // MARK: - View
 
@@ -28,6 +30,9 @@ struct CodeSessionView: View {
         VStack(spacing: 0) {
             if isReconnecting {
                 reconnectingBanner
+            } else if showReconnectSuccess {
+                reconnectedBanner
+                    .transition(.opacity)
             }
 
             if let usage = contextUsage {
@@ -73,6 +78,18 @@ struct CodeSessionView: View {
                 jumpToBottomButton
             }
         }
+        .overlay(alignment: .top) {
+            if let toast = viewModel.transientToast {
+                toastView(toast)
+            }
+        }
+#if os(iOS)
+        // iOS: centered card over a dimmed background (macOS keeps .sheet).
+        .overlay {
+            questionCardOverlay
+        }
+#endif
+#if os(macOS)
         .sheet(item: pendingQuestion) { question in
             CodeQuestionModal(
                 question: question,
@@ -91,10 +108,29 @@ struct CodeSessionView: View {
                     viewModel.send(.abort)
                 }
             )
-#if os(iOS)
-            .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
+            .frame(width: 480, height: 520)
+        }
 #endif
+        .animation(
+            reduceMotion ? nil : .spring(duration: 0.3),
+            value: viewModel.transientToast
+        )
+        .onChange(of: isReconnecting) { _, reconnecting in
+            guard !reconnecting else { return }
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) {
+                showReconnectSuccess = true
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) {
+                    showReconnectSuccess = false
+                }
+            }
+        }
+        .task(id: viewModel.transientToast) {
+            guard viewModel.transientToast != nil else { return }
+            try? await Task.sleep(for: .seconds(3))
+            viewModel.transientToast = nil
         }
     }
 }
@@ -107,6 +143,36 @@ private extension CodeSessionView {
             get: { session.pendingQuestion },
             set: { _ in }
         )
+    }
+
+    // MARK: - Question Modal (iOS card)
+
+    @ViewBuilder
+    var questionCardOverlay: some View {
+        if let question = session.pendingQuestion {
+            ZStack {
+                Color.black.opacity(0.4)
+                    .ignoresSafeArea()
+                CodeQuestionCardView(
+                    question: question,
+                    onAnswer: { id, value, wasCustom, index in
+                        viewModel.send(.answer(
+                            id: id, value: value,
+                            wasCustom: wasCustom, index: index
+                        ))
+                    },
+                    onAnswerQuestionnaire: { id, answers in
+                        viewModel.send(.answerQuestionnaire(
+                            id: id, answers: answers
+                        ))
+                    },
+                    onDismiss: {
+                        viewModel.send(.abort)
+                    }
+                )
+                .padding(24)
+            }
+        }
     }
 
     var contextUsage: ContextUsage? {
@@ -137,8 +203,10 @@ private extension CodeSessionView {
                 if let model = session.model {
                     Text(model.name)
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .glassEffect(.regular, in: .capsule)
                 }
             }
         }
@@ -179,6 +247,41 @@ private extension CodeSessionView {
         )
         .padding(.horizontal, 16)
         .padding(.top, 4)
+    }
+
+    var reconnectedBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+            Text(String(localized: "Reconnected"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+        .glassEffect(
+            .regular.tint(.green.opacity(0.3)),
+            in: .rect(cornerRadius: 12)
+        )
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+    }
+
+    // MARK: - Toast
+
+    func toastView(_ message: String) -> some View {
+        Text(message)
+            .font(.subheadline)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .glassEffect(.regular, in: .capsule)
+            .padding(.top, 8)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .onAppear {
+                // Announce to VoiceOver: transient toast that appears and dismisses
+                AccessibilityNotification.Announcement(message).post()
+            }
     }
 
     // MARK: - Empty State

@@ -11,6 +11,9 @@ import SwiftUI
 struct CodeTranscriptItemView: View {
     let item: CodeTranscriptItem
 
+    @State private var isCompactionExpanded = false
+    @State private var reasoningDisclosureState = ReasoningDisclosureState()
+
     var body: some View {
         switch item {
         case .user(_, let text):
@@ -19,10 +22,11 @@ struct CodeTranscriptItemView: View {
         case .assistant(_, let content, let isStreaming):
             assistantBubble(content, isStreaming: isStreaming)
 
-        case .toolStep(_, let toolName, _, let args,
+        case .toolStep(_, let toolName, let toolId, let args,
                        let output, let isComplete):
             toolStepView(
                 toolName: toolName,
+                toolId: toolId,
                 args: args,
                 output: output,
                 isComplete: isComplete
@@ -91,6 +95,19 @@ private extension CodeTranscriptItemView {
 
             Spacer(minLength: 0)
         }
+        .task(id: isStreaming) {
+            if isStreaming {
+                reasoningDisclosureState.viewAppeared(
+                    isStreaming: true,
+                    hasReasoning: content.hasThinking,
+                    hasAnswer: content.hasAnswer
+                )
+            } else {
+                withAnimation(.easeInOut(duration: 0.4)) {
+                    reasoningDisclosureState.streamingEnded()
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -106,23 +123,64 @@ private extension CodeTranscriptItemView {
             )
 
         case .thinking(let text):
-            ThinkingDisclosureView(text: text)
+            thinkingDisclosure(text, isStreaming: isStreaming)
 
         case .toolUse(_, let toolName, let args, _):
             inlineToolLabel(toolName: toolName, args: args)
         }
     }
 
+    // MARK: Reasoning Disclosure
+
+    func thinkingDisclosure(
+        _ reasoning: String,
+        isStreaming: Bool
+    ) -> some View {
+        DisclosureGroup(isExpanded: thinkingExpansionBinding) {
+            Text(reasoning)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "brain")
+                    .font(.caption)
+                Text(String(localized: "Thinking"))
+                    .font(.caption)
+            }
+            .foregroundStyle(
+                isActivelyReasoning
+                    ? AnyShapeStyle(Color.appAccent)
+                    : AnyShapeStyle(.secondary)
+            )
+        }
+        .tint(.secondary)
+    }
+
+    var thinkingExpansionBinding: Binding<Bool> {
+        Binding(
+            get: { reasoningDisclosureState.isExpanded },
+            set: { reasoningDisclosureState.userToggledExpansion($0) }
+        )
+    }
+
+    var isActivelyReasoning: Bool {
+        reasoningDisclosureState.phase == .reasoning
+    }
+
     // MARK: Tool Step
 
     func toolStepView(
         toolName: String,
+        toolId: String,
         args: [String: AnyCodableValue],
         output: String?,
         isComplete: Bool
     ) -> some View {
         CodeToolStepView(
             toolName: toolName,
+            toolId: toolId,
             args: args,
             output: output,
             isComplete: isComplete
@@ -206,10 +264,35 @@ private extension CodeTranscriptItemView {
             }
 
             if !summary.isEmpty {
-                Text(summary)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(2)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isCompactionExpanded.toggle()
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(summary)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(isCompactionExpanded ? nil : 2)
+                        Image(systemName: isCompactionExpanded
+                            ? "chevron.up"
+                            : "chevron.down")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.quaternary)
+                    }
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(
+                    String(localized: "Compaction summary")
+                )
+                .accessibilityValue(
+                    isCompactionExpanded
+                        ? String(localized: "Expanded")
+                        : String(localized: "Collapsed")
+                )
             }
         }
     }
@@ -247,6 +330,22 @@ private extension CodeTranscriptItemView {
             return "\(toolName) \(name)"
         }
         return toolName
+    }
+}
+
+extension [CodeContentBlock] {
+    var hasThinking: Bool {
+        contains { block in
+            if case .thinking(let text) = block { return !text.isEmpty }
+            return false
+        }
+    }
+
+    var hasAnswer: Bool {
+        contains { block in
+            if case .text(let text) = block { return !text.isEmpty }
+            return false
+        }
     }
 }
 

@@ -73,11 +73,12 @@ private extension CodeInputBarView {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .isEmpty
 
+        // Streaming: Stop (abort) and Send (steer) coexist; the send button
+        // only appears while there is text to steer with.
         if isStreaming {
+            stopButton
             if hasText {
                 sendButton
-            } else {
-                stopButton
             }
         } else if hasText {
             sendButton
@@ -102,7 +103,7 @@ private extension CodeInputBarView {
 
     var stopButton: some View {
         Button { onStop() } label: {
-            Image(systemName: "stop.circle.fill")
+            Image(systemName: "square.fill")
                 .font(.title2)
                 .foregroundStyle(.red)
                 .frame(minWidth: 44, minHeight: 44)
@@ -126,6 +127,15 @@ private extension CodeInputBarView {
 #Preview("Streaming") {
     CodeInputBarView(
         inputText: .constant(""),
+        isStreaming: true,
+        onSend: {},
+        onStop: {}
+    )
+}
+
+#Preview("Streaming with steer") {
+    CodeInputBarView(
+        inputText: .constant("focus on tests"),
         isStreaming: true,
         onSend: {},
         onStop: {}

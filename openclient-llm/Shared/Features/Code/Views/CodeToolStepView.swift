@@ -10,13 +10,19 @@ import SwiftUI
 
 struct CodeToolStepView: View {
     let toolName: String
+    let toolId: String
     let args: [String: AnyCodableValue]
     let output: String?
     let isComplete: Bool
 
     @State private var isExpanded = false
+    @State private var areArgsExpanded = false
+    @State private var outputRevealedLines = 0
+
     private static let collapsedLineLimit = 20
     private static let expandedLineLimit = 200
+    // Each "Show more" tap reveals another page of output lines.
+    private static let linePage = 200
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -125,18 +131,45 @@ private extension CodeToolStepView {
                     Text(value.stringRepresentation)
                         .font(.caption2.monospaced())
                         .foregroundStyle(.secondary)
-                        .lineLimit(3)
+                        .lineLimit(areArgsExpanded ? nil : 3)
                         .textSelection(.enabled)
                 }
             }
+
+            if argsNeedShowMore {
+                Button(
+                    areArgsExpanded
+                        ? String(localized: "Show less")
+                        : String(localized: "Show more")
+                ) {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        areArgsExpanded.toggle()
+                    }
+                }
+                .font(.caption2)
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    var argsNeedShowMore: Bool {
+        let limit = 3
+        return args.values.contains {
+            $0.stringRepresentation
+                .components(separatedBy: "\n").count > limit
         }
     }
 
     func outputSection(_ text: String) -> some View {
         let lines = text.components(separatedBy: "\n")
-        let limit = isComplete
+        let baseLimit = isComplete
             ? Self.expandedLineLimit
             : Self.collapsedLineLimit
+        let limit = min(
+            baseLimit + outputRevealedLines,
+            lines.count
+        )
         let displayLines = Array(lines.suffix(limit))
         let truncated = lines.count > limit
 
@@ -144,11 +177,29 @@ private extension CodeToolStepView {
             Divider()
 
             if truncated {
-                Text(String(
-                    localized: "Showing last \(limit) of \(lines.count) lines"
-                ))
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+                HStack {
+                    Text(String(
+                        localized: "Showing last \(limit) of \(lines.count) lines"
+                    ))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+
+                    Spacer()
+
+                    Button(String(localized: "Show more")) {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            outputRevealedLines = min(
+                                outputRevealedLines + Self.linePage,
+                                lines.count
+                            )
+                        }
+                    }
+                    .font(.caption2)
+                    .buttonStyle(.plain)
+                    .accessibilityHint(
+                        String(localized: "Reveal more output")
+                    )
+                }
             }
 
             ScrollView(.horizontal, showsIndicators: false) {
@@ -160,6 +211,7 @@ private extension CodeToolStepView {
             }
         }
     }
+
 }
 
 // MARK: - AnyCodableValue Helpers
@@ -184,6 +236,7 @@ private extension AnyCodableValue {
     VStack(spacing: 12) {
         CodeToolStepView(
             toolName: "Bash",
+            toolId: "call_1",
             args: ["command": .string("npm test")],
             output: "All tests passed\n5 suites, 23 tests",
             isComplete: true
@@ -191,6 +244,7 @@ private extension AnyCodableValue {
 
         CodeToolStepView(
             toolName: "Read",
+            toolId: "call_2",
             args: ["file_path": .string("/src/main.ts")],
             output: nil,
             isComplete: false
