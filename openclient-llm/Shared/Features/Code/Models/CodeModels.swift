@@ -23,6 +23,8 @@ struct CodeSessionInfo: Equatable, Sendable, Codable {
 struct CodeModelInfo: Equatable, Sendable, Codable {
     let provider: String
     let id: String
+
+    var name: String { id }
 }
 
 struct CodeContextUsage: Equatable, Sendable, Codable {
@@ -190,12 +192,33 @@ struct CodeQuestion: Equatable, Sendable, Codable {
 
 struct CodeQuestionParams: Equatable, Sendable, Codable {
     let question: String
+    let description: String?
     let options: [CodeQuestionOption]
+    let allowOther: Bool?
+
+    init(
+        question: String,
+        description: String? = nil,
+        options: [CodeQuestionOption],
+        allowOther: Bool? = nil
+    ) {
+        self.question = question
+        self.description = description
+        self.options = options
+        self.allowOther = allowOther
+    }
 }
 
 struct CodeQuestionOption: Equatable, Sendable, Codable {
     let label: String
+    let value: String
     let description: String?
+
+    init(label: String, value: String? = nil, description: String? = nil) {
+        self.label = label
+        self.value = value ?? label
+        self.description = description
+    }
 }
 
 struct CodeQuestionnaire: Equatable, Sendable, Codable {
