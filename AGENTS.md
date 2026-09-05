@@ -156,8 +156,7 @@ final class FeatureViewModel {
 
 ## Change Completion
 
-- After completing implementation work, **always ask the user** before compiling, checking SwiftLint, or running tests. Never do these automatically.
+- After completing implementation work, compile and commit (linter and formatter runs on commit hook)
 - When the user wants to verify: run the smallest relevant test set after a focused change; run the full iOS suite after shared-code changes.
 - Build both iOS and macOS after changing shared SwiftUI or shared business logic.
-- Run `git diff --check` before reporting completion.
 - Do not include generated files or unrelated working-tree changes in a commit.
