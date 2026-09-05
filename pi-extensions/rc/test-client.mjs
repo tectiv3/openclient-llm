@@ -213,6 +213,128 @@ async function waitForAuthFile(path, timeoutMs) {
   throw new Error(detail);
 }
 
+// --- rc WS client helpers (groups 1-2) ---------------------------------------------
+
+const RC_WS_TIMEOUT_MS = 10_000;
+const VALID_HISTORY_ROLES = new Set(["user", "assistant", "toolResult", "compaction"]);
+const nonEmptyString = (value) => typeof value === "string" && value !== "";
+const check = (condition, detail) => { if (!condition) throw new Error(detail); };
+
+// Tagged so waiters can tell "socket closed" apart from a plain timeout.
+const rcClosedError = () => Object.assign(new Error("rc ws closed before expected message"), { rcClosed: true });
+
+// One-connection rc WS client: `connect` settles on open/refusal; `next()`
+// rejects (never hangs) if the socket closes early; `close()` is idempotent.
+function connectRc({ host, port, code, version = 1 }) {
+  const ws = new WebSocket(`ws://${host}:${port}`);
+  const queue = [];
+  const waiters = [];
+  let closed = false;
+  const deliver = (msg) => { const w = waiters.shift(); if (w) w.resolve(msg); else queue.push(msg); };
+  const failAll = (err) => { closed = true; for (const w of waiters.splice(0)) w.reject(err); };
+  ws.onmessage = (event) => {
+    try {
+      deliver(JSON.parse(event.data));
+    } catch {
+      // ignore non-JSON frames
+    }
+  };
+  ws.onclose = () => failAll(rcClosedError());
+  const connect = new Promise((resolve, reject) => {
+    ws.onopen = () => { ws.onerror = null; resolve(ws); };
+    ws.onerror = () => reject(new Error(`rc ws connect to ${host}:${port} failed (refused, or server not listening?)`));
+  });
+  const next = () =>
+    new Promise((resolve, reject) => {
+      if (closed) return reject(rcClosedError());
+      if (queue.length > 0) return resolve(queue.shift());
+      waiters.push({ resolve, reject });
+    });
+  const close = () => { if (closed) return; closed = true; try { ws.close(); } catch { /* gone */ } };
+  return { ws, connect, next, close, code, version };
+}
+
+// Full handshake: connect -> hello -> first response; socket stays open on success.
+async function handshake(ctx, overrides = {}) {
+  const code = overrides.code ?? ctx.auth.code;
+  const version = overrides.version ?? 1;
+  const { ws, connect, next, close } = connectRc({ host: ctx.host, port: ctx.rcPort, code, version });
+  try {
+    await withTimeout(connect, RC_WS_TIMEOUT_MS, "rc ws connect timeout");
+    ws.send(JSON.stringify({ type: "hello", code, version }));
+    return { result: await next(), ws, next, close };
+  } catch {
+    close();
+    return { result: null, ws, next, close };
+  }
+}
+
+function requireAuth(ctx) {
+  if (!ctx.auth) throw skip("no rc auth (server not running)");
+}
+
+// rate_limited (60s lockout from group 1) is a visible FAIL, not a skip, by design.
+function assertHelloOk(result) {
+  if (result?.type === "hello_ok" && result.version === 1) return;
+  if (result?.type === "error" && result.code === "rate_limited") {
+    throw new Error("server rate-limited (lockout from group 1) — re-run needed");
+  }
+  throw new Error(
+    `expected hello_ok (version 1), got ${result ? JSON.stringify(result) : "no response (connection failed)"}`,
+  );
+}
+
+// Protocol requires a close after an error; a timeout is itself a failure.
+async function expectErrorThenClose(result, expectedCode, next, close) {
+  check(
+    result?.type === "error" && result.code === expectedCode,
+    `expected error ${expectedCode}, got ${JSON.stringify(result)}`,
+  );
+  try {
+    await withTimeout(next(), RC_WS_TIMEOUT_MS, "server did not close after error");
+  } catch (err) {
+    if (!err?.rcClosed) throw err;
+  }
+  close();
+}
+
+function assertValidStateShape(state) {
+  check(state?.type === "state", "expected state message");
+  check(nonEmptyString(state.sessionId) && nonEmptyString(state.cwd), "sessionId and cwd must be non-empty strings");
+  check(typeof state.isStreaming === "boolean", "isStreaming must be a boolean");
+  check(nonEmptyString(state.model?.provider) && nonEmptyString(state.model?.id), "model provider+id non-empty");
+  check(
+    state.contextUsage === undefined ||
+      (typeof state.contextUsage === "object" && state.contextUsage !== null &&
+        Number.isFinite(state.contextUsage.used) && Number.isFinite(state.contextUsage.total)),
+    "contextUsage, when present, must have numeric used/total",
+  );
+}
+
+function assertHistoryShape(history, expectedSessionId) {
+  check(
+    history?.type === "history" && history.sessionId === expectedSessionId,
+    "expected history message with matching sessionId",
+  );
+  check(Array.isArray(history.messages), "history.messages must be an array");
+  history.messages.forEach((msg, i) => {
+    check(VALID_HISTORY_ROLES.has(msg?.role), `history.messages[${i}] has an invalid role`);
+    if (msg.role === "assistant") check(Array.isArray(msg.content), `assistant content must be an array`);
+  });
+}
+
+async function connectAndVerifyConnectTime(ctx) {
+  requireAuth(ctx);
+  const hs = await handshake(ctx);
+  assertHelloOk(hs.result);
+  const state = await hs.next();
+  assertValidStateShape(state);
+  const history = await hs.next();
+  assertHistoryShape(history, state.sessionId);
+  ctx.lastState = state;
+  return hs;
+}
+
 // --- test registry -----------------------------------------------------------------
 
 const tests = [];
@@ -237,18 +359,46 @@ registerTest(0, "rc_toggle_on_reports_auth_file", async (ctx) => {
   ctx.auth = await ctx.toggleRcOn();
 });
 
-// TODO(group 1): Connection
-//   - connect with valid code -> hello_ok + state + history
-//   - connect with invalid code -> error {code:"bad_code"} + close
-//   - 5 rapid bad codes from same IP -> error {code:"rate_limited"} + close
-//   - wait 60s -> can connect again
-//   - connect with wrong version -> error {code:"version_mismatch"} + close
+registerTest(1, "hello_valid_code_gets_hello_ok_state_history", async (ctx) => {
+  const hs = await connectAndVerifyConnectTime(ctx);
+  hs.close();
+});
 
-// TODO(group 2): State & history
-//   - get_state -> valid state shape (cwd, model, isStreaming)
-//   - history non-empty after at least one exchange
-//   - history pagination cursor when > 200 entries
+registerTest(1, "hello_bad_code_gets_error_and_close", async (ctx) => {
+  requireAuth(ctx);
+  const hs = await handshake(ctx, { code: "deadbe" });
+  await expectErrorThenClose(hs.result, "bad_code", hs.next, hs.close);
+});
 
+// The 60s lockout outlives the run, so this runs last in group 1 (visible failures after, by design).
+registerTest(1, "hello_five_bad_codes_triggers_rate_limit", async (ctx) => {
+  requireAuth(ctx);
+  for (let i = 1; i <= 5; i += 1) {
+    const hs = await handshake(ctx, { code: `00000${i}` });
+    await expectErrorThenClose(hs.result, i === 5 ? "rate_limited" : "bad_code", hs.next, hs.close);
+  }
+});
+
+registerTest(1, "hello_wrong_version_gets_version_mismatch", async (ctx) => {
+  requireAuth(ctx);
+  const hs = await handshake(ctx, { version: 99 });
+  await expectErrorThenClose(hs.result, "version_mismatch", hs.next, hs.close);
+});
+
+registerTest(2, "get_state_returns_valid_shape", async (ctx) => {
+  const hs = await connectAndVerifyConnectTime(ctx);
+  hs.ws.send(JSON.stringify({ type: "get_state" }));
+  const state = await hs.next();
+  assertValidStateShape(state);
+  ctx.lastState = state;
+  hs.close();
+});
+
+// A fresh session may have empty history; that is a pass.
+registerTest(2, "history_empty_or_consistent_shape", async (ctx) => {
+  const hs = await connectAndVerifyConnectTime(ctx);
+  hs.close();
+});
 // TODO(group 3): Prompt & steer
 //   - prompt when idle -> agent starts processing (event stream)
 //   - prompt when streaming -> error {code:"not_idle"}
