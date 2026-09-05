@@ -399,13 +399,164 @@ registerTest(2, "history_empty_or_consistent_shape", async (ctx) => {
   const hs = await connectAndVerifyConnectTime(ctx);
   hs.close();
 });
-// TODO(group 3): Prompt & steer
-//   - prompt when idle -> agent starts processing (event stream)
-//   - prompt when streaming -> error {code:"not_idle"}
-//   - steer when streaming -> accepted, steer delivered via events
 
-// TODO(group 4): Abort
-//   - long prompt + abort -> turn ends (turn_end event)
+// --- groups 3, 4, 10 helpers: event waiting & streaming-burst capture --------------
+
+// Reads messages in arrival order until stopWhen(msg) or the deadline; returns all read.
+// A throwing stopWhen fails fast; unmatched messages are consumed (events are point-in-time).
+async function readMessages(next, stopWhen, ms, label, { onTimeout = "throw" } = {}) {
+  const collected = [];
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const remaining = deadline - Date.now();
+    let msg;
+    try {
+      msg = await withTimeout(next(), remaining, `${label} (timed out after ${ms}ms)`);
+    } catch (err) {
+      if (err?.rcClosed) throw new Error(`${label} (connection closed)`);
+      if (onTimeout === "return") return collected; // deadline hit: the quiet window held
+      throw err;
+    }
+    collected.push(msg);
+    if (stopWhen(msg)) return collected;
+  }
+}
+
+// First message matching the predicate (waitForEventByName: by pi event name); timeout/closed = throw.
+const waitForMessage = async (next, predicate, ms, label) =>
+  (await readMessages(next, predicate, ms, label)).at(-1);
+const waitForEventByName = (next, name, ms) =>
+  waitForMessage(next, (m) => m?.type === "event" && m.name === name, ms, `event ${name}`);
+
+// Reads every message arriving within a quiet window; captures the connect-time burst (state, history, streaming_buffer).
+async function drainUntilQuiet(next, quietMs) {
+  const messages = [];
+  let pending = next();
+  for (;;) {
+    let msg = null;
+    try {
+      msg = await Promise.race([pending, sleep(quietMs).then(() => null)]);
+    } catch {
+      break; // socket closed mid-drain: return what we have
+    }
+    if (msg === null) break;
+    messages.push(msg);
+    pending = next();
+  }
+  return messages;
+}
+
+// Opens a verified connection, runs fn, guarantees close() (an unclosed socket keeps the process alive).
+async function withConnection(ctx, fn) {
+  const hs = await connectAndVerifyConnectTime(ctx);
+  try {
+    await fn(hs);
+  } finally {
+    hs.close();
+  }
+}
+
+// Group 3: Prompt & steer
+
+registerTest(3, "prompt_when_idle_starts_processing_and_lands_in_history", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    ws.send(JSON.stringify({ type: "prompt", text: "Reply with exactly: PONG-3" }));
+    // 45s budget: agent_start must appear, then agent_settled must follow.
+    const events = await readMessages(next, (m) => m?.type === "event" && m.name === "agent_settled", 45_000, "PONG-3 (agent_settled)");
+    const names = events.filter((m) => m?.type === "event").map((m) => m.name);
+    const startIdx = names.indexOf("agent_start");
+    check(startIdx >= 0 && names.indexOf("agent_settled") > startIdx, `agent_start->agent_settled required (saw: ${names.join(",")})`);
+    ws.send(JSON.stringify({ type: "get_history" }));
+    const history = await waitForMessage(next, (m) => m?.type === "history", 10_000, "history after prompt");
+    const messages = history.messages ?? [];
+    const idx = messages.findIndex((m) => m?.role === "user" && JSON.stringify(m).includes("PONG-3"));
+    check(idx >= 0 && messages.slice(idx + 1).some((m) => m?.role === "assistant"), "PONG-3 not followed by assistant");
+  });
+});
+
+registerTest(3, "prompt_when_streaming_gets_not_idle", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+    await waitForEventByName(next, "message_update", 15_000);
+    ws.send(JSON.stringify({ type: "prompt", text: "should be rejected" }));
+    await waitForMessage(next, (m) => m?.type === "error" && m.code === "not_idle", 5_000, "not_idle error");
+    // Leave the agent idle for later groups.
+    ws.send(JSON.stringify({ type: "abort" }));
+    await waitForEventByName(next, "agent_settled", 20_000);
+  });
+});
+
+registerTest(3, "steer_when_streaming_is_accepted_and_delivered", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+    await waitForEventByName(next, "message_update", 15_000);
+    ws.send(JSON.stringify({ type: "steer", text: "STEER-10" }));
+    // No error within 4s is the acceptance (prompt/steer/abort have no acks); the stopWhen throws
+    // on the first error and stops early at agent_settled (fast model), which is then satisfied.
+    let settled = false;
+    const noSteerError = (m) => {
+      if (m?.type === "error") throw new Error(`steer rejected: ${JSON.stringify(m)}`);
+      if (m?.type === "event" && m.name === "agent_settled") settled = true;
+      return settled;
+    };
+    await readMessages(next, noSteerError, 4_000, "post-steer error window", { onTimeout: "return" });
+    if (!settled) await readMessages(next, (m) => m?.type === "event" && m.name === "agent_settled", 60_000, "steer follow-up (agent_settled; 1..400 gen + follow-up)");
+    ws.send(JSON.stringify({ type: "get_history" }));
+    const history = await waitForMessage(next, (m) => m?.type === "history", 10_000, "history after steer");
+    const delivered = (history.messages ?? []).some((m) => m?.role === "user" && JSON.stringify(m).includes("STEER-10"));
+    check(delivered, "no user message containing STEER-10 in history (steer not delivered)");
+  });
+});
+
+// Group 4: Abort
+
+registerTest(4, "abort_stops_the_turn", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+    await waitForEventByName(next, "message_update", 15_000);
+    ws.send(JSON.stringify({ type: "abort" }));
+    const turnEnd = await waitForEventByName(next, "turn_end", 20_000);
+    const stopReason = turnEnd?.message?.stopReason; // informational only: "aborted" when present
+    check(stopReason === undefined || typeof stopReason === "string", "stopReason, when present, must be a string");
+    await readMessages(next, (m) => m?.type === "event" && m.name === "agent_settled", 20_000, "abort (agent_settled)");
+    ws.send(JSON.stringify({ type: "get_state" }));
+    const state = await waitForMessage(next, (m) => m?.type === "state", 10_000, "state after abort");
+    assertValidStateShape(state);
+    check(state.isStreaming === false, "isStreaming must be false after abort, was true");
+  });
+});
+
+// Group 10: Streaming buffer
+
+registerTest(10, "streaming_buffer_delivered_on_mid_stream_connect", async (ctx) => {
+  const a = await connectAndVerifyConnectTime(ctx); // client A starts the stream
+  const stateA = ctx.lastState;
+  let b = null;
+  try {
+    a.ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+    await waitForEventByName(a.next, "message_update", 15_000);
+    // Client B joins mid-stream; its connect burst is hello_ok, state, history, streaming_buffer.
+    b = await connectAndVerifyConnectTime(ctx);
+    const stateB = ctx.lastState;
+    check(stateB.sessionId === stateA.sessionId, "client B sessionId differs from client A");
+    check(stateB.isStreaming === true, "client B state.isStreaming must be true mid-stream");
+    // state+history are already consumed; drain 300ms to capture the streaming_buffer burst.
+    const burst = await drainUntilQuiet(b.next, 300);
+    const buffer = burst.find((m) => m?.type === "streaming_buffer");
+    check(buffer, "streaming_buffer not delivered on mid-stream connect");
+    check(buffer.sessionId === stateA.sessionId, "streaming_buffer sessionId mismatch");
+    check(Array.isArray(buffer.content) && buffer.content.length > 0, "streaming_buffer.content must be non-empty");
+    buffer.content.forEach((block, i) => {
+      check(block && typeof block === "object" && ["text", "thinking", "toolUse"].includes(block.type), `content[${i}] type`);
+      if (block.type !== "toolUse") check(typeof block.text === "string", "block.text must be a string");
+    });
+  } finally {
+    try { a.ws.send(JSON.stringify({ type: "abort" })); } catch { /* already closed */ }
+    await sleep(500); // let the abort land (token savings)
+    a.close();
+    if (b) b.close();
+  }
+});
 
 // TODO(group 5): Questions
 //   - ASK via test-project AGENTS.md -> question message received
@@ -429,10 +580,6 @@ registerTest(2, "history_empty_or_consistent_shape", async (ctx) => {
 // TODO(group 9): Session rebind
 //   - /new -> clients get session_start + fresh state + history
 //   - pre-rebind events tagged with old sessionId
-
-// TODO(group 10): Streaming buffer
-//   - connect mid-stream -> streaming_buffer with content
-//   - buffer content matches streamed content so far
 
 // --- main ------------------------------------------------------------------------
 
