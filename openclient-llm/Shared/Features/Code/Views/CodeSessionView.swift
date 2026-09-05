@@ -130,7 +130,7 @@ struct CodeSessionView: View {
         .task(id: viewModel.transientToast) {
             guard viewModel.transientToast != nil else { return }
             try? await Task.sleep(for: .seconds(3))
-            viewModel.transientToast = nil
+            viewModel.send(.clearToast)
         }
     }
 }
@@ -178,9 +178,34 @@ private extension CodeSessionView {
     var contextUsage: ContextUsage? {
         guard let usage = session.contextUsage else { return nil }
         return ContextUsage(
-            estimatedInputTokens: usage.used,
-            maxInputTokens: usage.total
+            estimatedInputTokens: usage.tokens,
+            maxInputTokens: usage.contextWindow
         )
+    }
+
+    var scrollContentTrigger: Int {
+        guard let last = session.items.last else { return 0 }
+        switch last {
+        case .assistant(let id, let content, _):
+            var hasher = Hasher()
+            hasher.combine(id)
+            for block in content {
+                switch block {
+                case .text(let t): hasher.combine(t.count)
+                case .thinking(let t): hasher.combine(t.count)
+                case .toolUse(let tcId, _, _, _): hasher.combine(tcId)
+                case .unknown: break
+                }
+            }
+            return hasher.finalize()
+        case .toolStep(let id, _, _, _, let output, _):
+            var hasher = Hasher()
+            hasher.combine(id)
+            hasher.combine(output?.count)
+            return hasher.finalize()
+        default:
+            return last.id.hashValue
+        }
     }
 
     // MARK: - Header
@@ -349,7 +374,7 @@ private extension CodeSessionView {
             shouldAutoScroll: $shouldAutoScroll,
             isManuallyScrolling: $isManuallyScrolling,
             messageCount: session.items.count,
-            contentTrigger: session.items.last?.id,
+            contentTrigger: scrollContentTrigger,
             sessionId: session.sessionId,
             isAtBottom: scrollEdgeMetrics.isAtBottom
         ))

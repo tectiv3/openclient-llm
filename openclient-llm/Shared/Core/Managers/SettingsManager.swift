@@ -357,6 +357,8 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.removeObject(forKey: Keys.lmStudioWebSearchPluginId)
         defaults.removeObject(forKey: Keys.requestTimeoutSeconds)
         defaults.removeObject(forKey: Keys.capabilityOverrides)
+        defaults.removeObject(forKey: Keys.codeHost)
+        defaults.removeObject(forKey: Keys.codePort)
         defaults.removeObject(forKey: LegacyKeys.serverBaseURL)
         defaults.removeObject(forKey: LegacyKeys.apiKey)
         keychainManager.deleteAll()

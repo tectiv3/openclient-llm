@@ -75,35 +75,10 @@ struct CodeToolStepView: View {
 // MARK: - Private
 
 private extension CodeToolStepView {
-    var toolIcon: String {
-        let lower = toolName.lowercased()
-        if lower.contains("bash") || lower.contains("shell") {
-            return "terminal"
-        } else if lower.contains("read") {
-            return "doc.text"
-        } else if lower.contains("write") || lower.contains("edit") {
-            return "pencil"
-        } else if lower.contains("search") || lower.contains("grep") {
-            return "magnifyingglass"
-        } else if lower.contains("web") {
-            return "globe"
-        }
-        return "wrench"
-    }
+    var toolIcon: String { CodeToolDisplay.icon(for: toolName) }
 
     var summaryText: String {
-        if let command = args["command"],
-           case .string(let cmd) = command {
-            let first = cmd.components(separatedBy: "\n")
-                .first ?? cmd
-            return "\(toolName): \(first)"
-        }
-        if let path = args["file_path"] ?? args["path"],
-           case .string(let filePath) = path {
-            let name = (filePath as NSString).lastPathComponent
-            return "\(toolName): \(name)"
-        }
-        return toolName
+        CodeToolDisplay.summary(toolName: toolName, args: args)
     }
 
     var expandedContent: some View {
@@ -229,6 +204,43 @@ private extension AnyCodableValue {
         case .object(let obj):
             return "{\(obj.count) keys}"
         }
+    }
+}
+
+// MARK: - Tool Display Helpers
+
+enum CodeToolDisplay {
+    static func icon(for toolName: String) -> String {
+        let lower = toolName.lowercased()
+        if lower.contains("bash") || lower.contains("shell") {
+            return "terminal"
+        } else if lower.contains("read") || lower.contains("file") {
+            return "doc.text"
+        } else if lower.contains("write") || lower.contains("edit") {
+            return "pencil"
+        } else if lower.contains("search") || lower.contains("grep") {
+            return "magnifyingglass"
+        } else if lower.contains("web") {
+            return "globe"
+        }
+        return "wrench"
+    }
+
+    static func summary(
+        toolName: String,
+        args: [String: AnyCodableValue]
+    ) -> String {
+        if let command = args["command"],
+           case .string(let cmd) = command {
+            let first = cmd.components(separatedBy: "\n").first ?? cmd
+            return "\(toolName): \(first)"
+        }
+        if let path = args["file_path"] ?? args["path"],
+           case .string(let filePath) = path {
+            let name = (filePath as NSString).lastPathComponent
+            return "\(toolName): \(name)"
+        }
+        return toolName
     }
 }
 

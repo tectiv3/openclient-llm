@@ -11,7 +11,7 @@ import SwiftUI
 struct CodeView: View {
     // MARK: - Properties
 
-    @State private var viewModel = CodeViewModel()
+    var viewModel: CodeViewModel
     @Environment(\.scenePhase) private var scenePhase
 
     // Connect form fields live here (not in CodeConnectView) so they survive
@@ -126,7 +126,7 @@ private extension CodeView {
                 .foregroundStyle(.secondary)
 
             Button {
-                viewModel.send(.disconnect)
+                viewModel.send(.retry)
             } label: {
                 Text(String(localized: "Try Again"))
                     .padding(.horizontal, 24)
@@ -164,5 +164,5 @@ private extension CodeView {
 }
 
 #Preview {
-    CodeView()
+    CodeView(viewModel: CodeViewModel())
 }

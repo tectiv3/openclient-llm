@@ -21,6 +21,7 @@ enum CodeEvent: Sendable {
     case questionResolved(CodeQuestionResolved)
     case pong
     case error(CodeServerError)
+    case connectionLost
     case connectionFailed(String)
     case authFailed(CodeServerError)
     case disconnected

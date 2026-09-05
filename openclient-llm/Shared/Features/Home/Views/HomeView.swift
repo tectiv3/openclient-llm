@@ -12,6 +12,7 @@ struct HomeView: View {
     // MARK: - Properties
 
     @State private var viewModel = HomeViewModel()
+    @State private var codeViewModel = CodeViewModel()
     @State private var selectedConversation: Conversation?
     @State private var isPrivateChatActive: Bool = false
 
@@ -112,7 +113,7 @@ private extension HomeView {
                 }
             }
             Tab(value: AppTab.code) {
-                CodeView()
+                CodeView(viewModel: codeViewModel)
             } label: {
                 Label {
                     Text(String(localized: "Code"))
@@ -270,7 +271,7 @@ private extension HomeView {
                 }
             }
         case .code:
-            CodeView()
+            CodeView(viewModel: codeViewModel)
         case .models:
             ModelsView()
         case .settings:

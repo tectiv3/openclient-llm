@@ -76,6 +76,9 @@ extension CodeViewModel {
                 items.append(
                     .compaction(id: UUID(), summary: summary)
                 )
+
+            case .unknown:
+                break
             }
         }
 
@@ -157,6 +160,9 @@ private extension CodeViewModel {
                     output: output,
                     isComplete: !isStreaming
                 ))
+
+            case .unknown:
+                break
             }
         }
 
@@ -265,6 +271,9 @@ private extension CodeViewModel {
 
         case .toolUse:
             content.append(block)
+
+        case .unknown:
+            break
         }
     }
 

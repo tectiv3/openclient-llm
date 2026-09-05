@@ -73,9 +73,11 @@ private struct SingleQuestionView: View {
                         }
                     }
 
-                    Divider()
-                        .padding(.leading, 16)
-                    customInputRow
+                    if params.allowOther != false {
+                        Divider()
+                            .padding(.leading, 16)
+                        customInputRow
+                    }
                 }
                 .glassEffect(
                     .regular,
@@ -197,6 +199,7 @@ private struct QuestionnaireView: View {
 
     @State private var currentPage = 0
     @State private var answers: [String: String] = [:]
+    @State private var customTexts: [String: String] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -302,9 +305,47 @@ private struct QuestionnaireView: View {
                     .regular,
                     in: .rect(cornerRadius: 16)
                 )
+
+                if question.allowOther != false {
+                    HStack(spacing: 8) {
+                        TextField(
+                            String(localized: "Type something..."),
+                            text: customTextBinding(for: question.id),
+                            axis: .vertical
+                        )
+                        .textFieldStyle(.plain)
+                        .lineLimit(1...3)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+
+                        Button {
+                            let text = (customTexts[question.id] ?? "")
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !text.isEmpty else { return }
+                            answers[question.id] = text
+                        } label: {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.title3)
+                                .foregroundStyle(
+                                    (customTexts[question.id] ?? "").isEmpty
+                                        ? .secondary
+                                        : Color.appAccent
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .glassEffect(.regular, in: .rect(cornerRadius: 16))
+                }
             }
             .padding(.horizontal, 20)
         }
+    }
+
+    func customTextBinding(for questionId: String) -> Binding<String> {
+        Binding(
+            get: { customTexts[questionId] ?? "" },
+            set: { customTexts[questionId] = $0 }
+        )
     }
 
     func questionnaireOptionRow(

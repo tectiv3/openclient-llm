@@ -21,6 +21,13 @@ extension CodeViewModel {
         wasCustom: Bool,
         index: Int?
     ) {
+        let questionText: String
+        if let session = currentSession {
+            questionText = questionTextForId(id, in: session)
+        } else {
+            questionText = ""
+        }
+
         let message = CodeClientMessage.answer(
             id: id,
             value: value,
@@ -29,18 +36,44 @@ extension CodeViewModel {
         )
         sendOrQueueAnswer(message)
         dismissQuestion(id: id)
+
+        guard var session = currentSession else { return }
+        session.items.append(.resolvedQuestion(
+            id: UUID(),
+            questionText: questionText,
+            answerText: value,
+            wasCustom: wasCustom
+        ))
+        updateSession(session)
     }
 
     func handleAnswerQuestionnaire(
         id: String,
         answers: [CodeQuestionnaireAnswer]
     ) {
+        let questionText: String
+        if let session = currentSession {
+            questionText = questionTextForId(id, in: session)
+        } else {
+            questionText = ""
+        }
+
         let message = CodeClientMessage.answerQuestionnaire(
             id: id,
             answers: answers
         )
         sendOrQueueAnswer(message)
         dismissQuestion(id: id)
+
+        guard var session = currentSession else { return }
+        let summary = answers.map(\.label).joined(separator: ", ")
+        session.items.append(.resolvedQuestion(
+            id: UUID(),
+            questionText: questionText,
+            answerText: summary,
+            wasCustom: false
+        ))
+        updateSession(session)
     }
 
     func handleQuestionReceived(_ question: CodeQuestion) {
@@ -75,26 +108,21 @@ extension CodeViewModel {
     ) {
         guard var session = currentSession else { return }
 
-        // Single questions and questionnaires both resolve through
-        // question_resolved, so one toast branch covers both modal kinds.
         let modalWasShowing = session.pendingQuestion?.id == resolved.id
-
-        // Captured before the pending slot is cleared below, so the
-        // transcript entry can still read the question text.
         let questionText = questionTextForId(resolved.id, in: session)
 
         if modalWasShowing {
             session.pendingQuestion = nil
             transientToast = toastForResolved(by: resolved.resolvedBy)
-        }
 
-        if resolved.resolvedBy == "client", let value = resolved.value {
-            session.items.append(.resolvedQuestion(
-                id: UUID(),
-                questionText: questionText,
-                answerText: value,
-                wasCustom: false
-            ))
+            if resolved.resolvedBy == "client", let value = resolved.value {
+                session.items.append(.resolvedQuestion(
+                    id: UUID(),
+                    questionText: questionText,
+                    answerText: value,
+                    wasCustom: false
+                ))
+            }
         }
 
         updateSession(session)

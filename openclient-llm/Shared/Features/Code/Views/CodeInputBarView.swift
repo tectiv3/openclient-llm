@@ -36,7 +36,6 @@ struct CodeInputBarView: View {
                 .submitLabel(.send)
 #endif
                 .onSubmit {
-                    inputText = ""
                     onSend()
                 }
                 .disabled(isDisabled)
@@ -87,7 +86,6 @@ private extension CodeInputBarView {
 
     var sendButton: some View {
         Button {
-            inputText = ""
             onSend()
         } label: {
             Image(systemName: "arrow.up.circle.fill")

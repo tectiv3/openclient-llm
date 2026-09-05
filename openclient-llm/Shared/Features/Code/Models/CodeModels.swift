@@ -28,8 +28,9 @@ struct CodeModelInfo: Equatable, Sendable, Codable {
 }
 
 struct CodeContextUsage: Equatable, Sendable, Codable {
-    let used: Int
-    let total: Int
+    let tokens: Int
+    let contextWindow: Int
+    let percent: Double
 }
 
 // MARK: - History
@@ -51,6 +52,7 @@ enum CodeContentBlock: Equatable, Sendable {
         args: [String: AnyCodableValue],
         output: String?
     )
+    case unknown
 }
 
 extension CodeContentBlock: Codable {
@@ -82,7 +84,7 @@ extension CodeContentBlock: Codable {
                 output: output
             )
         default:
-            self = .text("")
+            self = .unknown
         }
     }
 
@@ -101,6 +103,8 @@ extension CodeContentBlock: Codable {
             try container.encode(toolName, forKey: .toolName)
             try container.encode(args, forKey: .args)
             try container.encodeIfPresent(output, forKey: .output)
+        case .unknown:
+            try container.encode("unknown", forKey: .type)
         }
     }
 }
@@ -117,6 +121,7 @@ enum CodeHistoryMessage: Equatable, Sendable {
         isError: Bool
     )
     case compaction(summary: String)
+    case unknown
 }
 
 extension CodeHistoryMessage: Codable {
@@ -155,7 +160,7 @@ extension CodeHistoryMessage: Codable {
             let summary = try container.decode(String.self, forKey: .summary)
             self = .compaction(summary: summary)
         default:
-            self = .compaction(summary: "")
+            self = .unknown
         }
     }
 
@@ -177,6 +182,8 @@ extension CodeHistoryMessage: Codable {
         case .compaction(let summary):
             try container.encode("compaction", forKey: .role)
             try container.encode(summary, forKey: .summary)
+        case .unknown:
+            try container.encode("unknown", forKey: .role)
         }
     }
 }

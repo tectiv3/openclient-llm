@@ -192,10 +192,10 @@ private extension CodeTranscriptItemView {
         args: [String: AnyCodableValue]
     ) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: toolIcon(for: toolName))
+            Image(systemName: CodeToolDisplay.icon(for: toolName))
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text(toolSummary(toolName: toolName, args: args))
+            Text(CodeToolDisplay.summary(toolName: toolName, args: args))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -297,40 +297,6 @@ private extension CodeTranscriptItemView {
         }
     }
 
-    // MARK: Helpers
-
-    func toolIcon(for name: String) -> String {
-        let lower = name.lowercased()
-        if lower.contains("bash") || lower.contains("shell") {
-            return "terminal"
-        } else if lower.contains("read") || lower.contains("file") {
-            return "doc.text"
-        } else if lower.contains("write") || lower.contains("edit") {
-            return "pencil"
-        } else if lower.contains("search") || lower.contains("grep") {
-            return "magnifyingglass"
-        } else if lower.contains("web") {
-            return "globe"
-        }
-        return "wrench"
-    }
-
-    func toolSummary(
-        toolName: String,
-        args: [String: AnyCodableValue]
-    ) -> String {
-        if let command = args["command"],
-           case .string(let cmd) = command {
-            let first = cmd.components(separatedBy: "\n").first ?? cmd
-            return "\(toolName) \(first)"
-        }
-        if let path = args["file_path"] ?? args["path"],
-           case .string(let filePath) = path {
-            let name = (filePath as NSString).lastPathComponent
-            return "\(toolName) \(name)"
-        }
-        return toolName
-    }
 }
 
 extension [CodeContentBlock] {

@@ -32,6 +32,8 @@ final class CodeViewModel {
         case refreshState
         case appDidEnterBackground
         case appWillEnterForeground
+        case retry
+        case clearToast
     }
 
     enum State: Equatable {
@@ -156,12 +158,16 @@ final class CodeViewModel {
             )
         case .answerQuestionnaire(let id, let answers):
             handleAnswerQuestionnaire(id: id, answers: answers)
+        case .retry:
+            handleRetry()
         case .refreshState:
             Task { await client.send(.getState) }
         case .appDidEnterBackground:
             handleAppDidEnterBackground()
         case .appWillEnterForeground:
             handleAppWillEnterForeground()
+        case .clearToast:
+            transientToast = nil
         }
     }
 }
@@ -186,6 +192,14 @@ private extension CodeViewModel {
         backgroundDisconnected = false
 
         resetToDisconnected()
+    }
+
+    func handleRetry() {
+        guard let last = lastConnect else {
+            handleDisconnect()
+            return
+        }
+        establishConnection(host: last.host, port: last.port, code: last.code)
     }
 
     func handleDisconnect() {
@@ -272,6 +286,9 @@ extension CodeViewModel {
         case .error(let error):
             handleError(error)
 
+        case .connectionLost:
+            transitionToReconnecting()
+
         case .connectionFailed(let message):
             backgroundUseCase.end()
             state = .failed(errorMessage: message)
@@ -350,16 +367,10 @@ extension CodeViewModel {
     }
 
     private func handleError(_ error: CodeServerError) {
-        guard var session = currentSession else { return }
-
         if error.code == "not_idle" {
-            session.items.append(.user(
-                id: UUID(),
-                text: error.message
-                    ?? String(localized: "Cannot send while streaming")
-            ))
+            transientToast = error.message
+                ?? String(localized: "Cannot send while streaming")
         }
-        updateSession(session)
     }
 
     private func transitionToReconnecting() {
