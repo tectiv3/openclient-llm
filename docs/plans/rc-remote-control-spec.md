@@ -179,8 +179,8 @@ Server → client:
 | `history` | `{sessionId, messages: [...], cursor?}` — see History format below |
 | `event` | `{sessionId, name, ...}` forwarded pi events. Client MUST ignore events whose `sessionId` doesn't match the last received `state.sessionId` (guards against stale events during session rebind) |
 | `streaming_buffer` | `{sessionId, content: ContentBlock[]}` — accumulated content of the in-progress assistant turn. Sent after `state`+`history` on reconnect when `isStreaming` is true. Omitted when not streaming |
-| `question` | `{sessionId, id, kind: "question", params: {question, options}}` |
-| `questionnaire` | `{sessionId, id, kind: "questionnaire", params: {questions}}` |
+| `question` | `{sessionId, id, kind: "question", params: {question: string, options: QuestionOption[]}}` — see shapes below |
+| `questionnaire` | `{sessionId, id, kind: "questionnaire", params: {questions: SubQuestion[]}}` — see shapes below |
 | `question_resolved` | `{id, by: "client"|"cancelled", value?}` — `value` included when `by:"client"` so other clients can display what was answered |
 | `pong` | — |
 | `error` | `{code, message?}` |
@@ -189,9 +189,23 @@ Error codes: `bad_code`, `rate_limited`, `version_mismatch`, `invalid_message`,
 `not_idle` (prompt sent while streaming), `unknown_question` (answer for
 non-pending question).
 
+**Question/questionnaire param shapes** (from the extension source):
+
+```typescript
+type QuestionOption = { label: string; description?: string };
+
+type SubQuestion = {
+  id: string;
+  label?: string;       // tab/page label, defaults to "Q1", "Q2", ...
+  prompt: string;       // full question text
+  options: QuestionOption[];
+  allowOther?: boolean; // show "Type something..." option (default true)
+};
+```
+
 **`contextUsage` shape** (when available):
 `{used: number, total: number}` — token counts. UI renders as percentage bar.
-May be null immediately after compaction.
+May be null immediately after compaction. When null, context bar is hidden.
 
 ### A4. History format
 
@@ -205,7 +219,7 @@ Mapping to the `history.messages` array:
 type ContentBlock =
   | { type: "text"; text: string }
   | { type: "thinking"; text: string }
-  | { type: "toolUse"; toolCallId: string; toolName: string; args: Record<string, unknown> };
+  | { type: "toolUse"; toolCallId: string; toolName: string; args: Record<string, unknown>; output?: string };
 
 type HistoryMessage =
   | { role: "user"; text: string }
@@ -224,7 +238,7 @@ that accumulates content from the in-progress assistant turn:
 - `message_start` → reset buffer, begin accumulating
 - `message_update` → append text/thinking blocks
 - `tool_execution_start` → append toolUse block
-- `tool_execution_update` → update the last toolUse's output
+- `tool_execution_update` → update the last toolUse's `output` field (streaming tool output, e.g. bash stdout)
 - `turn_end` → reset buffer (turn complete, content is now in `getBranch()`)
 
 The buffer represents a single assistant message in progress. Multi-message turns
@@ -334,13 +348,20 @@ mirroring existing feature layout). Tests in `openclient-llm-test/Features/Code/
 - `CodeServerClient` (protocol `CodeServerClientProtocol`): wraps
   `URLSessionWebSocketTask` against `ws://<host>:<port>`; sends JSON commands; emits
   an `AsyncStream<CodeEvent>` (Codable envelope of the A3 protocol). Reconnect with
-  exponential backoff (1s, 2s, 4s, 8s, max 30s); on (re)connect always re-`hello` +
-  receive `state`+`history`. **Auth-error handling**: on `bad_code` or
-  `rate_limited` errors during reconnect, abandon auto-reconnect immediately and
-  emit a `.authFailed` event (the code has changed — server was toggled). The VM
-  transitions to the connect screen so the user can enter the new code. Auto-reconnect
-  only fires on transport errors (TCP close, timeout, pong timeout), never on
-  authentication failures.
+  exponential backoff (1s, 2s, 4s, 8s, max 30s, **max 10 attempts** — after which
+  emit `.connectionFailed` and stop retrying; VM transitions to `.failed`). On
+  (re)connect always re-`hello` + receive `state`+`history`. **Auth-error handling**:
+  on `bad_code` or `rate_limited` errors during reconnect, abandon auto-reconnect
+  immediately and emit a `.authFailed` event (the code has changed — server was
+  toggled). The VM transitions to the connect screen so the user can enter the new
+  code. Auto-reconnect only fires on transport errors (TCP close, timeout, pong
+  timeout), never on authentication failures. **Connection timeout**: initial
+  connect attempt has a 10s timeout; if the server is unreachable, emit
+  `.connectionFailed` (VM transitions to `.failed` with a Retry button).
+- **Task lifecycle**: `URLSessionWebSocketTask` is NOT reusable after close/cancel.
+  Each reconnect attempt must create a NEW task via `urlSession.webSocketTask(with:)`.
+  Cancelling the receive loop requires calling `task.cancel(with:reason:)` on the
+  underlying task to unblock the blocking `receive()` call.
 - **Ping/pong**: Client sends application-level JSON `{"type":"ping"}` every 30s
   via a background `Task` (NOT `URLSessionWebSocketTask.sendPing()` which uses
   WS-protocol-level frames — the server handles JSON messages only). Tracks last
@@ -348,6 +369,10 @@ mirroring existing feature layout). Tests in `openclient-llm-test/Features/Code/
 - **Receive loop**: `URLSessionWebSocketTask.receive()` is pull-based. Wrap in an
   `AsyncStream` via a dedicated `Task` that loops `receive()` and yields parsed
   `CodeEvent` values. Handle cancellation and errors to trigger reconnect.
+- **Event coalescing**: Batch incoming `message_update` events on a 50–100ms timer
+  before pushing to the `AsyncStream` / applying to `@Observable` state. Prevents
+  per-character state mutations from causing `LazyVStack` frame drops during
+  streaming. The timer fires on the last event in the batch window.
 - **Streaming buffer**: On reconnect, if `state.isStreaming` is true, expect a
   `streaming_buffer` message after `state`+`history`. Render accumulated content
   immediately so the in-progress turn is visible.
@@ -366,11 +391,14 @@ mirroring existing feature layout). Tests in `openclient-llm-test/Features/Code/
   NOT persisted — entered fresh each session (ephemeral on both sides).
 - **Background behavior** (iOS): Use the existing `BackgroundTaskManager` (via a
   new `CodeBackgroundUseCase`) to keep the WS connection alive during the allowed
-  background window (~30s). If a `question`/`questionnaire` arrives while
+  background window (best-effort, typically 5–30s depending on system pressure —
+  NOT a guaranteed duration). If a `question`/`questionnaire` arrives while
   backgrounded, fire a local notification via `LocalNotificationManager` — add a
   new `sendQuestionNotification()` method to `LocalNotificationManagerProtocol`
   ("pi is asking a question — tap to answer"). If the background task expires,
-  disconnect gracefully. On foreground, reconnect and receive pending questions.
+  disconnect gracefully. On foreground, reconnect and receive pending questions
+  (question survives disconnect per Decision 8, so the notification path is
+  opportunistic — the question is always re-delivered on reconnect regardless).
   This matches the existing `StreamingBackgroundUseCase` +
   `NotifyStreamingCompletedUseCase` pattern.
 - **Background behavior** (macOS): No special handling needed. macOS apps do not
@@ -388,13 +416,30 @@ mirroring existing feature layout). Tests in `openclient-llm-test/Features/Code/
   mode) or need initial setup (full form mode). Transitions: transport error while
   connected → `.reconnecting`; auth error (`bad_code`/`rate_limited`) while
   reconnecting → `.disconnected` (prompt for new code); reconnect success →
-  `.connected`.
-- Events: `connect(host:port:code:)`, `disconnect()`, `sendPrompt(text)`,
-  `sendSteer(text)`, `abort()`, `answer(id, answer)`,
+  `.connected`; 10 consecutive transport reconnect failures → `.failed`;
+  connection timeout (10s) → `.failed`.
+- Events: `connect(host:port:code:)`, `cancelConnect()`, `disconnect()`,
+  `sendPrompt(text)`, `sendSteer(text)`, `abort()`, `answer(id, answer)`,
   `answerQuestionnaire(id, answers)`, `refreshState()`.
 - Input bar semantics: idle → Send = `prompt`; streaming → Send = `steer`,
   Stop button = `abort`.
-- Pending question → modal overlay (see B3 question modal details).
+- Pending question → modal overlay (see B3 question modal details). X button on
+  modal sends `abort` to pi, cancelling the agent's current turn.
+- **`isStreaming` inference**: Client infers streaming state from events since
+  `state` is only pushed on connect/reconnect. `message_start` → set
+  `isStreaming = true`. `turn_end` → set `isStreaming = false`. These toggle the
+  input bar mode and Stop button visibility. If event names differ from assumed
+  names after probe, update this mapping.
+- **Session rebind**: When a `state` message arrives with a different `sessionId`
+  than the current one (pi executed `/new`, `/resume`, `/fork`):
+  1. Clear transcript, rebuild from the accompanying `history` message
+  2. Dismiss any active question modal (the question belongs to the old session)
+  3. Reset `isStreaming` from the new `state.isStreaming`
+  4. If `isStreaming` is true, render `streaming_buffer` content
+  5. No state transition — stays in `.connected` (brief loading indicator optional)
+- **`question_resolved` handling**: When received, if a question modal is showing
+  for that `id`, auto-dismiss it. If `by: "cancelled"`, no transcript trace. If
+  `by: "client"`, show a resolved card in transcript with the answer value.
 
 **File length**: Split via extensions to stay under SwiftLint's 500-line limit:
 - `CodeViewModel.swift` — state, events, connection lifecycle
@@ -411,10 +456,10 @@ follow `chat-visual-style`/`design-ui` specs for look; all views theme-aware
 
 Switches on `CodeViewModel.state`:
 - `.disconnected` → connect screen
-- `.connecting` → connect screen with spinner/disabled controls
+- `.connecting` → connect screen with spinner, disabled fields, Cancel button
 - `.connected` → `CodeSessionView`
 - `.reconnecting` → `CodeSessionView` with reconnect overlay
-- `.failed` → error state with retry
+- `.failed` → error state (message + Retry button + Back to form link)
 
 #### B3.2 Connect screen
 
@@ -447,7 +492,9 @@ Switches on `CodeViewModel.state`:
 
 - **Transcript**: `LazyVStack` with message items, same scroll behavior as Chat
   (`ScrollTriggerModifier`). Auto-scroll on new events; user scroll up disables
-  auto-scroll + shows floating "jump to bottom" button. Message types:
+  auto-scroll + shows floating "jump to bottom" button. **Note**: the rendering
+  below assumes specific event payload shapes (Critical unknowns #5). If the probe
+  reveals different shapes, this section must be revised. Message types:
   - **User messages**: right-aligned glass bubbles (accent-tinted), same as Chat
   - **Assistant text**: left-aligned with sparkles icon, streaming markdown with
     blinking cursor, same as Chat's `MessageBubbleView` pattern
@@ -457,8 +504,9 @@ Switches on `CodeViewModel.state`:
     tool icon (SF Symbol per tool type) + tool name + one-line arg summary (e.g.
     "Read src/main.ts", "Bash npm test"). Default collapsed after completion;
     expand shows args + output. Bash steps show streaming monospace output while
-    running (live-updating, capped to last 20 lines collapsed). Matches the
-    collapsible pattern from `agent-tool-calling.instructions.md`.
+    running (live-updating, capped to last 20 lines collapsed; expanded state
+    capped to 200 lines with "Show more" pagination to prevent scroll performance
+    issues). Matches the collapsible pattern from `agent-tool-calling.instructions.md`.
   - **Resolved question cards**: compact inline card showing question (truncated, 1
     line) + selected answer with checkmark. Glass background, left-aligned. Shows
     "(wrote)" prefix for custom answers. Appears in transcript after a question is
@@ -484,8 +532,9 @@ attachments/recording/web search):
   picker, document picker, camera picker, recording, or web search indicator.
 - **Idle mode**: placeholder "Message pi...", standard glass capsule bar style
   (matching `chat-visual-style` input bar pattern), send button (arrow.up icon).
-- **Streaming/steer mode**: placeholder "Steer pi...", bar border/background shifts
-  to accent tint (amber/orange) to signal steer mode. Send icon changes. Stop
+- **Streaming/steer mode**: placeholder "Steer pi...", bar uses accent-tinted glass
+  (`.glassEffect(.regular.tint(Color.appAccent))`) to signal steer mode — stays
+  within the existing design system, no new color needed. Send icon changes. Stop
   button (square.fill) appears adjacent to input field.
 - **Disabled states**: during `.connecting` and `.reconnecting`, bar is disabled
   (greyed out, not interactive).
@@ -494,13 +543,16 @@ attachments/recording/web search):
 
 #### B3.5 Question modal overlay
 
-Presented as a centered modal card over the session view (dimmed background,
-dismissable via X button or swipe-down on iOS):
+**iOS**: Presented as a centered modal card over the session view (dimmed
+background, dismissable via X button or swipe-down).
+**macOS**: Presented as a `.sheet()` attached to the window (native macOS
+convention). Same content layout, different presentation.
 
 - **Single question (`question`)**: card shows question text at top, options as
   tappable rows (each row: option label, optional description below in muted text),
-  "Type something..." row at bottom (tapping opens inline text field within the
-  card). X button at top-right to dismiss without answering (sends cancel). After
+  "Type something..." row at bottom when `allowOther` is true (tapping opens inline
+  text field within the card). X button at top-right to dismiss — **sends `abort`
+  to pi, cancelling the agent's current turn** (same as pressing Stop). After
   tapping an option → card dismisses, resolved card appears in transcript, answer
   sent to pi.
 
@@ -508,7 +560,9 @@ dismissable via X button or swipe-down on iOS):
   bottom (UIPageControl / TabView with .page style). Each page is one question with
   its options. Last page has Submit button (enabled when all questions answered).
   Page header shows "1 of N" with navigation arrows. Same option row style as
-  single question. X button dismisses entire questionnaire (cancel).
+  single question. X button dismisses entire questionnaire (sends `abort`). For
+  questionnaires with 7+ questions, hide page dots and rely on "1 of N" header
+  with arrows as sole navigation.
 
 - **Custom text input**: when "Type something..." is tapped, the option row expands
   to show a text field inline. Submit with Enter / Done button. Esc/tap outside to
@@ -521,18 +575,59 @@ dismissable via X button or swipe-down on iOS):
   backgrounded), tapping the notification foregrounds the app and the modal
   auto-presents.
 
+- **Disconnect during modal**: if the WebSocket drops while the question modal is
+  showing, the modal stays visible (the reconnecting banner appears underneath).
+  If the user answers while disconnected, the answer is queued and submitted after
+  reconnect. If `question_resolved` arrives during reconnect (another client
+  answered, or server cancelled), the modal auto-dismisses.
+
+- **`question_resolved` while modal is showing**: auto-dismiss the modal. If
+  `by: "client"`, briefly show a toast: "Answered from another device." If
+  `by: "cancelled"`, briefly show "Question cancelled."
+
+- **Accessibility**: modal has `.accessibilityAddTraits(.isModal)` for VoiceOver
+  focus trapping. Each option row has an accessibility label. "Type something..."
+  row has `.accessibilityHint("Double tap to enter a custom answer")`. Connection
+  status dot has `.accessibilityLabel("Connected"/"Reconnecting")`. Context usage
+  bar has `.accessibilityLabel("Context: N% used")`. Steer mode change announced
+  via `.accessibilityValue`. Reconnect animation respects
+  `@Environment(\.accessibilityReduceMotion)`.
+
 ### B4. Tab wiring
 
 `HomeView` changes (4 insertion points):
-1. `AppTab` enum: add `.code` case
+1. `AppTab` enum: add `.code` case (order: Chats, **Code**, Models, Settings)
 2. `TabView` body: add `Tab` block for `.code` with
-   `systemImage: "chevron.left.forwardslash.chevron.right"`
-3. `SidebarDestination` enum: add `.code` case
+   `systemImage: "chevron.left.forwardslash.chevron.right"`, positioned after
+   Chats tab
+3. `SidebarDestination` enum: add `.code` case (same position — after Chats,
+   before Models)
 4. `detailContent`: add `case .code:` → `CodeView()`
 
 No deep-link/shortcut changes in v1.
 
-### B5. Testing (Swift)
+**History pagination**: v1 does not implement scroll-to-top history loading.
+Sessions rarely exceed 200 entries before compaction. `get_history` with `cursor`
+is available in the protocol for future use but no UI trigger is wired in v1.
+
+### B5. Shared component extraction
+
+Before building the Code feature, extract these from `Chat/` to
+`Shared/Common/Views/`:
+
+- `ReasoningDisclosureState` → `Shared/Common/Views/ReasoningDisclosureState.swift`
+- `ChatContextUsageView` → `Shared/Common/Views/ContextUsageView.swift` (rename)
+- Create `MarkdownBubbleView` — generic markdown bubble (extracted from
+  `MessageBubbleView`'s assistant rendering: markdown + streaming cursor + blinking
+  animation). Both Chat and Code import this.
+- `ScrollTriggerModifier` → refactor to accept a protocol for scroll-follow
+  behavior (decouple from `ChatViewModel.LoadedState`), move to
+  `Shared/Common/Views/ScrollTriggerModifier.swift`
+
+`MessageBubbleView` stays in Chat (tightly coupled to `ChatMessage`). Code builds
+its own `CodeMessageView` using `MarkdownBubbleView` + `ReasoningDisclosureState`.
+
+### B6. Testing (Swift)
 
 Per `testing.instructions.md` / AGENTS.md conventions:
 
@@ -678,10 +773,15 @@ Real phone ↔ Mac on tailnet:
    remote-ask integration per A5, update symlinks. Run test script (C2, test 5).
    Commit.
 
-4. **Task 3 — Swift Code feature**: data layer + ViewModel + Views + tab wiring +
+4. **Task 3a — shared component extraction**: Extract `ReasoningDisclosureState`,
+   `ChatContextUsageView` → `ContextUsageView`, create `MarkdownBubbleView`,
+   refactor `ScrollTriggerModifier` to accept protocol — per B5. Update Chat
+   imports. Verify Chat still builds and tests pass. Commit.
+
+5. **Task 3b — Swift Code feature**: data layer + ViewModel + Views + tab wiring +
    tests. Compile + run Code feature tests (C3) + both platform builds. Commit.
 
-5. **Task 4 — end-to-end**: Manual testing per C4. Fix issues, commit.
+6. **Task 4 — end-to-end**: Manual testing per C4. Fix issues, commit.
 
 Branch from `develop` (per AGENTS.md git workflow). Compile and commit after each
 completed task (linter and formatter run on commit hook); never push to remote.
