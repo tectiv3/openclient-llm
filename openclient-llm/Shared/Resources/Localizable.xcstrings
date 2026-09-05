@@ -7,6 +7,16 @@
     "·" : {
       "shouldTranslate" : false
     },
+    "(%@) %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "(%1$@) %2$@"
+          }
+        }
+      }
+    },
     "%.1f — %@" : {
       "localizations" : {
         "en" : {
@@ -90,6 +100,19 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%1$@ tokens, %2$lld procent"
+          }
+        }
+      }
+    },
+    "%@:" : {
+
+    },
+    "%@%@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@%2$@"
           }
         }
       }
@@ -361,6 +384,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%lld meddelanden uteslutna från denna förfrågan"
+          }
+        }
+      }
+    },
+    "%lld of %lld" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld of %2$lld"
           }
         }
       }
@@ -728,6 +761,9 @@
     "~$%.4f" : {
       "comment" : "A monetary value displayed in the chat interface.",
       "shouldTranslate" : false
+    },
+    "█" : {
+
     },
     "$%.4f / 1K tokens" : {
       "comment" : "A label that shows the cost of input in USD per 1K tokens.",
@@ -2822,6 +2858,9 @@
         }
       }
     },
+    "Authentication failed" : {
+
+    },
     "Author" : {
       "localizations" : {
         "de" : {
@@ -3922,6 +3961,9 @@
         }
       }
     },
+    "Cannot send while streaming" : {
+
+    },
     "Capabilities" : {
       "comment" : "A section that lists the capabilities of a model.",
       "localizations" : {
@@ -3986,6 +4028,9 @@
           }
         }
       }
+    },
+    "Change host" : {
+
     },
     "Chat" : {
       "comment" : "A section of the settings view that deals with chat-related settings.",
@@ -5027,6 +5072,9 @@
     "Configure your personal context, memory, and default system prompt to personalise model responses." : {
 
     },
+    "Connect" : {
+
+    },
     "Connect external tools" : {
       "comment" : "A tip that explains how to connect external tools to the model.",
       "localizations" : {
@@ -5092,6 +5140,9 @@
         }
       }
     },
+    "Connect to pi" : {
+
+    },
     "Connect Your Server" : {
       "comment" : "A heading for the server configuration step of the onboarding flow.",
       "localizations" : {
@@ -5156,6 +5207,18 @@
           }
         }
       }
+    },
+    "Connected" : {
+
+    },
+    "Connected to pi" : {
+
+    },
+    "Connecting..." : {
+
+    },
+    "Connection lost" : {
+
     },
     "Connection successful" : {
       "localizations" : {
@@ -5285,6 +5348,9 @@
           }
         }
       }
+    },
+    "Context compacted" : {
+
     },
     "Context Window" : {
       "comment" : "A section that displays the maximum number of tokens that can be processed in a single request.",
@@ -7683,7 +7749,13 @@
         }
       }
     },
+    "Disconnect" : {
+
+    },
     "Discovered Servers" : {
+
+    },
+    "Dismiss" : {
 
     },
     "Document" : {
@@ -7878,6 +7950,9 @@
           }
         }
       }
+    },
+    "Double tap to enter a custom answer" : {
+
     },
     "Drag image here" : {
       "extractionState" : "stale",
@@ -9247,6 +9322,9 @@
           }
         }
       }
+    },
+    "Enter the 6-digit code shown in pi" : {
+
     },
     "Enter the MCP plugin ID as configured in your LM Studio mcp.json." : {
 
@@ -11652,6 +11730,9 @@
         }
       }
     },
+    "Host (e.g. mac.ts.net)" : {
+
+    },
     "How can I help you?" : {
       "localizations" : {
         "de" : {
@@ -13152,6 +13233,9 @@
           }
         }
       }
+    },
+    "Invalid code — check the code shown in pi" : {
+
     },
     "Issue" : {
       "extractionState" : "stale",
@@ -14985,6 +15069,9 @@
           }
         }
       }
+    },
+    "Message pi..." : {
+
     },
     "Message..." : {
       "localizations" : {
@@ -19738,6 +19825,9 @@
         }
       }
     },
+    "pi is asking a question" : {
+
+    },
     "Pin" : {
       "comment" : "A pin icon.",
       "localizations" : {
@@ -20002,6 +20092,9 @@
 
     },
     "Plugin ID" : {
+
+    },
+    "Port" : {
 
     },
     "Post" : {
@@ -20659,6 +20752,9 @@
         }
       }
     },
+    "Prompt mode" : {
+
+    },
     "Provider" : {
       "localizations" : {
         "de" : {
@@ -20852,6 +20948,12 @@
           }
         }
       }
+    },
+    "Question" : {
+
+    },
+    "Questionnaire" : {
+
     },
     "Quick Actions" : {
       "comment" : "Widget name.",
@@ -21176,6 +21278,12 @@
           }
         }
       }
+    },
+    "Reconnecting" : {
+
+    },
+    "Reconnecting..." : {
+
     },
     "Record Audio" : {
       "comment" : "A label for the record audio button.",
@@ -23578,6 +23686,9 @@
         }
       }
     },
+    "Send a message or use pi directly — activity will appear here." : {
+
+    },
     "Send File to Chat" : {
       "localizations" : {
         "de" : {
@@ -24681,6 +24792,16 @@
         }
       }
     },
+    "Showing last %lld of %lld lines" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Showing last %1$lld of %2$lld lines"
+          }
+        }
+      }
+    },
     "Sign in to iCloud to enable sync" : {
       "comment" : "A message that instructs the user to sign in to iCloud to enable iCloud sync.",
       "localizations" : {
@@ -25588,6 +25709,12 @@
         }
       }
     },
+    "Steer mode" : {
+
+    },
+    "Steer pi..." : {
+
+    },
     "Stop" : {
       "localizations" : {
         "de" : {
@@ -25717,7 +25844,6 @@
       }
     },
     "Submit" : {
-      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -27792,6 +27918,9 @@
           }
         }
       }
+    },
+    "Tap to answer." : {
+
     },
     "Tap to return to your conversation." : {
       "comment" : "Text displayed in a conversation card when there is no conversation to show.",
@@ -30834,6 +30963,9 @@
     "Toggle integrations for this conversation. Manage the list in Settings." : {
 
     },
+    "Too many attempts — wait 60s" : {
+
+    },
     "Too many requests. Please try again later." : {
       "localizations" : {
         "de" : {
@@ -31286,6 +31418,9 @@
         }
       }
     },
+    "Try Again" : {
+
+    },
     "Type" : {
       "comment" : "A label that describes the type of a model.",
       "localizations" : {
@@ -31350,6 +31485,9 @@
           }
         }
       }
+    },
+    "Type something..." : {
+
     },
     "Unable to Load Models" : {
       "localizations" : {
@@ -32583,6 +32721,9 @@
           }
         }
       }
+    },
+    "wrote" : {
+
     },
     "Yellow" : {
       "comment" : "Name of the color yellow.",
