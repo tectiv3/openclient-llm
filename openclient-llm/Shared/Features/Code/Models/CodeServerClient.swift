@@ -416,18 +416,22 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
                 guard !Task.isCancelled else { return }
 
                 // Pong is expected within pongTimeoutSeconds of this ping;
-                // a missed deadline means the transport is dead.
-                self.state.withLock { $0.lastPongTime = .now }
+                // a missed deadline means the transport is dead. Only a
+                // pong arriving after this ping was sent counts, so a
+                // stale pong from the previous cycle cannot mask a dead
+                // peer (and the check cannot false-positive on a healthy
+                // one whose RTT is shorter than the sleep overshoot).
+                let pingSentAt = Date.now
                 await self.send(.ping)
                 try? await Task.sleep(
                     for: .seconds(self.pongTimeoutSeconds)
                 )
                 guard !Task.isCancelled else { return }
 
-                let elapsed = self.state.withLock {
-                    Date.now.timeIntervalSince($0.lastPongTime)
+                let pongAfterPing = self.state.withLock {
+                    $0.lastPongTime >= pingSentAt
                 }
-                if elapsed > self.pongTimeoutSeconds {
+                if !pongAfterPing {
                     self.handleConnectionLost(URLError(.timedOut))
                     return
                 }

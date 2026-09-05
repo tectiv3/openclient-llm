@@ -79,15 +79,16 @@ extension CodeViewModel {
         // question_resolved, so one toast branch covers both modal kinds.
         let modalWasShowing = session.pendingQuestion?.id == resolved.id
 
+        // Captured before the pending slot is cleared below, so the
+        // transcript entry can still read the question text.
+        let questionText = questionTextForId(resolved.id, in: session)
+
         if modalWasShowing {
             session.pendingQuestion = nil
             transientToast = toastForResolved(by: resolved.resolvedBy)
         }
 
         if resolved.resolvedBy == "client", let value = resolved.value {
-            let questionText = questionTextForId(
-                resolved.id, in: session
-            )
             session.items.append(.resolvedQuestion(
                 id: UUID(),
                 questionText: questionText,
