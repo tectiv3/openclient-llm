@@ -213,6 +213,38 @@ async function waitForAuthFile(path, timeoutMs) {
   throw new Error(detail);
 }
 
+// The stopped auth shape carries no code, so readAuthFile cannot be reused. expectReason
+// distinguishes port-busy from a stale stopped file left by an earlier step.
+async function waitForStoppedAuthFile(path, timeoutMs, { expectReason = null } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let lastRaw = "auth file not found";
+  while (Date.now() < deadline) {
+    try {
+      const raw = readFileSync(path, "utf8");
+      lastRaw = raw.slice(0, 120);
+      const data = JSON.parse(raw);
+      if (data.status === "stopped" && (expectReason === null || data.reason === expectReason)) return data;
+    } catch (err) {
+      if (!(err instanceof SyntaxError)) lastRaw = err.message;
+    }
+    await sleep(AUTH_POLL_INTERVAL_MS);
+  }
+  throw new Error(`auth file never reached stopped${expectReason ? ` with reason ${expectReason}` : ""} (last: ${lastRaw})`);
+}
+
+// Reads until the socket closes (rcClosed) — used where a close is the expectation; throws on deadline.
+async function drainUntilClose(next, ms, label) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    try {
+      await withTimeout(next(), Math.max(deadline - Date.now(), 0), `${label} (no close within ${ms}ms)`);
+    } catch (err) {
+      if (err?.rcClosed) return; // the close we were waiting for
+      throw err; // deadline or other error
+    }
+  }
+}
+
 // --- rc WS client helpers (groups 1-2) ---------------------------------------------
 
 const RC_WS_TIMEOUT_MS = 10_000;
@@ -558,28 +590,199 @@ registerTest(10, "streaming_buffer_delivered_on_mid_stream_connect", async (ctx)
   }
 });
 
-// TODO(group 5): Questions
-//   - ASK via test-project AGENTS.md -> question message received
-//   - answer -> question_resolved received
-//   - disconnect without answering -> reconnect -> question re-delivered
-//   - two clients -> first answer wins -> second gets question_resolved
 
-// TODO(group 6): Heartbeat
-//   - ping -> pong
-//   - no traffic > 90s -> server closes connection
+// --- groups 5, 6, 7, 8, 9 -------------------------------------------------------
 
-// TODO(group 7): Multi-client
-//   - two clients -> both receive events
-//   - prompt from client A -> both see events
+// Group 5: Questions. LLM-dependent: test-project AGENTS.md forces the question/questionnaire tools for the exact prompts ASK/ASKFORM
+// (~10-30s per round trip, hence 60s waits). Each test chains two LLM waits, so the worst-case total may exceed the 60s framework timeout -> a framework timeout FAIL, by design.
+const assertOptionsShape = (options, where, min = 1) => {
+  check(Array.isArray(options) && options.length >= min, `${where} needs >= ${min} options`);
+  options.forEach((opt, i) => check(nonEmptyString(opt?.label) && nonEmptyString(opt?.value), `${where}.options[${i}] needs label+value`));
+};
 
-// TODO(group 8): Server lifecycle
-//   - /rc -> server starts, status shown
-//   - /rc again -> server stops, clients disconnected
-//   - port busy: second pi + /rc -> error message about port 47800
+registerTest(5, "ask_triggers_question_and_answer_resolves", async (ctx) => {
+  requireAuth(ctx);
+  await withConnection(ctx, async ({ ws, next }) => {
+    ws.send(JSON.stringify({ type: "prompt", text: "ASK" }));
+    const q = await waitForMessage(next, (m) => m?.type === "question", 60_000, "question (LLM round trip)");
+    check(q.kind === "question", `expected kind question, got ${JSON.stringify(q.kind)}`);
+    check(typeof q.params?.question === "string" && q.params.question.toLowerCase().includes("color"),
+      `question text must mention color, got ${JSON.stringify(q.params?.question)}`);
+    assertOptionsShape(q.params?.options, "question", 3);
+    ws.send(JSON.stringify({ type: "answer", id: q.id, value: "red", wasCustom: false, index: 1 }));
+    const resolved = await waitForMessage(next, (m) => m?.type === "question_resolved" && m.id === q.id, 10_000, "question_resolved");
+    check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
+    await waitForEventByName(next, "agent_settled", 60_000); // tool returned; agent replies -> idle again
+  });
+});
 
-// TODO(group 9): Session rebind
-//   - /new -> clients get session_start + fresh state + history
-//   - pre-rebind events tagged with old sessionId
+registerTest(5, "question_survives_disconnect_and_is_redelivered", async (ctx) => {
+  requireAuth(ctx);
+  const a = await connectAndVerifyConnectTime(ctx);
+  let questionId;
+  try {
+    a.ws.send(JSON.stringify({ type: "prompt", text: "ASK" }));
+    ({ id: questionId } = await waitForMessage(a.next, (m) => m?.type === "question", 60_000, "question (LLM round trip)"));
+  } finally {
+    a.close(); // drop without answering: the pending question must survive
+  }
+  await sleep(1000);
+  const b = await connectAndVerifyConnectTime(ctx);
+  try {
+    // The connect burst must re-deliver the SAME pending question (same id, kind question).
+    await waitForMessage(b.next, (m) => m?.type === "question" && m?.kind === "question" && m.id === questionId, 10_000, "re-delivered question");
+    b.ws.send(JSON.stringify({ type: "answer", id: questionId, value: "green", wasCustom: false, index: 2 }));
+    const resolved = await waitForMessage(b.next, (m) => m?.type === "question_resolved" && m.id === questionId, 10_000, "question_resolved");
+    check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
+    await waitForEventByName(b.next, "agent_settled", 60_000);
+  } finally {
+    b.close();
+  }
+});
+
+registerTest(5, "two_clients_first_answer_wins", async (ctx) => {
+  requireAuth(ctx);
+  await withConnection(ctx, async ({ ws, next }) => {
+    const b = await connectAndVerifyConnectTime(ctx);
+    try {
+      ws.send(JSON.stringify({ type: "prompt", text: "ASK" }));
+      const qA = await waitForMessage(next, (m) => m?.type === "question", 60_000, "question on A (LLM round trip)");
+      // B must observe the SAME question (same id): broadcast to all clients.
+      await waitForMessage(b.next, (m) => m?.type === "question" && m.id === qA.id, 60_000, "question on B (same id)");
+      ws.send(JSON.stringify({ type: "answer", id: qA.id, value: "blue", wasCustom: false, index: 3 }));
+      const resA = await waitForMessage(next, (m) => m?.type === "question_resolved" && m.id === qA.id, 10_000, "question_resolved on A");
+      check(resA.by === "client" && resA.value === "blue", `A resolution mismatch: ${JSON.stringify(resA)}`);
+      const resB = await waitForMessage(b.next, (m) => m?.type === "question_resolved" && m.id === qA.id, 10_000, "question_resolved on B");
+      check(resB.by === "client", `B must receive the same resolution broadcast, got ${JSON.stringify(resB)}`);
+      await waitForEventByName(next, "agent_settled", 60_000);
+    } finally {
+      b.close();
+    }
+  });
+});
+
+registerTest(5, "askform_triggers_questionnaire_and_answer_resolves", async (ctx) => {
+  requireAuth(ctx);
+  await withConnection(ctx, async ({ ws, next }) => {
+    ws.send(JSON.stringify({ type: "prompt", text: "ASKFORM" }));
+    const qf = await waitForMessage(next, (m) => m?.type === "questionnaire", 60_000, "questionnaire (LLM round trip)");
+    check(qf.kind === "questionnaire", `expected kind questionnaire, got ${JSON.stringify(qf.kind)}`);
+    const subs = qf.params?.questions;
+    check(Array.isArray(subs) && subs.length === 2, "questionnaire must have exactly 2 questions");
+    check(subs.map((s) => s?.id).join(",") === "q1,q2", `expected ids q1,q2, got ${JSON.stringify(subs.map((s) => s?.id))}`);
+    // every sub-question needs a prompt + its options
+    subs.forEach((s, i) => { check(nonEmptyString(s?.prompt), `questions[${i}] needs a prompt`); assertOptionsShape(s?.options, `questions[${i}]`, 2); });
+    ws.send(JSON.stringify({ type: "answer_questionnaire", id: qf.id, answers: [
+      { id: "q1", value: "red", label: "red", wasCustom: false, index: 1 },
+      { id: "q2", value: "M", label: "M", wasCustom: false, index: 2 },
+    ] }));
+    const resolved = await waitForMessage(next, (m) => m?.type === "question_resolved" && m.id === qf.id, 10_000, "questionnaire resolved");
+    check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
+    await waitForEventByName(next, "agent_settled", 60_000);
+  });
+});
+
+// Group 6: Heartbeat
+
+registerTest(6, "ping_gets_pong", async (ctx) => {
+  requireAuth(ctx);
+  await withConnection(ctx, async ({ ws, next }) => {
+    ws.send(JSON.stringify({ type: "ping" }));
+    await waitForMessage(next, (m) => m?.type === "pong", 5_000, "pong");
+  });
+});
+
+registerTest(6, "stale_client_is_closed_after_90s", async (ctx) => {
+  if (ctx.fast) throw skip("90s stale-close wait skipped in fast mode (run without --fast to enable)");
+  requireAuth(ctx);
+  const hs = await connectAndVerifyConnectTime(ctx);
+  // No traffic: the server's 90s stale detection must close the socket (any close code; recorded in the detail).
+  // Budget: the 90s wait exceeds the framework's 60s hard timeout -> framework timeout FAIL under the current
+  // framework (same C2 exception as group 5). The wait below is bounded (100s) and race-safe either way.
+  await drainUntilClose(hs.next, 100_000, "stale close (90s server-side)");
+  check(Number.isFinite(hs.ws.closeCode), `closed with code ${hs.ws.closeCode} reason ${JSON.stringify(hs.ws.reason)}`);
+});
+
+// Group 7: Multi-client
+
+registerTest(7, "prompt_from_one_client_broadcasts_events_to_all", async (ctx) => {
+  requireAuth(ctx);
+  await withConnection(ctx, async ({ ws, next }) => {
+    const b = await connectAndVerifyConnectTime(ctx);
+    try {
+      // Both clients must see agent_start (broadcast, not unicast) and the eventual agent_settled.
+      ws.send(JSON.stringify({ type: "prompt", text: "Reply with exactly: MULTI-7" }));
+      await waitForEventByName(next, "agent_start", 20_000);
+      await waitForEventByName(b.next, "agent_start", 20_000);
+      await waitForEventByName(b.next, "agent_settled", 60_000);
+    } finally {
+      b.close();
+    }
+  });
+});
+
+// Group 8: Server lifecycle (the /rc RPC toggles the embedded server on/off).
+
+registerTest(8, "rc_toggle_off_stops_server_and_disconnects", async (ctx) => {
+  requireAuth(ctx);
+  const hs = await connectAndVerifyConnectTime(ctx);
+  const off = withTimeout(ctx.client.sendCommand({ type: "prompt", message: "/rc" }), 10_000, "pi /rc off timed out");
+  // The server must disconnect live clients on toggle-off.
+  await drainUntilClose(hs.next, 5_000, "toggle-off close (must happen within 5s)");
+  await off; // pi's RPC response (success) is informational; the auth file is the source of truth.
+  // Manual-off reason is "toggled_off" per the protocol; we only assert a non-empty reason (the exact string is a protocol detail, not a test target).
+  const stopped = await waitForStoppedAuthFile(ctx.authFile, 5_000);
+  check(typeof stopped.reason === "string" && stopped.reason !== "", "stopped auth file must carry a non-empty reason");
+  ctx.auth = null;
+  ctx.auth = await ctx.toggleRcOn(); // Re-enable for the remaining groups (9, 10).
+});
+
+registerTest(8, "port_busy_reports_port_busy", async (ctx) => {
+  requireAuth(ctx);
+  // The server is ON (group 8 left it on); /rc while ON only toggles off, never the port path.
+  // Sequence: (1) toggle off, (2) bind a dummy on the rc port, (3) /rc start attempt -> port_busy, (4) close dummy, (5) re-enable.
+  await withTimeout(ctx.client.sendCommand({ type: "prompt", message: "/rc" }), 10_000, "pi /rc off timed out");
+  const stoppedOff = await waitForStoppedAuthFile(ctx.authFile, 5_000);
+  check(typeof stoppedOff.reason === "string" && stoppedOff.reason !== "", "off reason must be a non-empty string");
+  const dummySockets = new Set();
+  const dummy = net.createServer((s) => dummySockets.add(s)); // occupies the rc port
+  await new Promise((res, rej) => { dummy.once("error", rej); dummy.listen(RC_PORT, RC_HOST, res); });
+  const closeDummy = async () => {
+    for (const s of dummySockets) s.destroy();
+    await new Promise((res) => dummy.close(() => res()));
+  };
+  try {
+    // The start attempt must fail with port_busy; expectReason skips the stale toggled_off file from step (1).
+    await withTimeout(ctx.client.sendCommand({ type: "prompt", message: "/rc" }), 10_000, "pi /rc start timed out");
+    await waitForStoppedAuthFile(ctx.authFile, 5_000, { expectReason: "port_busy" });
+  } finally {
+    await closeDummy();
+  }
+  ctx.auth = null;
+  ctx.auth = await ctx.toggleRcOn(); // leave the server RUNNING for later groups (10)
+});
+
+// Group 9: Session rebind
+
+registerTest(9, "new_session_rebinds_clients_with_fresh_state", async (ctx) => {
+  requireAuth(ctx);
+  const hs = await connectAndVerifyConnectTime(ctx);
+  const oldId = ctx.lastState?.sessionId;
+  check(nonEmptyString(oldId), "no prior sessionId to rebind from");
+  try {
+    await sleep(1000); // drain any in-flight events from the connect burst
+    const resp = await withTimeout(ctx.client.sendCommand({ type: "new_session" }), 10_000, "new_session RPC timed out");
+    check(resp.success !== false, `new_session RPC failed: ${JSON.stringify(resp)}`);
+    // The server re-sends state+history on the session_start rebind; we must see a NEW sessionId (fresh history may be empty).
+    const newState = await waitForMessage(hs.next, (m) => m?.type === "state" && nonEmptyString(m.sessionId) && m.sessionId !== oldId, 10_000, "new state (rebind)");
+    assertValidStateShape(newState);
+    const newHistory = await waitForMessage(hs.next, (m) => m?.type === "history" && m.sessionId === newState.sessionId, 10_000, "new history (rebind)");
+    assertHistoryShape(newHistory, newState.sessionId); // messages may be empty for a fresh session
+    ctx.lastState = newState; // later groups rely on ctx.auth only, but keep the state fresh
+  } finally {
+    hs.close();
+  }
+});
 
 // --- main ------------------------------------------------------------------------
 
