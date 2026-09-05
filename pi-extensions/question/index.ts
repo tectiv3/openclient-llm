@@ -30,6 +30,21 @@ interface QuestionDetails {
 	wasCustom?: boolean;
 }
 
+// Remote-control access (see pi-extensions/rc). The structural type keeps the
+// two extensions decoupled: rc is looked up on globalThis and checked, never imported.
+interface RcRemote {
+	isServing(): boolean;
+	hasConnectedClients(): boolean;
+	ask(opts: { kind: "question"; params: unknown }): Promise<{ value: string; wasCustom: boolean; index?: number } | null>;
+}
+
+const RC_KEY = Symbol.for("pi-rc");
+
+function rcRemote(): RcRemote | undefined {
+	const rc = (globalThis as unknown as Record<symbol, unknown>)[RC_KEY];
+	return rc && typeof (rc as RcRemote).ask === "function" ? (rc as RcRemote) : undefined;
+}
+
 // Options with labels and optional descriptions
 const OptionSchema = Type.Object({
 	label: Type.String({ description: "Display label for the option" }),
@@ -50,6 +65,35 @@ export default function question(pi: ExtensionAPI) {
 		executionMode: "sequential",
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const rc = rcRemote();
+			if (rc && rc.isServing() && rc.hasConnectedClients()) {
+				const answer = await rc.ask({
+					kind: "question",
+					params: {
+						question: params.question,
+						options: params.options.map((o) => ({ label: o.label, value: o.label, description: o.description })),
+						allowOther: true,
+					},
+				});
+				const simpleOptions = params.options.map((o) => o.label);
+				if (!answer) {
+					return {
+						content: [{ type: "text", text: "User cancelled the selection" }],
+						details: { question: params.question, options: simpleOptions, answer: null } as QuestionDetails,
+					};
+				}
+				if (answer.wasCustom) {
+					return {
+						content: [{ type: "text", text: `User wrote: ${answer.value}` }],
+						details: { question: params.question, options: simpleOptions, answer: answer.value, wasCustom: true } as QuestionDetails,
+					};
+				}
+				return {
+					content: [{ type: "text", text: `User selected: ${answer.index ?? "?"}. ${answer.value}` }],
+					details: { question: params.question, options: simpleOptions, answer: answer.value, wasCustom: false } as QuestionDetails,
+				};
+			}
+
 			if (ctx.mode !== "tui") {
 				return {
 					content: [{ type: "text", text: "Error: UI not available (running in non-interactive mode)" }],

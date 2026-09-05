@@ -81,6 +81,21 @@ function errorResult(
 	};
 }
 
+// Remote-control access (see pi-extensions/rc). The structural type keeps the
+// two extensions decoupled: rc is looked up on globalThis and checked, never imported.
+interface RcRemote {
+	isServing(): boolean;
+	hasConnectedClients(): boolean;
+	ask(opts: { kind: "questionnaire"; params: unknown }): Promise<Answer[] | null>;
+}
+
+const RC_KEY = Symbol.for("pi-rc");
+
+function rcRemote(): RcRemote | undefined {
+	const rc = (globalThis as unknown as Record<symbol, unknown>)[RC_KEY];
+	return rc && typeof (rc as RcRemote).ask === "function" ? (rc as RcRemote) : undefined;
+}
+
 export default function questionnaire(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "questionnaire",
@@ -90,6 +105,30 @@ export default function questionnaire(pi: ExtensionAPI) {
 		parameters: QuestionnaireParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const rc = rcRemote();
+			if (rc && rc.isServing() && rc.hasConnectedClients()) {
+				const questions: Question[] = params.questions.map((q, i) => ({
+					...q,
+					label: q.label || `Q${i + 1}`,
+					allowOther: q.allowOther !== false,
+				}));
+				const answers = await rc.ask({ kind: "questionnaire", params: { questions } });
+				if (!answers) {
+					return errorResult("User cancelled the questionnaire", questions);
+				}
+				const answerLines = answers.map((a) => {
+					const qLabel = questions.find((q) => q.id === a.id)?.label || a.id;
+					if (a.wasCustom) {
+						return `${qLabel}: user wrote: ${a.label}`;
+					}
+					return `${qLabel}: user selected: ${a.index}. ${a.label}`;
+				});
+				return {
+					content: [{ type: "text", text: answerLines.join("\n") }],
+					details: { questions, answers, cancelled: false },
+				};
+			}
+
 			if (ctx.mode !== "tui") {
 				return errorResult("Error: UI not available (running in non-interactive mode)");
 			}

@@ -31,7 +31,20 @@ type ContentBlock =
           output?: string
       }
 
-type PendingAsk = null
+type RemoteQuestionAnswer = { value: string; wasCustom: boolean; index?: number }
+type RemoteQuestionnaireAnswer = {
+    id: string
+    value: string
+    label: string
+    wasCustom: boolean
+    index?: number
+}
+type PendingAsk = {
+    id: string
+    kind: 'question' | 'questionnaire'
+    message: JsonObject
+    resolve: (result: RemoteQuestionAnswer | RemoteQuestionnaireAnswer | null) => void
+}
 
 type RateLimitEntry = {
     failures: number
@@ -73,7 +86,7 @@ type RcSingleton = {
     rateLimits: Map<string, RateLimitEntry>
     isStreaming: boolean
     currentTurnBuffer: ContentBlock[]
-    pendingAsk: PendingAsk
+    pendingAsk: PendingAsk | null
     quitAuthWritten: boolean
     processHooksRegistered: boolean
     handleUpgrade(req: IncomingMessage, socket: RcSocket, head: Buffer): void
@@ -83,7 +96,11 @@ type RcSingleton = {
     stop(reason: string, detail?: string): Promise<void>
     broadcast(message: JsonObject): void
     hasConnectedClients(): boolean
-    ask(): Promise<null>
+    isServing(): boolean
+    ask(opts: {
+        kind: 'question' | 'questionnaire'
+        params: JsonObject
+    }): Promise<RemoteQuestionAnswer | RemoteQuestionnaireAnswer | null>
 }
 
 function singleton(): RcSingleton {
@@ -153,7 +170,12 @@ function singleton(): RcSingleton {
         },
         async stop(reason, detail) {
             if (this.pendingAsk) {
-                this.broadcast({ type: 'question_resolved', by: 'cancelled' })
+                this.broadcast({
+                    type: 'question_resolved',
+                    id: this.pendingAsk.id,
+                    by: 'cancelled',
+                })
+                this.pendingAsk.resolve(null)
                 this.pendingAsk = null
             }
             if (this.heartbeat) clearInterval(this.heartbeat)
@@ -181,9 +203,39 @@ function singleton(): RcSingleton {
                 client => client.authenticated && !client.socket.destroyed
             )
         },
-        async ask() {
-            // TODO: Task 2 wires question/questionnaire tools to this remote path.
-            return null
+        isServing() {
+            return this.server !== null
+        },
+        async ask(opts) {
+            if (!this.server || !this.hasConnectedClients()) return null
+            if (this.pendingAsk) {
+                this.broadcast({
+                    type: 'question_resolved',
+                    id: this.pendingAsk.id,
+                    by: 'cancelled',
+                })
+                this.pendingAsk.resolve(null)
+                this.pendingAsk = null
+            }
+            const id = randomBytes(4).toString('hex')
+            const message: JsonObject = {
+                type: opts.kind,
+                sessionId: sessionId(this),
+                id,
+                kind: opts.kind,
+                params: opts.params,
+            }
+            const pending: PendingAsk = { id, kind: opts.kind, message, resolve: () => {} }
+            this.pendingAsk = pending
+            this.broadcast(message)
+            return new Promise<RemoteQuestionAnswer | RemoteQuestionnaireAnswer | null>(
+                resolve => {
+                    pending.resolve = result => {
+                        if (this.pendingAsk === pending) this.pendingAsk = null
+                        resolve(result)
+                    }
+                }
+            )
         },
     }
     registerProcessExitHandler(state)
@@ -408,8 +460,10 @@ function handleClientMessage(state: RcSingleton, client: RcClient, message: unkn
             writeJson(client, { type: 'pong' })
             break
         case 'answer':
+            handleAnswer(state, client, message)
+            break
         case 'answer_questionnaire':
-            writeJson(client, { type: 'error', code: 'unknown_question' })
+            handleAnswerQuestionnaire(state, client, message)
             break
         default:
             writeJson(client, { type: 'error', code: 'invalid_message' })
@@ -442,7 +496,63 @@ function handleHello(state: RcSingleton, client: RcClient, message: JsonObject):
     client.authenticated = true
     writeJson(client, { type: 'hello_ok', version: VERSION })
     writeSessionSnapshot(client, state)
-    if (state.pendingAsk) writeJson(client, state.pendingAsk as never)
+    if (state.pendingAsk) writeJson(client, state.pendingAsk.message)
+}
+
+function handleAnswer(state: RcSingleton, client: RcClient, message: JsonObject): void {
+    const pending = state.pendingAsk
+    if (!pending || pending.kind !== 'question' || pending.id !== message.id) {
+        writeJson(client, { type: 'error', code: 'unknown_question' })
+        return
+    }
+    const value = message.value
+    const wasCustom = message.wasCustom
+    const index = message.index
+    if (typeof value !== 'string' || typeof wasCustom !== 'boolean') {
+        writeJson(client, { type: 'error', code: 'invalid_message' })
+        return
+    }
+    pending.resolve({ value, wasCustom, ...(typeof index === 'number' ? { index } : {}) })
+    state.broadcast({ type: 'question_resolved', id: pending.id, by: 'client', value })
+}
+
+function isRemoteQuestionnaireAnswer(value: unknown): value is RemoteQuestionnaireAnswer {
+    if (!isObject(value)) return false
+    const id = value.id
+    const answerValue = value.value
+    const label = value.label
+    const wasCustom = value.wasCustom
+    const index = value.index
+    return (
+        typeof id === 'string' &&
+        typeof answerValue === 'string' &&
+        typeof label === 'string' &&
+        typeof wasCustom === 'boolean' &&
+        (typeof index === 'number' || index === undefined)
+    )
+}
+
+function handleAnswerQuestionnaire(state: RcSingleton, client: RcClient, message: JsonObject): void {
+    const pending = state.pendingAsk
+    if (!pending || pending.kind !== 'questionnaire' || pending.id !== message.id) {
+        writeJson(client, { type: 'error', code: 'unknown_question' })
+        return
+    }
+    const raw = message.answers
+    if (!Array.isArray(raw)) {
+        writeJson(client, { type: 'error', code: 'invalid_message' })
+        return
+    }
+    const answers: RemoteQuestionnaireAnswer[] = []
+    for (const item of raw) {
+        if (!isRemoteQuestionnaireAnswer(item)) {
+            writeJson(client, { type: 'error', code: 'invalid_message' })
+            return
+        }
+        answers.push(item)
+    }
+    pending.resolve(answers)
+    state.broadcast({ type: 'question_resolved', id: pending.id, by: 'client' })
 }
 
 function writeSessionSnapshot(client: RcClient, state: RcSingleton): void {
