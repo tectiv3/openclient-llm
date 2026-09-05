@@ -73,7 +73,7 @@ extension CodeViewModel {
             session.pendingQuestion = nil
         }
 
-        if resolved.by == "client", let value = resolved.value {
+        if resolved.resolvedBy == "client", let value = resolved.value {
             let questionText = questionTextForId(
                 resolved.id, in: session
             )
