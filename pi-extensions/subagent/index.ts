@@ -36,6 +36,10 @@ const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 const SUBAGENTS_DIR_MODE = 0o700;
+const INSPECT_DEFAULT_LIMIT = 20;
+const INSPECT_TASK_PREVIEW_CHARS = 200;
+const INSPECT_ENTRY_PREVIEW_CHARS = 100;
+const INSPECT_FINAL_OUTPUT_CAP = 2000;
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -364,37 +368,52 @@ function isProcessAlive(pid: number): boolean {
 	}
 }
 
-function formatAvailableSubagentsError(resumeId: string): string {
+interface PersistedSubagentEntry {
+	id: string;
+	meta?: SubagentMeta;
+}
+
+function listPersistedSubagents(): PersistedSubagentEntry[] {
 	const dir = getSubagentsDir();
 	let metaFiles: string[];
 	try {
 		metaFiles = fs.readdirSync(dir).filter((file) => file.endsWith(".meta"));
 	} catch {
-		metaFiles = [];
+		return [];
 	}
-	if (metaFiles.length === 0) {
-		return (
-			`No subagent found with id "${resumeId}" (completed runs are cleaned up). ` +
-			`No persisted subagent sessions are available in ${dir}.`
-		);
-	}
-	const entries = metaFiles
+	return metaFiles
 		.map((file) => {
 			const id = file.slice(0, -".meta".length);
 			try {
-				const meta = JSON.parse(fs.readFileSync(path.join(dir, file), "utf-8")) as SubagentMeta;
-				const taskPreview = meta.task.replace(/\s+/g, " ").trim();
-				return `- ${id} — agent: ${meta.agent}, status: ${meta.status ?? "unknown"}, task: ${
-					taskPreview.length > 60 ? `${taskPreview.slice(0, 60)}...` : taskPreview
-				}`;
+				return { id, meta: JSON.parse(fs.readFileSync(path.join(dir, file), "utf-8")) as SubagentMeta };
 			} catch {
-				return `- ${id} — (meta sidecar unreadable)`;
+				return { id };
 			}
 		})
-		.sort();
+		.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function formatPersistedSubagentsList(entries: PersistedSubagentEntry[]): string[] {
+	return entries.map((entry) => {
+		if (!entry.meta) return `- ${entry.id} — (meta sidecar unreadable)`;
+		const taskPreview = entry.meta.task.replace(/\s+/g, " ").trim();
+		return `- ${entry.id} — agent: ${entry.meta.agent}, status: ${entry.meta.status ?? "unknown"}, task: ${
+			taskPreview.length > 60 ? `${taskPreview.slice(0, 60)}...` : taskPreview
+		}`;
+	});
+}
+
+function formatAvailableSubagentsError(resumeId: string): string {
+	const entries = listPersistedSubagents();
+	if (entries.length === 0) {
+		return (
+			`No subagent found with id "${resumeId}" (completed runs are cleaned up). ` +
+			`No persisted subagent sessions are available in ${getSubagentsDir()}.`
+		);
+	}
 	return [
 		`No subagent found with id "${resumeId}" (completed runs are cleaned up). Available subagents:`,
-		...entries,
+		...formatPersistedSubagentsList(entries),
 	].join("\n");
 }
 
@@ -436,6 +455,181 @@ function resolveResumeTarget(resumeId: string, agentName: string, agents: AgentC
 	}
 
 	return { id: resumeId, meta };
+}
+
+type InspectTarget = { id: string } | { error: string };
+
+function resolveInspectTarget(requestedId: string): InspectTarget {
+	// An exact id is honored even when its meta sidecar is missing (jsonl-only runs).
+	const { session, pid, meta } = getSubagentFilePaths(requestedId);
+	if (fs.existsSync(session) || fs.existsSync(pid) || fs.existsSync(meta)) return { id: requestedId };
+
+	const matches = listPersistedSubagents().filter((entry) => entry.id.startsWith(requestedId));
+	if (matches.length === 1) return { id: matches[0].id };
+	if (matches.length > 1) {
+		return {
+			error: [
+				`Ambiguous subagent id "${requestedId}" matches ${matches.length} persisted runs:`,
+				...formatPersistedSubagentsList(matches),
+			].join("\n"),
+		};
+	}
+	return {
+		error:
+			formatAvailableSubagentsError(requestedId) +
+			"\n" +
+			"A bare id with no artifacts is indistinguishable from a successfully completed run " +
+			"(artifacts are deleted on success); its output is in the parent session's tool result.",
+	};
+}
+
+function readSubagentPid(pidPath: string): number | undefined {
+	try {
+		const pid = Number.parseInt(fs.readFileSync(pidPath, "utf-8").trim(), 10);
+		return Number.isNaN(pid) || pid <= 0 ? undefined : pid;
+	} catch {
+		return undefined;
+	}
+}
+
+function parseSubagentTranscript(sessionPath: string): Message[] {
+	let content: string;
+	try {
+		content = fs.readFileSync(sessionPath, "utf-8");
+	} catch {
+		return [];
+	}
+	const messages: Message[] = [];
+	for (const line of content.split("\n")) {
+		if (!line.trim()) continue;
+		let entry: any;
+		try {
+			entry = JSON.parse(line);
+		} catch {
+			// Torn lines (child killed mid-append) and unknown/future entry types
+			// (session, model_change, thinking_level_change, compaction, ...) are skipped.
+			continue;
+		}
+		if (entry?.type === "message" && entry.message) messages.push(entry.message as Message);
+	}
+	return messages;
+}
+
+function computeTranscriptUsage(messages: Message[]): { usage: UsageStats; model: string | undefined } {
+	const usage: UsageStats = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+	let model: string | undefined;
+	for (const msg of messages) {
+		if (msg.role !== "assistant") continue;
+		usage.turns++;
+		// Mirrors runSingleAgent's stdout accounting so inspect totals match live results.
+		if (msg.usage) {
+			usage.input += msg.usage.input || 0;
+			usage.output += msg.usage.output || 0;
+			usage.cacheRead += msg.usage.cacheRead || 0;
+			usage.cacheWrite += msg.usage.cacheWrite || 0;
+			usage.cost += msg.usage.cost?.total || 0;
+			usage.contextTokens = msg.usage.totalTokens || 0;
+		}
+		if (!model && msg.model) model = msg.model;
+	}
+	return { usage, model };
+}
+
+// formatToolCall renders with theme colors for the TUI; model-facing tool-result text must stay plain.
+function plainThemeFg(_color: any, text: string): string {
+	return text;
+}
+
+function buildSubagentInspectReport(subagentId: string, limit: number): string {
+	const { session: sessionPath, pid: pidPath, meta: metaPath } = getSubagentFilePaths(subagentId);
+
+	let meta: SubagentMeta | undefined;
+	try {
+		meta = JSON.parse(fs.readFileSync(metaPath, "utf-8")) as SubagentMeta;
+	} catch {
+		/* absent or unreadable sidecar */
+	}
+
+	let status: string;
+	let runningPid: number | undefined;
+	const pid = readSubagentPid(pidPath);
+	if (pid !== undefined && isProcessAlive(pid)) {
+		status = "running";
+		runningPid = pid;
+	} else {
+		// Stale pidfile (parent crashed before cleanup): unlock so the run stays resumable.
+		if (pid !== undefined) removeSubagentFile(pidPath);
+		status = meta?.status ?? "unknown";
+	}
+
+	const lines: string[] = [`Subagent: ${subagentId}`];
+	lines.push(`Status: ${status}${runningPid !== undefined ? ` (pid ${runningPid})` : ""}`);
+	if (meta) {
+		lines.push(`Agent: ${meta.agent}`);
+		const taskPreview = meta.task.replace(/\s+/g, " ").trim();
+		const truncatedTask =
+			taskPreview.length > INSPECT_TASK_PREVIEW_CHARS
+				? `${taskPreview.slice(0, INSPECT_TASK_PREVIEW_CHARS)}...`
+				: taskPreview;
+		lines.push(`Task: ${truncatedTask}`);
+		if (meta.model) lines.push(`Model: ${meta.model}`);
+		lines.push(`Started: ${meta.startedAt}`);
+		if ((meta.resumedCount ?? 0) > 0) {
+			lines.push(`Resumed: ${meta.resumedCount} time${meta.resumedCount === 1 ? "" : "s"}`);
+		}
+		if (status === "failed" || status === "aborted") {
+			if (meta.stopReason) lines.push(`Stop reason: ${meta.stopReason}`);
+			if (meta.exitCode !== undefined) lines.push(`Exit code: ${meta.exitCode}`);
+		}
+	} else {
+		lines.push("Meta: missing (agent, task, and model unknown)");
+	}
+
+	const messages = parseSubagentTranscript(sessionPath);
+	if (messages.length === 0) {
+		// pi creates the session file at the first message_end, so runs interrupted
+		// before that point have nothing to tail.
+		lines.push("No transcript persisted yet.");
+		return lines.join("\n");
+	}
+
+	const { usage, model } = computeTranscriptUsage(messages);
+	const usageStr = formatUsageStats(usage, model ?? meta?.model);
+	if (usageStr) lines.push(`Usage: ${usageStr}`);
+
+	const items = getDisplayItems(messages);
+	const tail = items.slice(-limit);
+	lines.push(`--- Transcript: last ${tail.length} of ${items.length} entries ---`);
+	for (const item of tail) {
+		if (item.type === "text") {
+			const preview = item.text.replace(/\s+/g, " ").trim();
+			lines.push(
+				preview.length > INSPECT_ENTRY_PREVIEW_CHARS
+					? `${preview.slice(0, INSPECT_ENTRY_PREVIEW_CHARS)}...`
+					: preview,
+			);
+		} else {
+			lines.push(formatToolCall(item.name, item.args, plainThemeFg));
+		}
+	}
+
+	const finalOutput = getFinalOutput(messages);
+	if (finalOutput) {
+		lines.push("--- Final output ---");
+		lines.push(
+			finalOutput.length > INSPECT_FINAL_OUTPUT_CAP
+				? `${finalOutput.slice(0, INSPECT_FINAL_OUTPUT_CAP)}...`
+				: finalOutput,
+		);
+	}
+
+	if ((status === "failed" || status === "aborted") && meta) {
+		lines.push(
+			`Resume with subagent {agent: "${meta.agent}", task: "<continuation instruction>", resume: "${subagentId}"}.`,
+		);
+	}
+
+	return lines.join("\n");
 }
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
@@ -723,6 +917,13 @@ const SubagentParams = Type.Object({
 		Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
 	),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
+});
+
+const SubagentInspectParams = Type.Object({
+	id: Type.String({ description: "Subagent id (exact filename id or unique prefix)" }),
+	limit: Type.Optional(
+		Type.Number({ description: "Number of transcript entries to show from the end", minimum: 1 }),
+	),
 });
 
 export default function (pi: ExtensionAPI) {
@@ -1331,6 +1532,39 @@ export default function (pi: ExtensionAPI) {
 				return new Text(text, 0, 0);
 			}
 
+			const text = result.content[0];
+			return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+		},
+	});
+
+	pi.registerTool({
+		name: "subagent_inspect",
+		label: "Subagent Inspect",
+		description: [
+			"Inspect a persisted subagent run by id (exact or unique prefix): status, agent, task, usage,",
+			"and the tail of its transcript. Works on running subagents (e.g. debugging stuck runs).",
+			"Failed and aborted runs persist until resumed; successful runs are cleaned up on completion,",
+			"so their output is only in the parent session's tool result.",
+		].join(" "),
+		parameters: SubagentInspectParams,
+
+		async execute(_toolCallId, params) {
+			const limit = Math.max(1, Math.floor(params.limit ?? INSPECT_DEFAULT_LIMIT));
+			const resolved = resolveInspectTarget(params.id);
+			if ("error" in resolved) {
+				return { content: [{ type: "text", text: resolved.error }], details: undefined, isError: true };
+			}
+			return { content: [{ type: "text", text: buildSubagentInspectReport(resolved.id, limit) }], details: undefined };
+		},
+
+		renderCall(args, theme, _context) {
+			const preview = args.id.length > 40 ? `${args.id.slice(0, 40)}...` : args.id;
+			let text = theme.fg("toolTitle", theme.bold("subagent_inspect ")) + theme.fg("accent", preview);
+			if (args.limit !== undefined) text += theme.fg("muted", ` (last ${args.limit})`);
+			return new Text(text, 0, 0);
+		},
+
+		renderResult(result, _options, _theme, _context) {
 			const text = result.content[0];
 			return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
 		},
