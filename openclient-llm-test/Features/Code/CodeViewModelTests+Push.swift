@@ -30,6 +30,30 @@ extension CodeViewModelTests {
         }
     }
 
+    func test_reconnect_helloOk_withToken_sendsPushTokenAgain() async throws {
+        // Given
+        mockPush.token = Self.pushToken
+        try await connectAndEstablish()
+        try await waitUntil {
+            self.mockClient.attemptsCount(where: { Self.isPushToken($0) }) == 1
+        }
+        mockClient.emit(.disconnected)
+        try await waitUntil {
+            if case .reconnecting = self.sut.state {
+                return true
+            }
+            return false
+        }
+
+        // When
+        mockClient.emit(.helloOk(version: 1))
+
+        // Then
+        try await waitUntil {
+            self.mockClient.attemptsCount(where: { Self.isPushToken($0) }) == 2
+        }
+    }
+
     func test_handleHelloOk_withoutToken_doesNotSendPushToken() async throws {
         // Given
         // No token registered.

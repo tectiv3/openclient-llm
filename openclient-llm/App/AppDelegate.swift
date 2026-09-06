@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     // MARK: - Properties
 
     private var transactionObserverTask: Task<Void, Never>?
+    private var pushRegistrationFailed = false
 
     // MARK: - UIApplication
 
@@ -71,7 +72,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _: UIApplication,
         didFailToRegisterForRemoteNotificationsWithError error: Error
     ) {
+        pushRegistrationFailed = true
         RemoteNotificationManager.shared.handleRegistrationFailure(error)
+    }
+
+    func applicationDidBecomeActive(_: UIApplication) {
+        // Retry here: a transient failure at launch must not kill push for the process lifetime.
+        guard pushRegistrationFailed else { return }
+        pushRegistrationFailed = false
+        UIApplication.shared.registerForRemoteNotifications()
     }
 
     // MARK: - UNUserNotificationCenterDelegate
