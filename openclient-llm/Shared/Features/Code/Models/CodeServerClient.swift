@@ -12,7 +12,13 @@ import Synchronization
 
 protocol CodeServerClientProtocol: Sendable {
     func connect(host: String, port: Int, code: String) -> AsyncStream<CodeEvent>
-    func send(_ message: CodeClientMessage) async
+    /// Sends a client message. Returns `true` when the frame reached the
+    /// socket; `false` on encode failure or when no live socket is
+    /// available, so callers can surface the send as failed. Discardable
+    /// for fire-and-forget messages (ping, hello, abort) whose liveness is
+    /// already covered by the connection state machine.
+    @discardableResult
+    func send(_ message: CodeClientMessage) async -> Bool
     func disconnect()
 }
 
@@ -33,8 +39,13 @@ protocol CodeWebSocketTask: Sendable {
 struct URLSessionCodeWebSocketTask: CodeWebSocketTask {
     let task: URLSessionWebSocketTask
 
-    func resume() { task.resume() }
-    func cancel() { task.cancel() }
+    func resume() {
+        task.resume()
+    }
+
+    func cancel() {
+        task.cancel()
+    }
 
     func cancel(with code: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         task.cancel(with: code, reason: reason)
@@ -94,8 +105,8 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
         var lastPongTime: Date = .now
         var reconnectAttempts = 0
         var attemptGeneration: Int = 0
-        // True once the current attempt completed its handshake, so the
-        // 10s connect timeout cannot kill a healthy, connected session.
+        /// True once the current attempt completed its handshake, so the
+        /// 10s connect timeout cannot kill a healthy, connected session.
         var helloAcked = false
         // Deduplicates concurrent connection-lost reports (receive-loop
         // catch + pong deadline) so one loss schedules one reconnect.
@@ -154,7 +165,7 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
             $0.isDisconnecting = false
         }
 
-        let stream = AsyncStream<CodeEvent> { continuation in
+        return AsyncStream<CodeEvent> { continuation in
             self.state.withLock { $0.continuation = continuation }
 
             continuation.onTermination = { @Sendable _ in
@@ -163,20 +174,21 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
 
             self.startConnection()
         }
-
-        return stream
     }
 
-    func send(_ message: CodeClientMessage) async {
-        guard let data = encodeMessage(message) else { return }
+    @discardableResult
+    func send(_ message: CodeClientMessage) async -> Bool {
+        guard let data = encodeMessage(message) else { return false }
         let string = String(data: data, encoding: .utf8) ?? ""
         let task = state.withLock { $0.webSocketTask }
 
-        guard let task else { return }
+        guard let task else { return false }
         do {
             try await task.send(.string(string))
+            return true
         } catch {
             LogManager.error("CodeServerClient send failed: \(error)")
+            return false
         }
     }
 
@@ -268,9 +280,9 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
     ) {
         let data: Data
         switch message {
-        case .string(let text):
+        case let .string(text):
             data = Data(text.utf8)
-        case .data(let raw):
+        case let .data(raw):
             data = raw
         @unknown default:
             return
@@ -297,9 +309,10 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
             }
             yield(event)
 
-        case .error(let serverError):
+        case let .error(serverError):
             if serverError.code == "bad_code"
-                || serverError.code == "rate_limited" {
+                || serverError.code == "rate_limited"
+            {
                 yield(.authFailed(serverError))
                 disconnect()
             } else {
@@ -309,7 +322,7 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
         case .pong:
             state.withLock { $0.lastPongTime = .now }
 
-        case .event(let streamEvent)
+        case let .event(streamEvent)
             where streamEvent.name == "message_update":
             coalesceEvent(event)
 
@@ -322,8 +335,7 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
     private func coalesceEvent(_ event: CodeEvent) {
         let needsTimer = state.withLock { locked -> Bool in
             locked.pendingCoalescedEvents.append(event)
-            let needs = locked.coalescingTask == nil
-            return needs
+            return locked.coalescingTask == nil
         }
 
         guard needsTimer else { return }
@@ -361,7 +373,8 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
 
         let lost = state.withLock { locked -> LostConnection in
             guard !locked.isDisconnecting,
-                  !locked.connectionLostInFlight else {
+                  !locked.connectionLostInFlight
+            else {
                 return LostConnection(
                     attempt: 0, code: "", shouldStop: true, staleSocket: nil
                 )
@@ -489,7 +502,6 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
         }
         state.withLock { $0.timeoutTask = task }
     }
-
 }
 
 // MARK: - Encoding
@@ -504,23 +516,23 @@ private extension CodeServerClient {
         var dict: [String: AnyCodableValue] = [:]
 
         switch message {
-        case .hello(let code, let version):
+        case let .hello(code, version):
             dict["type"] = .string("hello")
             dict["code"] = .string(code)
             dict["version"] = .int(version)
 
-        case .prompt(let text):
+        case let .prompt(text):
             dict["type"] = .string("prompt")
             dict["text"] = .string(text)
 
-        case .steer(let text):
+        case let .steer(text):
             dict["type"] = .string("steer")
             dict["text"] = .string(text)
 
         case .abort:
             dict["type"] = .string("abort")
 
-        case .answer(let id, let value, let wasCustom, let index):
+        case let .answer(id, value, wasCustom, index):
             dict["type"] = .string("answer")
             dict["id"] = .string(id)
             dict["value"] = .string(value)
@@ -529,20 +541,21 @@ private extension CodeServerClient {
                 dict["index"] = .int(index)
             }
 
-        case .answerQuestionnaire(let id, let answers):
+        case let .answerQuestionnaire(id, answers):
             dict["type"] = .string("answer_questionnaire")
             dict["id"] = .string(id)
             if let data = try? encoder.encode(answers),
                let arr = try? decoder.decode(
-                [AnyCodableValue].self, from: data
-               ) {
+                   [AnyCodableValue].self, from: data
+               )
+            {
                 dict["answers"] = .array(arr)
             }
 
         case .getState:
             dict["type"] = .string("get_state")
 
-        case .getHistory(let cursor):
+        case let .getHistory(cursor):
             dict["type"] = .string("get_history")
             if let cursor {
                 dict["cursor"] = .string(cursor)

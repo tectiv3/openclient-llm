@@ -20,10 +20,11 @@ extension CodeViewModelTests {
 
         // Then
         let items = try XCTUnwrap(currentSession()?.items)
-        guard case let .user(_, text)? = items.last else {
+        guard case let .user(_, text, failed)? = items.last else {
             return XCTFail("Expected user echo, got \(items.last)")
         }
         XCTAssertEqual(text, "hi")
+        XCTAssertFalse(failed)
     }
 
     func test_sendPrompt_sameTextAlreadyInHistory_doesNotDuplicate() async throws {
@@ -43,6 +44,7 @@ extension CodeViewModelTests {
 
         // Then — echo deduped to the existing history item
         XCTAssertEqual(currentSession()?.items.count, 1)
+        XCTAssertFalse(lastUserItem()?.failed ?? true)
 
         // The prompt is still sent exactly once (dedup skips the echo,
         // not the send).
@@ -73,20 +75,17 @@ extension CodeViewModelTests {
 
         // Then — steer also gets a local echo
         let items = try XCTUnwrap(currentSession()?.items)
-        guard case let .user(_, text)? = items.last else {
+        guard case let .user(_, text, failed)? = items.last else {
             return XCTFail("Expected user echo, got \(items.last)")
         }
         XCTAssertEqual(text, "be brief")
+        XCTAssertFalse(failed)
     }
 
     func test_messageUpdate_replacesAssistantContentFromMessageSnapshot() async throws {
         // Given
         try await connectAndEstablish(isStreaming: true)
-        mockClient.emit(.event(CodeStreamEvent(
-            sessionId: "s1",
-            name: "message_start",
-            payload: [:]
-        )))
+        mockClient.emit(.event(messageStartEvent(role: "assistant")))
         try await waitUntil {
             (self.currentSession()?.items.count ?? 0) == 1
         }
@@ -132,11 +131,7 @@ extension CodeViewModelTests {
     func test_messageUpdate_skipsToolCallBlocksFromSnapshot() async throws {
         // Given
         try await connectAndEstablish(isStreaming: true)
-        mockClient.emit(.event(CodeStreamEvent(
-            sessionId: "s1",
-            name: "message_start",
-            payload: [:]
-        )))
+        mockClient.emit(.event(messageStartEvent(role: "assistant")))
         try await waitUntil {
             (self.currentSession()?.items.count ?? 0) == 1
         }
@@ -163,11 +158,7 @@ extension CodeViewModelTests {
     func test_messageUpdate_malformedFrame_doesNotCrash() async throws {
         // Given
         try await connectAndEstablish(isStreaming: true)
-        mockClient.emit(.event(CodeStreamEvent(
-            sessionId: "s1",
-            name: "message_start",
-            payload: [:]
-        )))
+        mockClient.emit(.event(messageStartEvent(role: "assistant")))
         try await waitUntil {
             (self.currentSession()?.items.count ?? 0) == 1
         }
@@ -255,9 +246,7 @@ extension CodeViewModelTests {
         // Given — message_start appends an empty streaming bubble that
         // never receives content (toolCall-only message)
         try await connectAndEstablish(isStreaming: true)
-        mockClient.emit(.event(CodeStreamEvent(
-            sessionId: "s1", name: "message_start", payload: [:]
-        )))
+        mockClient.emit(.event(messageStartEvent(role: "assistant")))
         try await waitUntil {
             (self.currentSession()?.items.count ?? 0) == 1
         }
@@ -277,9 +266,7 @@ extension CodeViewModelTests {
     func test_turnEnd_keepsNonEmptyAssistantBubbleMarkedComplete() async throws {
         // Given — bubble with real content
         try await connectAndEstablish(isStreaming: true)
-        mockClient.emit(.event(CodeStreamEvent(
-            sessionId: "s1", name: "message_start", payload: [:]
-        )))
+        mockClient.emit(.event(messageStartEvent(role: "assistant")))
         mockClient.emit(.event(messageUpdateEvent(
             thinking: "", text: "done"
         )))
@@ -310,7 +297,70 @@ extension CodeViewModelTests {
         XCTAssertFalse(isStreaming)
     }
 
+    // MARK: - Tests — message_start role handling
+
+    func test_messageStart_userRoleFrame_doesNotAppendItem() async throws {
+        // Given — the pi agent loop emits message_start for the user
+        // prompt before the assistant message; that frame is noise
+        try await connectAndEstablish(isStreaming: true)
+
+        // When
+        mockClient.emit(.event(messageStartEvent(role: "user")))
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Then
+        XCTAssertEqual(currentSession()?.items.count, 0)
+    }
+
+    func test_messageStart_assistantRoleFrame_appendsStreamingBubble() async throws {
+        // Given
+        try await connectAndEstablish(isStreaming: true)
+
+        // When
+        mockClient.emit(.event(messageStartEvent(role: "assistant")))
+        try await waitUntil {
+            (self.currentSession()?.items.count ?? 0) == 1
+        }
+
+        // Then
+        let items = try XCTUnwrap(currentSession()?.items)
+        guard case let .assistant(_, content, isStreaming) = items[0] else {
+            return XCTFail("Expected assistant item, got \(items[0])")
+        }
+        XCTAssertTrue(isStreaming)
+        XCTAssertTrue(content.isEmpty)
+    }
+
+    func test_messageStart_missingRole_doesNotAppendItem() async throws {
+        // Given
+        try await connectAndEstablish(isStreaming: true)
+
+        // When
+        mockClient.emit(.event(CodeStreamEvent(
+            sessionId: "s1", name: "message_start", payload: [:]
+        )))
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Then
+        XCTAssertEqual(currentSession()?.items.count, 0)
+    }
+
     // MARK: - Helpers
+
+    /// Builds a raw pi `message_start` frame. The role gates bubble
+    /// creation: assistant frames open a bubble, user-role frames (the
+    /// prompt echo) do not.
+    func messageStartEvent(role: String) -> CodeStreamEvent {
+        CodeStreamEvent(
+            sessionId: "s1",
+            name: "message_start",
+            payload: [
+                "message": .object([
+                    "role": .string(role),
+                ]),
+            ]
+        )
+    }
 
     func toolExecutionEvent(
         name: String,

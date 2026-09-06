@@ -9,20 +9,21 @@ import SwiftUI
 
 struct CodeTranscriptItemView: View {
     let item: CodeTranscriptItem
+    var onRetry: (UUID) -> Void = { _ in }
 
     @State private var isCompactionExpanded = false
     @State private var reasoningDisclosureState = ReasoningDisclosureState()
 
     var body: some View {
         switch item {
-        case .user(_, let text):
-            userBubble(text)
+        case let .user(id, text, failed):
+            userBubble(id: id, text: text, failed: failed)
 
-        case .assistant(_, let content, let isStreaming):
+        case let .assistant(_, content, isStreaming):
             assistantBubble(content, isStreaming: isStreaming)
 
-        case .toolStep(_, let toolName, let toolId, let args,
-                       let output, let isComplete):
+        case let .toolStep(_, toolName, toolId, args,
+                           output, isComplete):
             toolStepView(
                 toolName: toolName,
                 toolId: toolId,
@@ -31,15 +32,15 @@ struct CodeTranscriptItemView: View {
                 isComplete: isComplete
             )
 
-        case .resolvedQuestion(_, let questionText,
-                               let answerText, let wasCustom):
+        case let .resolvedQuestion(_, questionText,
+                                   answerText, wasCustom):
             resolvedQuestionCard(
                 questionText: questionText,
                 answerText: answerText,
                 wasCustom: wasCustom
             )
 
-        case .compaction(_, let summary):
+        case let .compaction(_, summary):
             compactionSeparator(summary)
         }
     }
@@ -50,7 +51,11 @@ struct CodeTranscriptItemView: View {
 private extension CodeTranscriptItemView {
     // MARK: User
 
-    func userBubble(_ text: String) -> some View {
+    func userBubble(
+        id: UUID,
+        text: String,
+        failed: Bool
+    ) -> some View {
         HStack {
             Spacer(minLength: 60)
             Text(text)
@@ -59,10 +64,39 @@ private extension CodeTranscriptItemView {
                 .padding(.vertical, 12)
                 .foregroundStyle(.white)
                 .glassEffect(
-                    .regular.tint(Color.appAccent),
+                    failed
+                        ? .regular.tint(Color.red.opacity(0.45))
+                        : .regular.tint(Color.appAccent),
                     in: .rect(cornerRadius: 18)
                 )
+                .overlay(alignment: .bottom) {
+                    if failed {
+                        failedBadge
+                    }
+                }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if failed {
+                        onRetry(id)
+                    }
+                }
+                .accessibilityLabel(
+                    failed
+                        ? String(localized: "Failed to send. Tap to retry.")
+                        : text
+                )
         }
+    }
+
+    var failedBadge: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.caption2)
+            Text(String(localized: "Failed to send — tap to retry"))
+                .font(.caption2)
+        }
+        .foregroundStyle(Color.red.opacity(0.9))
+        .padding(.bottom, 6)
     }
 
     // MARK: Assistant
@@ -115,16 +149,16 @@ private extension CodeTranscriptItemView {
         isStreaming: Bool
     ) -> some View {
         switch block {
-        case .text(let text):
+        case let .text(text):
             MarkdownBubbleView(
                 text: text,
                 isStreaming: isStreaming
             )
 
-        case .thinking(let text):
+        case let .thinking(text):
             thinkingDisclosure(text, isStreaming: isStreaming)
 
-        case .toolUse(_, let toolName, let args, _):
+        case let .toolUse(_, toolName, args, _):
             inlineToolLabel(toolName: toolName, args: args)
 
         case .unknown:
@@ -136,7 +170,7 @@ private extension CodeTranscriptItemView {
 
     func thinkingDisclosure(
         _ reasoning: String,
-        isStreaming: Bool
+        isStreaming _: Bool
     ) -> some View {
         DisclosureGroup(isExpanded: thinkingExpansionBinding) {
             Text(reasoning)
@@ -298,20 +332,23 @@ private extension CodeTranscriptItemView {
             }
         }
     }
-
 }
 
 extension [CodeContentBlock] {
     var hasThinking: Bool {
         contains { block in
-            if case .thinking(let text) = block { return !text.isEmpty }
+            if case let .thinking(text) = block {
+                return !text.isEmpty
+            }
             return false
         }
     }
 
     var hasAnswer: Bool {
         contains { block in
-            if case .text(let text) = block { return !text.isEmpty }
+            if case let .text(text) = block {
+                return !text.isEmpty
+            }
             return false
         }
     }
@@ -320,7 +357,10 @@ extension [CodeContentBlock] {
 #Preview {
     VStack(spacing: 16) {
         CodeTranscriptItemView(item: .user(
-            id: UUID(), text: "Fix the tests"
+            id: UUID(), text: "Fix the tests", failed: false
+        ))
+        CodeTranscriptItemView(item: .user(
+            id: UUID(), text: "This one failed", failed: true
         ))
         CodeTranscriptItemView(item: .assistant(
             id: UUID(),

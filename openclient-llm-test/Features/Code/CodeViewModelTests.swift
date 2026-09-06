@@ -276,10 +276,11 @@ final class CodeViewModelTests: XCTestCase {
 
         // Then
         let items = try XCTUnwrap(currentSession()?.items)
-        guard case let .user(_, text) = items[0] else {
+        guard case let .user(_, text, failed) = items[0] else {
             return XCTFail("Expected user item, got \(items[0])")
         }
         XCTAssertEqual(text, "hi")
+        XCTAssertFalse(failed)
         guard case .assistant = items[1] else {
             return XCTFail("Expected assistant item, got \(items[1])")
         }

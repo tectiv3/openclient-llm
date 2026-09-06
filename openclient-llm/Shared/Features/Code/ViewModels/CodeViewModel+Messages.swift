@@ -10,7 +10,7 @@ import Foundation
 // MARK: - CodeTranscriptItem
 
 enum CodeTranscriptItem: Equatable, Identifiable {
-    case user(id: UUID, text: String)
+    case user(id: UUID, text: String, failed: Bool)
     case assistant(
         id: UUID,
         content: [CodeContentBlock],
@@ -34,7 +34,7 @@ enum CodeTranscriptItem: Equatable, Identifiable {
 
     var id: UUID {
         switch self {
-        case let .user(id, _),
+        case let .user(id, _, _),
              let .assistant(id, _, _),
              let .toolStep(id, _, _, _, _, _),
              let .resolvedQuestion(id, _, _, _),
@@ -55,7 +55,9 @@ extension CodeViewModel {
         for message in messages {
             switch message {
             case let .user(text):
-                items.append(.user(id: UUID(), text: text))
+                items.append(.user(
+                    id: UUID(), text: text, failed: false
+                ))
 
             case let .assistant(content):
                 mapAssistantContent(
@@ -101,9 +103,17 @@ extension CodeViewModel {
 
         case "message_start":
             // Transcript content only — does not touch session.isStreaming.
-            session.items.append(.assistant(
-                id: UUID(), content: [], isStreaming: true
-            ))
+            // pi also emits `message_start` for the user prompt (role
+            // "user"); those frames are transcript noise — the user item is
+            // the local echo — so only assistant messages open a bubble.
+            if case let .object(message)? = event.payload["message"],
+               case let .string(role)? = message["role"],
+               role == "assistant"
+            {
+                session.items.append(.assistant(
+                    id: UUID(), content: [], isStreaming: true
+                ))
+            }
 
         case "message_update":
             updateLastAssistantContent(event, in: &session)

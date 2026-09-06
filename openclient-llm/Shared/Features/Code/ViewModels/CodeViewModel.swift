@@ -8,7 +8,7 @@
 import Foundation
 
 #if os(iOS)
-import UIKit
+    import UIKit
 #endif
 
 @Observable
@@ -22,6 +22,7 @@ final class CodeViewModel {
         case disconnect
         case sendPrompt(text: String)
         case sendSteer(text: String)
+        case retryPrompt(id: UUID)
         case abort
         case answer(id: String, value: String, wasCustom: Bool, index: Int?)
         case answerQuestionnaire(
@@ -49,8 +50,8 @@ final class CodeViewModel {
         var code: String = ""
         var errorMessage: String?
         var hasSavedHost: Bool = false
-        // When a rate_limited error is received, the date the pairing-code
-        // lockout (fixed 60s per spec A7) lifts, so the UI can show a countdown.
+        /// When a rate_limited error is received, the date the pairing-code
+        /// lockout (fixed 60s per spec A7) lifts, so the UI can show a countdown.
         var rateLimitedUntil: Date?
     }
 
@@ -100,17 +101,17 @@ final class CodeViewModel {
     var lastConnect: ConnectCredentials?
     var backgroundDisconnected = false
 
-    // Transient toast text (e.g. question resolved on another device),
-    // displayed by the session view which clears it after dismissal.
+    /// Transient toast text (e.g. question resolved on another device),
+    /// displayed by the session view which clears it after dismissal.
     var transientToast: String?
 
-    // Testability seam: production reads UIApplication state on every call;
-    // tests override this to simulate backgrounding without UIApplication.
+    /// Testability seam: production reads UIApplication state on every call;
+    /// tests override this to simulate backgrounding without UIApplication.
     var isBackgrounded: @MainActor () -> Bool = {
         #if os(iOS)
-        UIApplication.shared.applicationState == .background
+            UIApplication.shared.applicationState == .background
         #else
-        false
+            false
         #endif
     }
 
@@ -125,7 +126,7 @@ final class CodeViewModel {
         let host = settingsManager.getCodeHost() ?? ""
         let port = settingsManager.getCodePort()
         let hasSaved = !host.isEmpty
-        self.state = .disconnected(ConnectForm(
+        state = .disconnected(ConnectForm(
             host: host,
             port: port > 0 ? port : 47800,
             hasSavedHost: hasSaved
@@ -138,24 +139,26 @@ final class CodeViewModel {
 
     func send(_ event: Event) {
         switch event {
-        case .connect(let host, let port, let code):
+        case let .connect(host, port, code):
             handleConnect(host: host, port: port, code: code)
         case .cancelConnect:
             handleCancelConnect()
         case .disconnect:
             handleDisconnect()
-        case .sendPrompt(let text):
+        case let .sendPrompt(text):
             handleSendPrompt(text)
-        case .sendSteer(let text):
+        case let .sendSteer(text):
             handleSendSteer(text)
+        case let .retryPrompt(id):
+            handleRetryPrompt(id: id)
         case .abort:
             handleAbort()
-        case .answer(let id, let value, let wasCustom, let index):
+        case let .answer(id, value, wasCustom, index):
             handleAnswer(
                 id: id, value: value,
                 wasCustom: wasCustom, index: index
             )
-        case .answerQuestionnaire(let id, let answers):
+        case let .answerQuestionnaire(id, answers):
             handleAnswerQuestionnaire(id: id, answers: answers)
         case .retry:
             handleRetry()
@@ -213,19 +216,79 @@ private extension CodeViewModel {
     }
 
     func handleSendPrompt(_ text: String) {
-        guard case .connected(var session) = state,
+        guard case var .connected(session) = state,
               !session.isStreaming else { return }
-        appendLocalEcho(text, to: &session)
+        let echo = appendLocalEcho(text, to: &session)
         updateSession(session)
-        Task { await client.send(.prompt(text: text)) }
+        sendPromptText(text, echo: echo)
+    }
+
+    /// Re-sends a failed prompt by reusing its existing echo item, so the
+    /// dedup guard cannot append a duplicate. Deliberately skips the
+    /// `isStreaming` guard in `handleSendPrompt`: a tap is an explicit user
+    /// intent and the server is the authority — a prompt rejected while
+    /// streaming answers `not_idle`, which re-marks the same bubble failed.
+    func handleRetryPrompt(id: UUID) {
+        guard case var .connected(session) = state,
+              let index = session.items.firstIndex(where: {
+                  if case let .user(itemId, _, _) = $0 {
+                      return itemId == id
+                  }
+                  return false
+              }),
+              case let .user(_, text, _) = session.items[index]
+        else { return }
+
+        let echo = CodeTranscriptItem.user(
+            id: id, text: text, failed: false
+        )
+        session.items[index] = echo
+        updateSession(session)
+        sendPromptText(text, echo: echo)
     }
 
     func handleSendSteer(_ text: String) {
-        guard case .connected(var session) = state,
+        guard case var .connected(session) = state,
               session.isStreaming else { return }
-        appendLocalEcho(text, to: &session)
+        let echo = appendLocalEcho(text, to: &session)
         updateSession(session)
-        Task { await client.send(.steer(text: text)) }
+        Task {
+            let sent = await client.send(.steer(text: text))
+            if !sent {
+                markLocalEchoFailed(echo.id)
+            }
+        }
+    }
+
+    /// Shares the prompt-send tail between `handleSendPrompt` and
+    /// `handleRetryPrompt` so a failed transport marks the echoed item
+    /// failed in both paths.
+    func sendPromptText(_ text: String, echo: CodeTranscriptItem) {
+        let id = echo.id
+        Task {
+            let sent = await client.send(.prompt(text: text))
+            if !sent {
+                markLocalEchoFailed(id)
+            }
+        }
+    }
+
+    func markLocalEchoFailed(_ id: UUID) {
+        guard var session = currentSession,
+              let index = session.items.firstIndex(where: {
+                  if case let .user(itemId, _, _) = $0 {
+                      return itemId == id
+                  }
+                  return false
+              })
+        else { return }
+
+        if case let .user(itemId, text, _) = session.items[index] {
+            session.items[index] = .user(
+                id: itemId, text: text, failed: true
+            )
+            updateSession(session)
+        }
     }
 
     func handleAbort() {
@@ -236,13 +299,28 @@ private extension CodeViewModel {
     /// Local echo so the prompt renders immediately instead of waiting for
     /// the next server history sync. Deduped against a trailing identical
     /// user item, which can only exist if the same text was already synced
-    /// from the server history.
-    func appendLocalEcho(_ text: String, to session: inout SessionState) {
-        if case .user(_, let lastText)? = session.items.last,
-           lastText == text {
-            return
+    /// from the server history. Returns the trailing user item (existing or
+    /// new) so the caller can correlate later send failures with it.
+    func appendLocalEcho(
+        _ text: String,
+        to session: inout SessionState
+    ) -> CodeTranscriptItem {
+        if case let .user(id, lastText, _)? = session.items.last,
+           lastText == text
+        {
+            // Reusing the existing item also resets its failed flag, so a
+            // re-send of the same text (type-again or retry) starts clean.
+            let item = CodeTranscriptItem.user(
+                id: id, text: lastText, failed: false
+            )
+            session.items[session.items.count - 1] = item
+            return item
         }
-        session.items.append(.user(id: UUID(), text: text))
+        let item = CodeTranscriptItem.user(
+            id: UUID(), text: text, failed: false
+        )
+        session.items.append(item)
+        return item
     }
 }
 
@@ -272,43 +350,43 @@ extension CodeViewModel {
         case .helloOk:
             handleHelloOk()
 
-        case .state(let info):
+        case let .state(info):
             handleStateInfo(info)
 
-        case .history(let history):
+        case let .history(history):
             handleHistory(history)
 
-        case .event(let streamEvent):
+        case let .event(streamEvent):
             handleStreamEvent(streamEvent)
 
-        case .streamingBuffer(let sessionId, let content):
+        case let .streamingBuffer(sessionId, content):
             handleStreamingBuffer(
                 sessionId: sessionId, content: content
             )
 
-        case .question(let question):
+        case let .question(question):
             handleQuestionReceived(question)
 
-        case .questionnaire(let questionnaire):
+        case let .questionnaire(questionnaire):
             handleQuestionnaireReceived(questionnaire)
 
-        case .questionResolved(let resolved):
+        case let .questionResolved(resolved):
             handleQuestionResolved(resolved)
 
         case .pong:
             break
 
-        case .error(let error):
+        case let .error(error):
             handleError(error)
 
         case .connectionLost:
             transitionToReconnecting()
 
-        case .connectionFailed(let message):
+        case let .connectionFailed(message):
             backgroundUseCase.end()
             state = .failed(errorMessage: message)
 
-        case .authFailed(let error):
+        case let .authFailed(error):
             handleAuthFailed(error)
 
         case .disconnected:
@@ -323,7 +401,7 @@ extension CodeViewModel {
         switch state {
         case .connecting:
             state = .connected(SessionState())
-        case .reconnecting(let session):
+        case let .reconnecting(session):
             state = .connected(session)
             sendQueuedAnswerIfNeeded()
         default:
@@ -382,15 +460,43 @@ extension CodeViewModel {
     }
 
     private func handleError(_ error: CodeServerError) {
-        if error.code == "not_idle" {
-            transientToast = error.message
-                ?? String(localized: "Cannot send while streaming")
+        guard error.code == "not_idle" else { return }
+        transientToast = error.message
+            ?? String(localized: "Cannot send while streaming")
+
+        // Error frames carry no prompt text, so correlate positionally:
+        // the rejected prompt is the trailing local echo — a user item
+        // with no assistant/tool item after it. Any other trailing item
+        // means the error is uncorrelatable, so leave items untouched.
+        guard var session = currentSession,
+              let index = session.items.lastIndex(where: {
+                  if case .user = $0 {
+                      return true
+                  }
+                  return false
+              }),
+              !session.items[(index + 1)...].contains(where: {
+                  if case .assistant = $0 {
+                      return true
+                  }
+                  if case .toolStep = $0 {
+                      return true
+                  }
+                  return false
+              })
+        else { return }
+
+        if case let .user(id, text, _) = session.items[index] {
+            session.items[index] = .user(
+                id: id, text: text, failed: true
+            )
+            updateSession(session)
         }
     }
 
     private func transitionToReconnecting() {
         switch state {
-        case .connected(let session):
+        case let .connected(session):
             state = .reconnecting(session)
         case .connecting:
             state = .failed(
@@ -446,7 +552,7 @@ extension CodeViewModel {
 
     var currentSession: SessionState? {
         switch state {
-        case .connected(let session), .reconnecting(let session):
+        case let .connected(session), let .reconnecting(session):
             return session
         default:
             return nil

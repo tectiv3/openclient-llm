@@ -370,9 +370,14 @@ private extension CodeSessionView {
         ScrollView {
             LazyVStack(spacing: 16) {
                 ForEach(session.items) { item in
-                    CodeTranscriptItemView(item: item)
-                        .id(item.id)
-                        .transition(.opacity)
+                    CodeTranscriptItemView(
+                        item: item,
+                        onRetry: { id in
+                            viewModel.send(.retryPrompt(id: id))
+                        }
+                    )
+                    .id(item.id)
+                    .transition(.opacity)
                 }
             }
             .scrollTargetLayout()
