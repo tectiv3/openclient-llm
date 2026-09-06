@@ -11,6 +11,7 @@ struct CodeView: View {
     // MARK: - Properties
 
     var viewModel: CodeViewModel
+    var onBack: () -> Void = {}
     @Environment(\.scenePhase) private var scenePhase
 
     // Connect form fields live here (not in CodeConnectView) so they survive
@@ -26,7 +27,7 @@ struct CodeView: View {
         NavigationStack {
             Group {
                 switch viewModel.state {
-                case .disconnected(let form):
+                case let .disconnected(form):
                     CodeConnectView(
                         form: form,
                         host: $connectHost,
@@ -48,20 +49,22 @@ struct CodeView: View {
                     ) { _, _, _ in }
                     cancelConnectOverlay
 
-                case .connected(let session):
-                    CodeSessionView(
-                        session: session,
-                        viewModel: viewModel
-                    )
-
-                case .reconnecting(let session):
+                case let .connected(session):
                     CodeSessionView(
                         session: session,
                         viewModel: viewModel,
+                        onBack: onBack
+                    )
+
+                case let .reconnecting(session):
+                    CodeSessionView(
+                        session: session,
+                        viewModel: viewModel,
+                        onBack: onBack,
                         isReconnecting: true
                     )
 
-                case .failed(let errorMessage):
+                case let .failed(errorMessage):
                     failedView(errorMessage)
                 }
             }
@@ -72,19 +75,19 @@ struct CodeView: View {
                 syncConnectFields(from: newState)
             }
             .navigationTitle(String(localized: "Code"))
-#if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            .onChange(of: scenePhase) { _, newPhase in
-                switch newPhase {
-                case .background:
-                    viewModel.send(.appDidEnterBackground)
-                case .active:
-                    viewModel.send(.appWillEnterForeground)
-                default:
-                    break
+            #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+                .onChange(of: scenePhase) { _, newPhase in
+                    switch newPhase {
+                    case .background:
+                        viewModel.send(.appDidEnterBackground)
+                    case .active:
+                        viewModel.send(.appWillEnterForeground)
+                    default:
+                        break
+                    }
                 }
-            }
-#endif
+            #endif
         }
     }
 }
@@ -146,7 +149,7 @@ private extension CodeView {
 
     func prefillConnectFieldsIfNeeded() {
         guard !hasPrefilledConnectFields,
-              case .disconnected(let form) = viewModel.state
+              case let .disconnected(form) = viewModel.state
         else { return }
         hasPrefilledConnectFields = true
         connectHost = form.host
@@ -155,7 +158,7 @@ private extension CodeView {
     }
 
     func syncConnectFields(from state: CodeViewModel.State) {
-        guard case .disconnected(let form) = state else { return }
+        guard case let .disconnected(form) = state else { return }
         connectHost = form.host
         connectPortText = form.port > 0 ? "\(form.port)" : "47800"
         connectCode = form.code

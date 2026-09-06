@@ -12,6 +12,7 @@ struct CodeSessionView: View {
 
     let session: CodeViewModel.SessionState
     let viewModel: CodeViewModel
+    var onBack: () -> Void = {}
     var isReconnecting: Bool = false
 
     @State private var inputText: String = ""
@@ -56,6 +57,18 @@ struct CodeSessionView: View {
             )
         }
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    onBack()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityLabel(
+                    String(localized: "Back")
+                )
+            }
+
             ToolbarItem(placement: .principal) {
                 headerContent
             }
@@ -82,13 +95,13 @@ struct CodeSessionView: View {
                 toastView(toast)
             }
         }
-#if os(iOS)
+        #if os(iOS)
         // iOS: centered card over a dimmed background (macOS keeps .sheet).
         .overlay {
             questionCardOverlay
         }
-#endif
-#if os(macOS)
+        #endif
+        #if os(macOS)
         .sheet(item: pendingQuestion) { question in
             CodeQuestionModal(
                 question: question,
@@ -109,7 +122,7 @@ struct CodeSessionView: View {
             )
             .frame(width: 480, height: 520)
         }
-#endif
+        #endif
         .animation(
             reduceMotion ? nil : .spring(duration: 0.3),
             value: viewModel.transientToast
@@ -185,19 +198,19 @@ private extension CodeSessionView {
     var scrollContentTrigger: Int {
         guard let last = session.items.last else { return 0 }
         switch last {
-        case .assistant(let id, let content, _):
+        case let .assistant(id, content, _):
             var hasher = Hasher()
             hasher.combine(id)
             for block in content {
                 switch block {
-                case .text(let text): hasher.combine(text.count)
-                case .thinking(let text): hasher.combine(text.count)
-                case .toolUse(let tcId, _, _, _): hasher.combine(tcId)
+                case let .text(text): hasher.combine(text.count)
+                case let .thinking(text): hasher.combine(text.count)
+                case let .toolUse(tcId, _, _, _): hasher.combine(tcId)
                 case .unknown: break
                 }
             }
             return hasher.finalize()
-        case .toolStep(let id, _, _, _, let output, _):
+        case let .toolStep(id, _, _, _, output, _):
             var hasher = Hasher()
             hasher.combine(id)
             hasher.combine(output?.count)
