@@ -34,11 +34,11 @@ enum CodeTranscriptItem: Equatable, Identifiable {
 
     var id: UUID {
         switch self {
-        case .user(let id, _),
-             .assistant(let id, _, _),
-             .toolStep(let id, _, _, _, _, _),
-             .resolvedQuestion(let id, _, _, _),
-             .compaction(let id, _):
+        case let .user(id, _),
+             let .assistant(id, _, _),
+             let .toolStep(id, _, _, _, _, _),
+             let .resolvedQuestion(id, _, _, _),
+             let .compaction(id, _):
             return id
         }
     }
@@ -54,16 +54,16 @@ extension CodeViewModel {
 
         for message in messages {
             switch message {
-            case .user(let text):
+            case let .user(text):
                 items.append(.user(id: UUID(), text: text))
 
-            case .assistant(let content):
+            case let .assistant(content):
                 mapAssistantContent(
                     content, into: &items, isStreaming: false
                 )
 
-            case .toolResult(let toolName, let toolCallId,
-                             let output, _):
+            case let .toolResult(toolName, toolCallId,
+                                 output, _):
                 updateToolStepCompletion(
                     toolCallId: toolCallId,
                     toolName: toolName,
@@ -71,7 +71,7 @@ extension CodeViewModel {
                     in: &items
                 )
 
-            case .compaction(let summary):
+            case let .compaction(summary):
                 items.append(
                     .compaction(id: UUID(), summary: summary)
                 )
@@ -114,6 +114,9 @@ extension CodeViewModel {
         case "tool_execution_update":
             updateToolOutput(event, in: &session)
 
+        case "tool_execution_end":
+            markToolStepComplete(event, in: &session)
+
         case "turn_end":
             // Ends the current LLM turn's bubble, not the whole agent run.
             finalizeStreamingBubbles(in: &session)
@@ -148,8 +151,8 @@ private extension CodeViewModel {
             case .text, .thinking:
                 textBlocks.append(block)
 
-            case .toolUse(let toolCallId, let toolName,
-                          let args, let output):
+            case let .toolUse(toolCallId, toolName,
+                              args, output):
                 if !textBlocks.isEmpty {
                     items.append(.assistant(
                         id: UUID(),
@@ -188,7 +191,7 @@ private extension CodeViewModel {
         in items: inout [CodeTranscriptItem]
     ) {
         guard let index = items.lastIndex(where: {
-            if case .toolStep(_, _, let id, _, _, _) = $0 {
+            if case let .toolStep(_, _, id, _, _, _) = $0 {
                 return id == toolCallId
             }
             return false
@@ -204,8 +207,9 @@ private extension CodeViewModel {
             return
         }
 
-        if case .toolStep(let id, let name, let tcId,
-                          let args, _, _) = items[index] {
+        if case let .toolStep(id, name, tcId,
+                              args, _, _) = items[index]
+        {
             items[index] = .toolStep(
                 id: id,
                 toolName: name,
@@ -222,17 +226,21 @@ private extension CodeViewModel {
         in session: inout SessionState
     ) {
         guard let lastIndex = session.items.lastIndex(where: {
-            if case .assistant = $0 { return true }
+            if case .assistant = $0 {
+                return true
+            }
             return false
         }) else { return }
 
         // The server forwards the raw pi `message_update` frame; its
         // `message.content` is a full snapshot of the partial message, so
         // replace (not diff) the streaming bubble's content on every frame.
-        guard let content = messageContentBlocks(event.payload["message"])
-        else { return }
+        // Guard against an empty parse (toolCall-only frames) so we don't
+        // wipe content an earlier frame already populated on this bubble.
+        guard let content = messageContentBlocks(event.payload["message"]),
+              !content.isEmpty else { return }
 
-        if case .assistant(let id, _, _) = session.items[lastIndex] {
+        if case let .assistant(id, _, _) = session.items[lastIndex] {
             session.items[lastIndex] = .assistant(
                 id: id, content: content, isStreaming: true
             )
@@ -249,24 +257,26 @@ private extension CodeViewModel {
     func messageContentBlocks(
         _ message: AnyCodableValue?
     ) -> [CodeContentBlock]? {
-        guard case .object(let message)? = message,
-              case .array(let content)? = message["content"] else {
+        guard case let .object(message)? = message,
+              case let .array(content)? = message["content"]
+        else {
             return nil
         }
 
         var blocks: [CodeContentBlock] = []
         for part in content {
-            guard case .object(let part) = part,
-                  case .string(let type)? = part["type"] else {
+            guard case let .object(part) = part,
+                  case let .string(type)? = part["type"]
+            else {
                 continue
             }
             switch type {
             case "text":
-                if case .string(let text)? = part["text"] {
+                if case let .string(text)? = part["text"] {
                     blocks.append(.text(text))
                 }
             case "thinking":
-                if case .string(let thinking)? = part["thinking"] {
+                if case let .string(thinking)? = part["thinking"] {
                     blocks.append(.thinking(thinking))
                 }
             default:
@@ -281,21 +291,21 @@ private extension CodeViewModel {
         in session: inout SessionState
     ) {
         let toolName: String
-        if case .string(let name) = event.payload["toolName"] {
+        if case let .string(name) = event.payload["toolName"] {
             toolName = name
         } else {
             toolName = "tool"
         }
 
         let toolCallId: String
-        if case .string(let id) = event.payload["toolCallId"] {
+        if case let .string(id) = event.payload["toolCallId"] {
             toolCallId = id
         } else {
             toolCallId = UUID().uuidString
         }
 
         var args: [String: AnyCodableValue] = [:]
-        if case .object(let argsObj) = event.payload["args"] {
+        if case let .object(argsObj) = event.payload["args"] {
             args = argsObj
         }
 
@@ -313,21 +323,33 @@ private extension CodeViewModel {
         _ event: CodeStreamEvent,
         in session: inout SessionState
     ) {
-        guard let lastIndex = session.items.lastIndex(where: {
-            if case .toolStep = $0 { return true }
+        let toolCallId: String?
+        if case let .string(id)? = event.payload["toolCallId"] {
+            toolCallId = id
+        } else {
+            toolCallId = nil
+        }
+
+        // Match by toolCallId (when present) rather than the last tool step,
+        // so concurrent tool steps don't clobber each other's output.
+        guard let index = session.items.lastIndex(where: {
+            if case let .toolStep(_, _, id, _, _, _) = $0 {
+                return toolCallId.map { id == $0 } ?? true
+            }
             return false
         }) else { return }
 
-        if case .toolStep(let id, let name, let tcId,
-                          let args, let existing, _)
-            = session.items[lastIndex] {
+        if case let .toolStep(id, name, tcId,
+                              args, existing, _)
+            = session.items[index]
+        {
             let newOutput: String
-            if case .string(let text) = event.payload["output"] {
+            if case let .string(text) = event.payload["output"] {
                 newOutput = (existing ?? "") + text
             } else {
                 newOutput = existing ?? ""
             }
-            session.items[lastIndex] = .toolStep(
+            session.items[index] = .toolStep(
                 id: id,
                 toolName: name,
                 toolCallId: tcId,
@@ -337,22 +359,57 @@ private extension CodeViewModel {
             )
         }
     }
+
+    func markToolStepComplete(
+        _ event: CodeStreamEvent,
+        in session: inout SessionState
+    ) {
+        guard case let .string(toolCallId)? = event.payload["toolCallId"],
+              let index = session.items.lastIndex(where: {
+                  if case let .toolStep(_, _, id, _, _, _) = $0 {
+                      return id == toolCallId
+                  }
+                  return false
+              }) else { return }
+
+        if case let .toolStep(id, name, tcId,
+                              args, output, _)
+            = session.items[index]
+        {
+            session.items[index] = .toolStep(
+                id: id,
+                toolName: name,
+                toolCallId: tcId,
+                args: args,
+                output: output,
+                isComplete: true
+            )
+        }
+    }
 }
 
 // MARK: - Session Finalization
 
 extension CodeViewModel {
-    /// Marks all streaming assistant bubbles as complete without touching
-    /// the session-level `isStreaming` flag (driven by agent events).
+    /// Marks streaming assistant bubbles complete and drops empty ones,
+    /// without touching the session-level `isStreaming` flag (driven by
+    /// agent events). pi emits one assistant message per tool call in a
+    /// turn; toolCall-only messages parse to empty content, so those stray
+    /// bubbles are removed here as the single cleanup point.
     func finalizeStreamingBubbles(in session: inout SessionState) {
-        for index in session.items.indices {
-            if case .assistant(let id, let content, true)
-                = session.items[index] {
-                session.items[index] = .assistant(
-                    id: id,
-                    content: content,
-                    isStreaming: false
-                )
+        for index in session.items.indices.reversed() {
+            if case let .assistant(id, content, isStreaming)
+                = session.items[index]
+            {
+                if content.isEmpty {
+                    session.items.remove(at: index)
+                } else if isStreaming {
+                    session.items[index] = .assistant(
+                        id: id,
+                        content: content,
+                        isStreaming: false
+                    )
+                }
             }
         }
     }

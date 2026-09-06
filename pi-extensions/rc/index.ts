@@ -815,6 +815,9 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
     pi.on('tool_execution_update', (event, ctx) =>
         forward('tool_execution_update', event, ctx)
     )
+    pi.on('tool_execution_end', (event, ctx) =>
+        forward('tool_execution_end', event, ctx)
+    )
 }
 
 function trackEvent(state: RcSingleton, name: string, event: unknown): void {
@@ -839,6 +842,7 @@ function trackEvent(state: RcSingleton, name: string, event: unknown): void {
         })
     }
     if (name === 'tool_execution_update' && isObject(event)) updateToolOutput(state, event)
+    if (name === 'tool_execution_end' && isObject(event)) updateToolOutput(state, event)
     if (name === 'turn_end') state.currentTurnBuffer = []
 }
 
