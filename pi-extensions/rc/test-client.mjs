@@ -8,14 +8,23 @@
  * auth file) is the thing under test.
  *
  * Usage:
- *   node test-client.mjs [--only 1,3] [--keep-tmp] [--fast]
+ *   node test-client.mjs [--only 1,3] [--keep-tmp] [--fast] [--no-apns]
+ *
+ * Groups 0-11 cover the rc WS protocol (spec: rc-remote-control-spec.md, C2).
+ * Group 12 covers APNs push (spec: docs/plans/rc-push-notifications-spec.md,
+ * verification plan 1) against a fake local APNs endpoint. --no-apns spawns
+ * the child without the PI_RC_APNS_* env and re-runs group 12 as the
+ * "push disabled" case (zero push traffic, all other RC behavior intact).
+ * Group 12 waits out group 11's 60 s rate-limit lockout before connecting.
  *
  * Exit codes: 0 = all pass, 1 = one or more test failures, 2 = setup failure
  * (port busy, spawn, readiness, or /rc toggle).
  */
 
-import { spawn } from "node:child_process";
-import { cpSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { cpSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import http2 from "node:http2";
+import crypto from "node:crypto";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -33,13 +42,28 @@ const AUTH_POLL_INTERVAL_MS = 100;
 const AUTH_WAIT_TIMEOUT_MS = 10_000;
 const CODE_PATTERN = /^[0-9]{6}$/;
 
+// --- group 12 (push) constants ----------------------------------------------------
+const APNS_TEAM_ID = "TEAMTEST1234";
+const APNS_KEY_ID = "KEYTEST9876";
+// Must match apns.ts's DEFAULT_TOPIC (apns-topic is asserted against it).
+const APNS_TOPIC = "com.kinchaku.openclient-llm";
+// Mirrors RATE_LIMIT_LOCK_MS in index.ts: group 11's bad-code hellos lock out
+// 127.0.0.1 for 60 s from the 5th failure, so group 12's own connect must wait.
+const LOCKOUT_MS = 60_000;
+const LOCKOUT_POLL_MS = 5_000;
+const LOCKOUT_DEADLINE_MS = 90_000;
+// Mirrors SEND_TIMEOUT_MS in apns.ts: a request that reaches the fake endpoint
+// but never completes within this budget counts as a defect, not a quiet no-op.
+const APNS_PUSH_TIMEOUT_MS = 15_000;
+const APNS_BAD_TOKEN_63 = "a".repeat(63); // 63 chars: valid hex, wrong length
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TEST_PROJECT_SRC = join(HERE, "test-project");
 
 // --- arg parsing -----------------------------------------------------------------
 
 function parseArgs(argv) {
-  const opts = { only: null, keepTmp: false, fast: false };
+  const opts = { only: null, keepTmp: false, fast: false, noApns: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--only") {
@@ -54,6 +78,8 @@ function parseArgs(argv) {
       opts.keepTmp = true;
     } else if (arg === "--fast") {
       opts.fast = true;
+    } else if (arg === "--no-apns") {
+      opts.noApns = true;
     } else {
       console.error(`unknown argument: ${arg}`);
       process.exit(2);
@@ -608,6 +634,442 @@ registerTest(11, "hello_five_bad_codes_triggers_rate_limit", async (ctx) => {
   );
 });
 
+// --- group 12: APNs push (fake endpoint) ----------------------------------------
+// Spec: docs/plans/rc-push-notifications-spec.md, verification plan item 1.
+//
+// A local HTTP/2-over-TLS server stands in for APNs. The spawned pi process is
+// pointed at it via PI_RC_APNS_HOST and trusts its self-signed cert via
+// NODE_EXTRA_CA_CERTS — the harness owns the child environment, so no CA
+// configuration is invented in the extension. The throwaway P-256 key is the
+// same key the extension signs its per-send JWTs with, so the harness can
+// verify every Bearer token end to end.
+//
+// Ordering (spec-mandated):
+//   - runs AFTER group 11, whose bad-code hellos lock out 127.0.0.1 for 60 s;
+//   - the endpoint is up and the push token is registered BEFORE the first
+//     LLM-driven wait, so no finished/question push can slip past observation.
+//
+// The child's singleton pushToken persists across tests, so the tests are
+// registered in token-state order: (c) null, (d) invalid/ignored, (a) first
+// valid registration, (b) question push on the same token, (e) persists across
+// disconnect + replaced by a second registration, (f) dropped on 410.
+//
+// With --no-apns the child is spawned WITHOUT the PI_RC_APNS_* env; the
+// endpoint still runs as a traffic observer and every test asserts zero push
+// traffic while the surrounding RC behavior (settles, questions, get_state)
+// must keep working. (The disabled-case proof holds while this machine has no
+// ~/.pi/agent/rc-push.json; PI_RC_APNS_HOST is env-only, so a config file
+// would push to the real host, not the fake endpoint.)
+
+// The two registered tokens: token A is registered by the settled-turn test
+// and (unless dropped) persists into the persistence/replace test; token B
+// replaces it (last write wins).
+const APNS_TOKEN_A = "1111111111111111111111111111111111111111111111111111111111111111";
+const APNS_TOKEN_B = "2222222222222222222222222222222222222222222222222222222222222222";
+
+// Polls predicate() every 50 ms until true or the deadline (which throws).
+// The fake endpoint's request list is the observation point; a push that is
+// fired but never lands within APNS_PUSH_TIMEOUT_MS is a defect, not quiet.
+const waitUntil = (predicate, ms, label) =>
+  new Promise((resolve, reject) => {
+    const deadline = Date.now() + ms;
+    const timer = setInterval(() => {
+      if (predicate()) {
+        clearInterval(timer);
+        resolve();
+      } else if (Date.now() >= deadline) {
+        clearInterval(timer);
+        reject(new Error(`${label} (no request within ${ms}ms)`));
+      }
+    }, 50);
+  });
+
+// Waits until the request count stays constant for quietMs — drains a push that
+// was fired by the PREVIOUS test's settle before this test snapshots `before`
+// (the push lands a few ms after the agent_settled the previous test waited on).
+async function drainPushQuiet(apns, quietMs = 500) {
+  let count = apns.requests.length;
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    await sleep(quietMs);
+    if (apns.requests.length === count) return;
+    count = apns.requests.length;
+  }
+  throw new Error("push traffic never settled within 5s of quiet windows");
+}
+
+// Throwaway P-256 APNs key (.p8) + self-signed 127.0.0.1 TLS cert (temp files
+// in tmpRoot, removed with it). Node has no in-process X.509 issuer, so the
+// server cert is minted with openssl — the same throwaway recipe as the
+// /tmp/push-e2e.mjs reference. The APNs signing key (apns-key.p8) and the TLS
+// server key are deliberately independent, as on real APNs.
+function generateApnsMaterial(dir) {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const keyPath = join(dir, "apns-key.p8");
+  writeFileSync(keyPath, privateKey.export({ type: "pkcs8", format: "pem" }));
+  const serverKeyPath = join(dir, "apns-server.key");
+  const certPath = join(dir, "apns-cert.pem");
+  execFileSync("openssl", [
+    "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+    "-keyout", serverKeyPath, "-out", certPath, "-days", "1", "-nodes",
+    "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1",
+  ]);
+  return { keyPath, serverKeyPath, certPath, publicKey };
+}
+
+class FakeApns {
+  constructor(dir) {
+    this.dir = dir;
+    this.teamId = APNS_TEAM_ID;
+    this.keyId = APNS_KEY_ID;
+    this.topic = APNS_TOPIC;
+    this.requests = []; // every completed request: { path, headers, body }
+    this.status = 200;
+    this.reason = null; // sent as the apns-reason response header when status is 410
+    this.server = null;
+    this.port = null;
+    this.publicKey = null;
+  }
+
+  async start() {
+    const material = generateApnsMaterial(this.dir);
+    this.publicKey = material.publicKey;
+    this.server = http2.createSecureServer({
+      key: readFileSync(material.serverKeyPath),
+      cert: readFileSync(material.certPath),
+      ALPNProtocols: ["h2"],
+    });
+    this.server.on("stream", (stream, req) => {
+      let body = "";
+      stream.on("data", (chunk) => {
+        body += chunk;
+      });
+      stream.on("end", () => {
+        this.requests.push({ path: req[":path"], headers: req, body });
+        const headers = { ":status": this.status };
+        if (this.status === 410) headers["apns-reason"] = this.reason ?? "Unregistered";
+        stream.respond(headers);
+        stream.end(this.status === 200 ? "Accepted" : JSON.stringify({ reason: headers["apns-reason"] }));
+      });
+    });
+    await new Promise((resolve, reject) => {
+      this.server.once("error", reject);
+      this.server.listen(0, "127.0.0.1", resolve);
+    });
+    this.port = this.server.address().port;
+  }
+
+  close() {
+    if (!this.server) return;
+    this.server.close();
+  }
+}
+
+const apnsB64u = (part) => Buffer.from(part, "base64url").toString("utf8");
+
+// Full JWT assertions for one request: 3 parts, header {alg,kid}, claims
+// {iss,sub,aud,iat,exp} with a 300 s TTL, and an ES256 (IEEE P-1363) signature
+// that verifies against the generated P-256 public key.
+function checkApnsJwt(apns, request, label) {
+  const auth = String(request.headers.authorization ?? "");
+  check(auth.startsWith("Bearer "), `${label}: no Bearer authorization`);
+  const jwt = auth.slice("Bearer ".length);
+  const parts = jwt.split(".");
+  check(parts.length === 3, `${label}: JWT must have 3 parts`);
+  const header = JSON.parse(apnsB64u(parts[0]));
+  const claims = JSON.parse(apnsB64u(parts[1]));
+  check(header.alg === "ES256" && header.kid === apns.keyId, `${label}: jwt header {alg:ES256, kid:keyId}`);
+  check(
+    claims.iss === apns.teamId && claims.sub === apns.keyId && claims.aud === "apns",
+    `${label}: jwt claims iss/sub/aud`,
+  );
+  check(
+    Number.isInteger(claims.iat) && Number.isInteger(claims.exp) && claims.exp - claims.iat === 300,
+    `${label}: jwt iat/exp (exp-iat=300)`,
+  );
+  const signingInput = Buffer.from(jwt.slice(0, jwt.lastIndexOf(".")), "utf8");
+  check(
+    crypto.verify("sha256", signingInput, { key: apns.publicKey, dsaEncoding: "ieee-p1363" }, Buffer.from(parts[2], "base64url")),
+    `${label}: ES256 signature (ieee-p1363) must verify against the generated P-256 key`,
+  );
+}
+
+// apns-topic/priority/timestamp are common to every push type.
+function checkApnsCommonHeaders(apns, request, label) {
+  check(request.headers["apns-topic"] === apns.topic, `${label}: apns-topic`);
+  check(request.headers["apns-priority"] === "5", `${label}: apns-priority must be 5`);
+  check(
+    Number.isFinite(Number(request.headers["apns-timestamp"])) &&
+      Number(request.headers["apns-timestamp"]) > 0,
+    `${label}: apns-timestamp must be numeric`,
+  );
+}
+
+// Group 12: Push notifications (fake APNs endpoint)
+
+// (c) Client connected WITHOUT a push_token: the settled turn must be served
+// normally and the fake endpoint must see nothing. Runs first, while the
+// singleton pushToken is still null.
+registerTest(12, "push_no_token_registered_settled_turn_makes_zero_requests", async (ctx) => {
+  const apns = ctx.apns;
+  const hs = await connectAndVerifyConnectTime(ctx);
+  try {
+    check(apns.requests.length === 0, `expected no prior push traffic, saw ${apns.requests.length}`);
+    hs.ws.send(JSON.stringify({ type: "prompt", text: "Reply with exactly: PONG-12C" }));
+    await waitForEventByName(hs.next, "agent_settled", 60_000);
+    await sleep(1_000); // quiet window: a (buggy) push would land here
+    check(apns.requests.length === 0, `no push_token registered, expected zero APNs requests, got ${apns.requests.length}`);
+  } finally {
+    hs.close();
+  }
+});
+
+// (d) Invalid tokens must be ignored silently: no error frame, no close, the
+// connection keeps serving, and no push is ever attempted with a bad token.
+registerTest(12, "push_invalid_tokens_ignored_and_still_served", async (ctx) => {
+  const apns = ctx.apns;
+  const hs = await connectAndVerifyConnectTime(ctx);
+  try {
+    for (const payload of [
+      { type: "push_token", token: "nothex" },
+      { type: "push_token", token: APNS_BAD_TOKEN_63 },
+      { type: "push_token", token: 12345 },
+      { type: "push_token" },
+    ]) {
+      hs.ws.send(JSON.stringify(payload));
+    }
+    // The invalid frames must not produce an error frame: a get_state on the
+    // same socket is still served with a valid state (connection still open).
+    hs.ws.send(JSON.stringify({ type: "get_state" }));
+    const state = await waitForMessage(hs.next, (m) => m?.type === "state", 10_000, "state after invalid push_token");
+    assertValidStateShape(state);
+    hs.ws.send(JSON.stringify({ type: "prompt", text: "Reply with exactly: PONG-12D" }));
+    await waitForEventByName(hs.next, "agent_settled", 60_000);
+    await sleep(1_000);
+    check(apns.requests.length === 0, `no valid token was ever registered, expected zero APNs requests, got ${apns.requests.length}`);
+  } finally {
+    hs.close();
+  }
+});
+
+// (a) First valid registration: the settled turn must produce exactly one POST
+// with the full APNs header/JWT contract and the fixed finished payload.
+// (--no-apns: the same flow must produce zero requests while the turn is served.)
+registerTest(12, "push_agent_settled_sends_one_valid_request", async (ctx) => {
+  const apns = ctx.apns;
+  const hs = await connectAndVerifyConnectTime(ctx);
+  const sessionId = ctx.lastState.sessionId; // set by the connect burst above
+  try {
+    hs.ws.send(JSON.stringify({ type: "push_token", token: APNS_TOKEN_A }));
+    await sleep(500); // register before the LLM round trip starts
+    const before = apns.requests.length;
+    hs.ws.send(JSON.stringify({ type: "prompt", text: "Reply with exactly: PONG-12A" }));
+    await waitForEventByName(hs.next, "agent_settled", 60_000);
+    if (ctx.pushEnabled) {
+      await withTimeout(
+        waitUntil(() => apns.requests.length > before, APNS_PUSH_TIMEOUT_MS, "finished push request"),
+        APNS_PUSH_TIMEOUT_MS + 5_000,
+        "finished push request (deadline)",
+      );
+    }
+    await sleep(1_000); // quiet window: at most ONE push per settled turn
+    const requests = apns.requests.slice(before);
+    if (!ctx.pushEnabled) {
+      check(requests.length === 0, `push disabled (no PI_RC_APNS_* env), expected zero requests, got ${requests.length}`);
+      return;
+    }
+    check(requests.length === 1, `expected exactly one APNs request on agent_settled, got ${requests.length}`);
+    const [req] = requests;
+    check(req.path === `/3/device/${APNS_TOKEN_A}`, `path must be /3/device/<token>, got ${req.path}`);
+    check(req.headers["apns-collapse-id"] === "rc-finished", `apns-collapse-id must be rc-finished`);
+    checkApnsCommonHeaders(apns, req, "finished push");
+    checkApnsJwt(apns, req, "finished push");
+    const body = JSON.parse(req.body);
+    check(
+      body.aps?.alert?.title === "Agent finished" && body.aps?.alert?.body === "Agent finished",
+      `finished push must carry the fixed alert, got ${JSON.stringify(body.aps?.alert)}`,
+    );
+    check(body.aps?.sound === "default", `finished push must carry sound default`);
+    check(body.aps?.["thread-id"] === sessionId, `thread-id must be the session id, got ${body.aps?.["thread-id"]}`);
+    check(!JSON.stringify(body).includes("PONG-12A"), `push payload must not contain prompt text`);
+  } finally {
+    hs.close();
+  }
+});
+
+// (b) A remote question (ask() via the question extension, triggered the same
+// way as group 5's ASK flow) must produce one request with the question
+// collapse id, timeSensitive, and fixed strings. Token A from test (a) is
+// still registered (singleton-persistent).
+// (--no-apns: the question still fires and is answerable; zero requests.)
+registerTest(12, "push_question_triggers_time_sensitive_request", async (ctx) => {
+  const apns = ctx.apns;
+  const hs = await connectAndVerifyConnectTime(ctx);
+  try {
+    const before = apns.requests.length;
+    hs.ws.send(JSON.stringify({ type: "prompt", text: "ASK" }));
+    const q = await waitForMessage(hs.next, (m) => m?.type === "question", 60_000, "question (LLM round trip)");
+    check(q.kind === "question", `expected kind question, got ${JSON.stringify(q.kind)}`);
+    if (ctx.pushEnabled) {
+      await withTimeout(
+        waitUntil(() => apns.requests.length > before, APNS_PUSH_TIMEOUT_MS, "question push request"),
+        APNS_PUSH_TIMEOUT_MS + 5_000,
+        "question push request (deadline)",
+      );
+    }
+    await sleep(1_000); // quiet window: at most one question push
+    const requests = apns.requests.slice(before);
+    if (!ctx.pushEnabled) {
+      check(requests.length === 0, `push disabled (no PI_RC_APNS_* env), expected zero requests, got ${requests.length}`);
+    } else {
+      check(requests.length === 1, `expected exactly one APNs request on ask(), got ${requests.length}`);
+      const [req] = requests;
+      check(req.path === `/3/device/${APNS_TOKEN_A}`, `question push must use the registered token, got ${req.path}`);
+      check(req.headers["apns-collapse-id"] === "rc-question", `apns-collapse-id must be rc-question`);
+      checkApnsCommonHeaders(apns, req, "question push");
+      checkApnsJwt(apns, req, "question push");
+      const body = JSON.parse(req.body);
+      check(body.aps?.timeSensitive === true, `question push must set aps.timeSensitive`);
+      check(
+        body.aps?.alert?.title === "Agent has a question" && body.aps?.alert?.body === "Agent has a question — answer needed",
+        `question push must carry the fixed alert, got ${JSON.stringify(body.aps?.alert)}`,
+      );
+      check(body.aps?.sound === "default", `question push must carry sound default`);
+    }
+    // Answer it so the agent settles and later tests start idle.
+    hs.ws.send(JSON.stringify({ type: "answer", id: q.id, value: "red", wasCustom: false, index: 1 }));
+    const resolved = await waitForMessage(hs.next, (m) => m?.type === "question_resolved" && m.id === q.id, 10_000, "question_resolved");
+    check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
+    await waitForEventByName(hs.next, "agent_settled", 60_000);
+  } finally {
+    hs.close();
+  }
+});
+
+// (e) The token is singleton-persistent: it survives a client disconnect/
+// reconnect (the settled turn still pushes without re-registration), and a
+// second registration replaces it (last write wins — the next push path uses
+// the new token).
+registerTest(12, "push_token_persists_across_reconnect_and_second_registration_replaces", async (ctx) => {
+  const apns = ctx.apns;
+  // (e1) Reconnect WITHOUT re-registering: the stored token (A) must still push.
+  const a = await connectAndVerifyConnectTime(ctx);
+  a.close(); // disconnect: the token must survive (singleton, not per-connection)
+  const b = await connectAndVerifyConnectTime(ctx);
+  try {
+    await drainPushQuiet(apns); // the previous test's settle push may still be in flight
+    const before = apns.requests.length;
+    // Settle via the group-4 pattern (prompt LONG -> abort): no full LLM
+    // generation, so both settle triggers fit the 60 s per-test budget.
+    b.ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+    await waitForEventByName(b.next, "message_update", 15_000);
+    b.ws.send(JSON.stringify({ type: "abort" }));
+    await waitForEventByName(b.next, "agent_settled", 20_000);
+    if (ctx.pushEnabled) {
+      await withTimeout(
+        waitUntil(() => apns.requests.length > before, APNS_PUSH_TIMEOUT_MS, "post-reconnect push request"),
+        APNS_PUSH_TIMEOUT_MS + 5_000,
+        "post-reconnect push request (deadline)",
+      );
+    }
+    await sleep(1_000);
+    const requests = apns.requests.slice(before);
+    if (ctx.pushEnabled) {
+      check(requests.length === 1, `expected one push after reconnect (token persisted), got ${requests.length}`);
+      check(
+        requests[0].path === `/3/device/${APNS_TOKEN_A}`,
+        `push after reconnect must use the persisted token A, got ${requests[0].path}`,
+      );
+    } else {
+      check(requests.length === 0, `push disabled, expected zero requests, got ${requests.length}`);
+    }
+    // (e2) A second push_token replaces the stored one (last write wins).
+    b.ws.send(JSON.stringify({ type: "push_token", token: APNS_TOKEN_B }));
+    await sleep(500); // register before the next settle trigger
+    const before2 = apns.requests.length;
+    b.ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+    await waitForEventByName(b.next, "message_update", 15_000);
+    b.ws.send(JSON.stringify({ type: "abort" }));
+    await waitForEventByName(b.next, "agent_settled", 20_000);
+    if (ctx.pushEnabled) {
+      await withTimeout(
+        waitUntil(() => apns.requests.length > before2, APNS_PUSH_TIMEOUT_MS, "post-replace push request"),
+        APNS_PUSH_TIMEOUT_MS + 5_000,
+        "post-replace push request (deadline)",
+      );
+    }
+    await sleep(1_000);
+    const requests2 = apns.requests.slice(before2);
+    if (ctx.pushEnabled) {
+      check(requests2.length === 1, `expected one push after re-registration, got ${requests2.length}`);
+      check(
+        requests2[0].path === `/3/device/${APNS_TOKEN_B}`,
+        `second registration must replace the token (last write wins), got ${requests2[0].path}`,
+      );
+    } else {
+      check(requests2.length === 0, `push disabled, expected zero requests, got ${requests2.length}`);
+    }
+  } finally {
+    b.close();
+  }
+});
+
+// (f) A 410 (BadDeviceToken) from the fake endpoint must drop the stored
+// token: the next trigger produces no new request, and RC keeps serving.
+registerTest(12, "push_410_drops_token_and_rc_still_serves", async (ctx) => {
+  const apns = ctx.apns;
+  apns.status = 410;
+  apns.reason = "Unregistered";
+  const hs = await connectAndVerifyConnectTime(ctx);
+  try {
+    // Settles come from the group-4 pattern (prompt LONG -> abort): the turn
+    // settles without a full LLM generation, so both triggers fit the 60 s
+    // per-test budget.
+    // Trigger 1: a settle while the endpoint answers 410: the token is dropped.
+    const before = apns.requests.length;
+    hs.ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+    await waitForEventByName(hs.next, "message_update", 15_000);
+    hs.ws.send(JSON.stringify({ type: "abort" }));
+    await waitForEventByName(hs.next, "agent_settled", 20_000);
+    if (ctx.pushEnabled) {
+      await withTimeout(
+        waitUntil(() => apns.requests.length > before, APNS_PUSH_TIMEOUT_MS, "410 push request"),
+        APNS_PUSH_TIMEOUT_MS + 5_000,
+        "410 push request (deadline)",
+      );
+      const [req] = apns.requests.slice(before);
+      check(req.headers["apns-collapse-id"] === "rc-finished", `410 request must still be a finished push`);
+      // The token is now dropped: a subsequent trigger must produce NO request.
+      await sleep(1_000); // let the outcome handler run (token drop is async)
+      const before2 = apns.requests.length;
+      hs.ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+      await waitForEventByName(hs.next, "message_update", 15_000);
+      hs.ws.send(JSON.stringify({ type: "abort" }));
+      await waitForEventByName(hs.next, "agent_settled", 20_000);
+      await sleep(1_500); // quiet window: no push expected (token dropped)
+      check(
+        apns.requests.length === before2,
+        `after a 410 the token must be dropped (no further requests), got ${apns.requests.length - before2} more`,
+      );
+    } else {
+      check(apns.requests.length === before, `push disabled, expected zero requests, got ${apns.requests.length - before}`);
+    }
+    // RC must keep serving after the drop (or, in disabled mode, at all).
+    hs.ws.send(JSON.stringify({ type: "get_state" }));
+    const state = await waitForMessage(hs.next, (m) => m?.type === "state", 10_000, "state after 410 drop");
+    assertValidStateShape(state);
+    check(state.isStreaming === false, "isStreaming must be false after the aborted turn");
+  } finally {
+    apns.status = 200;
+    apns.reason = null;
+    hs.close();
+  }
+});
+
+// (g) The "APNs env NOT set" case is the whole group re-run with --no-apns:
+// the child is spawned without the PI_RC_APNS_* env, the fake endpoint still
+// runs as a traffic observer, and every test above takes its !ctx.pushEnabled
+// branch (zero requests while settles/questions/get_state keep working).
 
 // --- groups 5, 6, 7, 8, 9 -------------------------------------------------------
 
@@ -802,6 +1264,28 @@ registerTest(9, "new_session_rebinds_clients_with_fresh_state", async (ctx) => {
   }
 });
 
+// Group 11's bad-code hellos lock out this host for 60 s (RATE_LIMIT_LOCK_MS in
+// index.ts), so group 12's own connects would be rate_limited. Called from the
+// runner BEFORE group 12 (outside the per-test budget): poll a real-code
+// handshake until the lockout clears; the successful hello_ok is closed
+// immediately (it also proves the connect path group 12 relies on).
+async function waitForLockoutClear(ctx) {
+  requireAuth(ctx);
+  const deadline = Date.now() + (ctx.pushLockoutSince ? LOCKOUT_MS + 30_000 : LOCKOUT_DEADLINE_MS);
+  for (;;) {
+    const hs = await handshake(ctx);
+    if (hs.result?.type === "hello_ok") {
+      hs.close();
+      return;
+    }
+    if (hs.result?.type === "error" && hs.result.code !== "rate_limited") {
+      throw new Error(`unexpected error while waiting for lockout clear: ${JSON.stringify(hs.result)}`);
+    }
+    if (Date.now() >= deadline) throw new Error("rate-limit lockout did not clear within the deadline");
+    await sleep(LOCKOUT_POLL_MS);
+  }
+}
+
 // --- main ------------------------------------------------------------------------
 
 async function main() {
@@ -817,10 +1301,14 @@ async function main() {
   const authFile = join(tmpRoot, "rc-auth.json");
   let client = null;
 
+  const apns = new FakeApns(tmpRoot);
+
   const cleanup = async () => {
     if (client) {
       await client.terminate();
     }
+    apns.server?.closeAllConnections?.();
+    apns.close();
     if (!opts.keepTmp) {
       rmSync(tmpRoot, { recursive: true, force: true });
     }
@@ -835,15 +1323,32 @@ async function main() {
   // Setup step 2: copy the test project into the temp dir and spawn pi in RPC mode.
   try {
     cpSync(TEST_PROJECT_SRC, tmpRoot, { recursive: true });
+    // Fake APNs endpoint (group 12): throwaway P-256 key + self-signed cert in
+    // tmpRoot, listening on an OS-assigned 127.0.0.1 port BEFORE the spawn so
+    // the port can go into the child's env. Up in BOTH modes: with --no-apns it
+    // is a pure traffic observer (the push-disabled case must show zero hits).
+    await apns.start();
   } catch (err) {
-    console.error(`setup failed: could not copy test project: ${err.message}`);
+    console.error(`setup failed: ${err.message}`);
     await cleanup();
     process.exit(2);
   }
 
+  const childEnv = { ...process.env, PI_RC_BIND: RC_HOST, PI_RC_AUTH_FILE: authFile };
+  if (!opts.noApns) {
+    // The harness owns the child environment: point the extension at the fake
+    // endpoint and make its TLS layer trust the self-signed cert (no CA config
+    // option is invented in the extension; NODE_EXTRA_CA_CERTS is standard).
+    childEnv.NODE_EXTRA_CA_CERTS = join(tmpRoot, "apns-cert.pem");
+    childEnv.PI_RC_APNS_HOST = `127.0.0.1:${apns.port}`;
+    childEnv.PI_RC_APNS_TEAM_ID = APNS_TEAM_ID;
+    childEnv.PI_RC_APNS_KEY_ID = APNS_KEY_ID;
+    childEnv.PI_RC_APNS_KEY_FILE = join(tmpRoot, "apns-key.p8");
+  }
+
   const child = spawn(PI_COMMAND, PI_ARGS, {
     cwd: tmpRoot,
-    env: { ...process.env, PI_RC_BIND: RC_HOST, PI_RC_AUTH_FILE: authFile },
+    env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
   client = new RpcClient(child);
@@ -869,6 +1374,9 @@ async function main() {
     rcPort: RC_PORT,
     host: RC_HOST,
     fast: opts.fast || RC_FAST,
+    apns,
+    pushEnabled: !opts.noApns,
+    pushLockoutSince: null, // set when group 11 completes; group 12 waits it out
     async toggleRcOn() {
       await client.sendCommand({ type: "prompt", message: "/rc" });
       return waitForAuthFile(authFile, AUTH_WAIT_TIMEOUT_MS);
@@ -877,9 +1385,15 @@ async function main() {
 
   const results = [];
   const byGroup = (g) => tests.filter((t) => t.group === g);
-  const groupOrder = [0, ...Array.from({ length: 11 }, (_, i) => i + 1).filter((g) => opts.only === null || opts.only.includes(g))];
+  const groupOrder = [0, ...Array.from({ length: 12 }, (_, i) => i + 1).filter((g) => opts.only === null || opts.only.includes(g))];
 
   for (const group of groupOrder) {
+    // Group 11's bad-code hellos lock out this host for 60 s (RATE_LIMIT_LOCK_MS),
+    // so group 12's own connects would be rate_limited. This is a harness setup
+    // step, deliberately OUTSIDE the per-test 60 s budget: poll a real-code
+    // handshake until the lockout clears; the successful hello_ok is closed
+    // immediately (it also proves the connect path group 12 relies on).
+    if (group === 12) await waitForLockoutClear(ctx);
     for (const test of byGroup(group)) {
       const started = Date.now();
       try {
@@ -897,6 +1411,7 @@ async function main() {
         }
       }
     }
+    if (group === 11) ctx.pushLockoutSince = Date.now(); // group 12 waits the lockout out
   }
 
   const passed = results.filter((r) => r.status === "pass").length;

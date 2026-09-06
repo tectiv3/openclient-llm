@@ -6,6 +6,14 @@ import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { execFileSync } from 'node:child_process'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { runPushSetup } from './push-setup'
+import {
+    FINISHED_COLLAPSE_ID,
+    QUESTION_COLLAPSE_ID,
+    finishedPayload,
+    questionPayload,
+    sendApnsPush,
+    type PushOutcome,
+} from './apns'
 
 const RC_KEY = Symbol.for('pi-rc')
 const PORT = 47800
@@ -85,6 +93,7 @@ type RcSingleton = {
     code: string | null
     heartbeat: ReturnType<typeof setInterval> | null
     rateLimits: Map<string, RateLimitEntry>
+    pushToken: string | null
     isStreaming: boolean
     currentTurnBuffer: ContentBlock[]
     pendingAsk: PendingAsk | null
@@ -117,6 +126,7 @@ function singleton(): RcSingleton {
         code: null,
         heartbeat: null,
         rateLimits: new Map<string, RateLimitEntry>(),
+        pushToken: null,
         isStreaming: false,
         currentTurnBuffer: [],
         pendingAsk: null,
@@ -235,6 +245,7 @@ function singleton(): RcSingleton {
             this.pendingAsk = pending
             dbgLog('ask created:', id, opts.kind)
             this.broadcast(message)
+            fireQuestionPush(this)
             return new Promise<RemoteQuestionAnswer | RemoteQuestionnaireAnswer | null>(
                 resolve => {
                     pending.resolve = result => {
@@ -478,6 +489,9 @@ function handleClientMessage(state: RcSingleton, client: RcClient, message: unkn
         case 'answer_questionnaire':
             handleAnswerQuestionnaire(state, client, message)
             break
+        case 'push_token':
+            handlePushToken(state, client, message)
+            break
         default:
             writeJson(client, { type: 'error', code: 'invalid_message' })
     }
@@ -568,6 +582,56 @@ function handleAnswerQuestionnaire(state: RcSingleton, client: RcClient, message
     pending.resolve(answers)
     dbgLog('ask resolved by client:', pending.id)
     state.broadcast({ type: 'question_resolved', id: pending.id, by: 'client' })
+}
+
+// APNs device tokens are 64 hex chars. Anything else is ignored silently:
+// no error frame, no close, no state change (spec: wire protocol, push_token).
+function handlePushToken(state: RcSingleton, client: RcClient, message: JsonObject): void {
+    const token = message.token
+    if (typeof token !== 'string' || !/^[0-9a-f]{64}$/i.test(token)) {
+        dbgLog('push_token ignored (invalid):', client.ip)
+        return
+    }
+    state.pushToken = token
+    dbgLog('push_token registered:', client.ip)
+}
+
+function fireFinishedPush(state: RcSingleton): void {
+    const token = state.pushToken
+    if (!token) return
+    void sendApnsPush(token, FINISHED_COLLAPSE_ID, finishedPayload(sessionId(state)))
+        .then(outcome => handlePushOutcome(state, outcome, 'finished', token))
+        .catch(error => dbgLog('apns finished push failed:', errorMessage(error)))
+}
+
+function fireQuestionPush(state: RcSingleton): void {
+    const token = state.pushToken
+    if (!token) return
+    void sendApnsPush(token, QUESTION_COLLAPSE_ID, questionPayload(sessionId(state)))
+        .then(outcome => handlePushOutcome(state, outcome, 'question', token))
+        .catch(error => dbgLog('apns question push failed:', errorMessage(error)))
+}
+
+function handlePushOutcome(state: RcSingleton, outcome: PushOutcome, label: string, token: string): void {
+    // Only clear the token if it is still the one APNs rejected: a newer
+    // registration that landed while this send was in flight must survive.
+    if (outcome.ok === 'dropped' && state.pushToken === token) {
+        state.pushToken = null
+        dbgLog(
+            'push_token dropped (token invalid per APNs):',
+            label,
+            'status',
+            outcome.status,
+            'reason',
+            outcome.reason ?? '-'
+        )
+        return
+    }
+    if (outcome.ok === 'dropped') {
+        dbgLog('push_token drop ignored (token already replaced):', label)
+        return
+    }
+    dbgLog('apns push outcome:', label, safeJson(outcome))
 }
 
 function writeSessionSnapshot(client: RcClient, state: RcSingleton): void {
@@ -823,7 +887,12 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
 
 function trackEvent(state: RcSingleton, name: string, event: unknown): void {
     if (name === 'agent_start') state.isStreaming = true
-    if (name === 'agent_settled') state.isStreaming = false
+    if (name === 'agent_settled') {
+        state.isStreaming = false
+        // Fires on every settled turn by design; the constant collapse id
+        // dedupes at APNs, so the latest settle is the one delivered.
+        fireFinishedPush(state)
+    }
     if (
         name === 'message_start' &&
         isObject(event) &&

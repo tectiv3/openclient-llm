@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import * as http2 from 'node:http2'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import { connect as tlsConnect } from 'node:tls'
 import { dbgLog } from './debug'
 
 const DEFAULT_HOST = 'api.push.apple.com:443'
@@ -206,20 +205,18 @@ let sessionAuthority: string | null = null
 function getSession(config: ApnsConfig): http2.Http2Session {
     const authority = `${config.host}:${config.port}`
     if (session && sessionAuthority === authority && !session.destroyed) return session
-    const socket = tlsConnect({ host: config.host, port: config.port, servername: config.host })
-    const newSession = http2.connect(authority, {
-        createConnection: (_authority, options) => {
-            void options
-            return socket
-        },
-    })
+    // Node performs the TLS handshake itself: h2 ALPN, SNI, and the standard
+    // CA store (the test harness injects NODE_EXTRA_CA_CERTS for its fake
+    // endpoint). A custom createConnection socket fails with "Protocol error"
+    // on Node 24, so no createConnection.
+    const newSession = http2.connect(new URL(`https://${authority}`))
     const drop = () => {
         if (session === newSession) {
             session = null
             sessionAuthority = null
         }
         try {
-            socket.destroy()
+            newSession.destroy()
         } catch {
             // already gone
         }
@@ -243,7 +240,7 @@ export function closeApns(): void {
     }
 }
 
-function finishedPayload(sessionId: string): JsonObject {
+export function finishedPayload(sessionId: string): JsonObject {
     return {
         aps: {
             alert: { title: 'Agent finished', body: 'Agent finished' },
@@ -253,7 +250,7 @@ function finishedPayload(sessionId: string): JsonObject {
     }
 }
 
-function questionPayload(sessionId: string): JsonObject {
+export function questionPayload(sessionId: string): JsonObject {
     return {
         aps: {
             alert: { title: 'Agent has a question', body: 'Agent has a question — answer needed' },
@@ -324,7 +321,9 @@ function postToApns(
             finish(undefined, new Error(`apns request timed out after ${SEND_TIMEOUT_MS}ms (${authority})`))
             closeApns()
         }, SEND_TIMEOUT_MS)
-        h2.on('error', error => finish(undefined, error))
+        // No session-level 'error' listener here: the cached session is
+        // shared across sends, so one listener per send would leak. Request
+        // errors (including session death) surface on the request itself.
         h2.request({
             ':method': 'POST',
             ':path': `/3/device/${token}`,
