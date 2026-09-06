@@ -462,6 +462,17 @@ The `ask` function is exposed by the rc singleton on `globalThis[Symbol.for("pi-
 No event bus needed — the question extensions access the rc singleton directly via
 `globalThis[Symbol.for("pi-rc")]`.
 
+> **Correction to the draft (Task 2, implemented):** the implementation deviates
+> from the sketch above in three ways. (1) The question `id` is generated
+> server-side in `rc.ask()` (`crypto.randomBytes(4).toString("hex")`); the
+> caller does not pass one (`uuidv7` is not imported). (2) There is no
+> `showRemoteWaitUI` / Esc escape hatch: while a remote ask is pending, the TUI
+> shows the in-flight tool call; a local answer cannot preempt it (v1 limitation,
+> acceptable per the `executionMode: "sequential"` note below). (3) `ask()`
+> resolves `null` (tool reports "cancelled") when the server stops or `/rc`
+> toggles off; if no clients are connected at ask time, the extension falls
+> through to the normal TUI path.
+
 ### A6. Heartbeat
 
 Client sends `ping` every 30 seconds. Server responds with `pong`. If the server
@@ -477,6 +488,12 @@ Per-IP tracking of failed `hello` attempts:
   now + 60 seconds. Send `error {code:"rate_limited"}` + close.
 - On successful `hello`: reset that IP's counter.
 - Entries expire after 5 minutes of inactivity (cleanup on connection).
+
+> **Correction to the draft (Task 1b-2):** the rate-limit state lives in the
+> singleton and survives `/rc` stop/start cycles within one pi process; a lockout
+> is only cleared by time (60 s), a successful hello, or process exit. The test
+> harness therefore runs its rate-limit tests last (group 11) so a lockout cannot
+> poison earlier tests in the same run.
 
 ## Part B — Swift app "Code" feature
 
@@ -909,8 +926,38 @@ Run order:
 1. `CodeMessageMapperTests` — pure mapping, no async
 2. `CodeServerClientTests` — framing and protocol with mock transport
 3. `CodeViewModelTests` — full state machine with `MockCodeServerClient`
-4. Full iOS test suite (regression)
-5. Build both schemes (iOS + macOS)
+4. `CodeEndToEndTests` — see C3.1
+5. Full iOS test suite (regression)
+6. Build both schemes (iOS + macOS)
+
+### C3.1. Swift end-to-end tests (automated, no app run)
+
+`CodeEndToEndTests` (`openclient-llm-test/Features/Code/`) exercises the real
+`CodeServerClient` (URLSession transport, no mocks) against a real pi process
+running the real rc extension — the full cross-language stack, driven from
+XCTest so no app has to be launched:
+
+- Each test spawns `pi --mode rpc --approve --no-session` in a temp copy of
+  `pi-extensions/rc/test-project`, toggles `/rc` over RPC, and reads the
+  pairing code from the `PI_RC_AUTH_FILE` auth file (the code is random per
+  toggle, so it is read, not hardcoded). The test then connects with the real
+  client and asserts on decoded `CodeEvent`s.
+- The LLM is a local deterministic stand-in: simulator test processes have
+  blocked egress and no API keys, so each test also runs `MockModelServer`, a
+  minimal OpenAI-compatible chat-completions server on 127.0.0.1 whose canned
+  replies are keyed on the test-project prompt markers (PONG-E2E, ASK,
+  ASKFORM, LONG). pi is pointed at it with `--provider openai
+  --model <mock> --base-url http://127.0.0.1:<port>`. The tests are therefore
+  hermetic: no network, no API key, no flaky model output.
+- pi binary resolution: `PI_RC_E2E_PI_BIN` env override → candidate paths
+  (homebrew, nvm, `~/.npm/_npx/*/node_modules/.bin/pi`) → `zsh -lc` lookup →
+  `XCTSkip` if not found (keeps the standard suite green where pi is absent).
+- Scenarios: connect → `helloOk`/`state`/`history` (decoded shapes);
+  prompt → `agent_start`…`agent_settled` events + history contains the prompt;
+  `ASK` → decoded `question` (options carry `value`) → answer →
+  `questionResolved(by: "client")`; `ASKFORM` → decoded `questionnaire` →
+  `answerQuestionnaire` → resolved; prompt-while-streaming →
+  `.notIdle` error → abort settles; ping/pong keep-alive.
 
 ### C4. End-to-end testing (manual, Task 4)
 

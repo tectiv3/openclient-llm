@@ -221,7 +221,7 @@ defer { _ = stream }
         let json = #"""
         {"type":"state","sessionId":"s1","cwd":"/tmp/project",
          "model":{"provider":"pi","id":"model-1"},"isStreaming":false,
-         "contextUsage":{"used":10,"total":100}}
+         "contextUsage":{"tokens":10,"contextWindow":100,"percent":10.0}}
         """#
         try XCTUnwrap(transport.lastTask).enqueue(json)
 
@@ -236,8 +236,9 @@ defer { _ = stream }
         XCTAssertEqual(info.cwd, "/tmp/project")
         XCTAssertEqual(info.model.id, "model-1")
         XCTAssertFalse(info.isStreaming)
-        XCTAssertEqual(info.contextUsage?.used, 10)
-        XCTAssertEqual(info.contextUsage?.total, 100)
+        XCTAssertEqual(info.contextUsage?.tokens, 10)
+        XCTAssertEqual(info.contextUsage?.contextWindow, 100)
+        XCTAssertEqual(info.contextUsage?.percent, 10.0)
     }
 
     func test_connect_historyJson_decodesHistoryEvent() async throws {
