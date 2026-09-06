@@ -1,5 +1,14 @@
 # Subagent Persistence & Resume
 
+Status: IMPLEMENTED (steps 1–6 committed: `155ef77` spawn+sidecars, `830e669` recoverable
+abort results, `5410ab2` resume parameter, `5624fa7` subagent_inspect, `c530903` /subagents,
+`810f6e4` README). Core verification cycle live-tested 2026-09-06 (see Verification).
+
+Related: `docs/plans/subagent-question-relay.md` — complementary, not alternative. This
+track makes aborted/failed runs *recoverable*; the relay track makes subagents able to
+*ask the user mid-task*. Both touch the same spawn region of `index.ts` — the relay must
+land after this track is fully done.
+
 Plan for extending `pi-extensions/subagent` (local fork of the pi coding-agent example,
 byte-identical to upstream `main` as of 2026-09-06, pi v0.85.1).
 Revised after plan-critic review (see "Critic revisions" below for the delta).
@@ -126,22 +135,30 @@ bug.
 
 ## Verification (ordered; step 0 first)
 
-0. **Esc during a running subagent keeps the parent pi alive and the tool returns an
-   error result to the model.** The whole decision #6 rests on this; confirm before
-   building further on it. (Ctrl+C quits the session — that is what destroyed the
-   critic run earlier; it is the wrong key for this test.)
-1. Success path: child runs, completes, leaves **no** files in `~/.pi/agent/subagents/`.
-2. Abort mid-run (Escape) after ≥2 child turns: error tool result carries partial output
-   + id; session file exists; inspect shows it; then resume (same agent, continuation
-   task) completes and files are cleaned up.
-3. Abort during first turn: no session file, error result states no partial output
-   available. Expected, not a bug.
-4. `kill -9` the child (after session file exists): inspect shows stale/interrupted
-   state; stale pidfile does not block resume.
-5. Resume from a different parent cwd: confirm L1 (child runs in original cwd).
-6. `/resume` picker in a project is unaffected by subagent dirs.
-7. Resume with wrong agent name / changed agent file / missing session: each guard fires
-   with a clear message.
+0. ✅ LIVE 2026-09-06 (both abort rounds): Esc kept the parent alive, the tool returned
+   an error *result* (not the old throw). (Ctrl+C quits the session — that is what
+   destroyed the critic run earlier; it is the wrong key for this test.)
+1. ✅ LIVE 2026-09-06: after both resumed runs completed, `~/.pi/agent/subagents/` was
+   empty (cleanup-on-success via the resume path; a fresh success path shares it).
+2. ✅ LIVE 2026-09-06 (run `01a077e6`): abort after 2 child turns → error result carried
+   partial output + id; session file existed; `subagent_inspect` showed status/usage/
+   transcript; resume (same agent, continuation task) completed; artifacts cleaned up.
+3. ✅ LIVE 2026-09-06, with nuance (run `01a077df`): abort during the first turn returned
+   "No partial output was persisted". Nuance: the child's first turn had already hit
+   `message_end` as a *tool-call-only* message, so the session file DID exist (inspect
+   showed the turn) — the extension's message refers to text output, which is what
+   matters. The plan's "no session file" sub-case (abort before ANY message_end) was not
+   exercised.
+4. ⬜ NOT DONE: `kill -9` the child (after session file exists): inspect shows
+   stale/interrupted state; stale pidfile does not block resume.
+5. ⬜ NOT DONE: Resume from a different parent cwd: confirm L1 (child runs in original
+   cwd).
+6. ⬜ NOT DONE: `/resume` picker in a project is unaffected by subagent dirs.
+7. ⬜ NOT DONE: Resume with wrong agent name / changed agent file / missing session: each
+   guard fires with a clear message.
+
+Unverified edge cases 4–7 are low-value individually; 4 (stale pidfile) is the one with
+real-world teeth if the parent pi process ever dies mid-subagent.
 
 ## Explicitly out of scope
 

@@ -1,7 +1,14 @@
 # Subagent question relay — state, plan, ideas
 
-Status: PARKED (live breakage must be un-reverted first; APNs push is the active priority).
+Status: PARKED (APNs push Swift client is the active priority; revisit after it ships).
 Date: 2026-09-06.
+
+Related: `docs/plans/subagent-persistence.md` — complementary, not alternative.
+Persistence makes aborted/failed runs *recoverable*; this track makes subagents able to
+*ask the user mid-task* (the question tools are still dead in headless children). Both
+touch the same spawn region of `index.ts` — this relay must land AFTER the
+persistence track is fully done, or the two will rebase through each other.
+Model-inheritance open question 1 is resolved by the fork (see "Repo fork" below).
 
 ## Goal
 
@@ -13,12 +20,17 @@ to the child, so a subagent can ask the human mid-task.
 
 ## Current state (verified 2026-09-06)
 
-### Live breakage (must fix before anything else)
+### Live breakage (RESOLVED 2026-09-06 — diagnosis kept below)
 
-- Live subagent extension: `~/.pi/agent/extensions/subagent/index.ts` is a
-  **symlink** to `pi-mono/packages/coding-agent/examples/extensions/subagent/index.ts`.
-  That working tree carries an **uncommitted** diff that spawns children with
-  `stdio: ["pipe","pipe","pipe"]` + `env: { PI_SUBAGENT_RELAY: "1" }`.
+- RESOLVED: the live extension `~/.pi/agent/extensions/subagent/index.ts` is now a
+  **symlink to the repo fork** `pi-extensions/subagent/` (committed `5c0e921`), spawned
+  clean (`--no-session` equivalent, no stdio pipes, no relay env). The pi-mono
+  uncommitted relay diff is no longer reachable from live sessions. The stdin root-cause
+  diagnosis below is unchanged and is WHY the socket design exists.
+- (Historical) The breakage: the live symlink pointed at
+  `pi-mono/packages/coding-agent/examples/extensions/subagent/index.ts` carrying an
+  **uncommitted** diff that spawned children with `stdio: ["pipe","pipe","pipe"]` +
+  `env: { PI_SUBAGENT_RELAY: "1" }`.
 - Root cause, verified against installed pi 0.85.1 (`dist/main.js`):
   `if (appMode !== "rpc") await readPipedStdin()`, and `readPipedStdin()`
   returns early only when `process.stdin.isTTY`; on a kept-open non-TTY pipe it
@@ -45,15 +57,22 @@ to the child, so a subagent can ask the human mid-task.
 - The parent's stdout parser swallows non-JSON lines (try/catch → skip), so
   stdout pollution was never the parsing risk — the fatal flaw is fd 0 only.
 
-### Repo fork (in flight, per user)
+### Repo fork (DONE `5c0e921`)
 
-The subagent extension will be forked from pi-mono into this repo
-(`pi-extensions/subagent/`), and the live symlinks repointed here. That puts
-all three extensions — question, questionnaire, subagent — under one repo, so
-the relay protocol is fully ours to design (no pi core patching, no upstream
-constraints). Fork copy should be the clean pre-relay version; the relay is
-re-added separately with the socket design below; model inheritance is a
-separate deliberate keep/drop decision.
+The subagent extension is forked into this repo (`pi-extensions/subagent/`) and the
+live symlink repointed here. All three extensions — question, questionnaire, subagent
+— are under one repo, so the relay protocol is fully ours to design (no pi core
+patching, no upstream constraints). The fork copy is the clean pre-relay version; the
+relay is re-added separately with the socket design below.
+
+Model inheritance (open question 1 — RESOLVED): the fork **keeps** it —
+`dispatchDefaults.model` is built from `ctx.model` (parent's active model) at
+registration, and the child uses `agent.model ?? dispatchDefaults.model`.
+Observed caveat (live, 2026-09-06): agent model pins that are unresolvable in the
+pi config are **silently ignored** — `scout` pins `claude-haiku-4-5`, which is absent
+from `~/.pi/agent/*.json`, and both live scout runs executed on the config default
+(`lmstudio/qwen3.8-27b`). Unresolved: should an unresolvable pin fall back silently
+(current) or be surfaced as an error?
 
 ## Why stdin cannot work
 
