@@ -10122,6 +10122,12 @@
         }
       }
     },
+    "Failed to send — tap to retry" : {
+
+    },
+    "Failed to send. Tap to retry." : {
+
+    },
     "Favourites" : {
       "comment" : "A title for a screen that shows the user's favourite messages.",
       "localizations" : {
