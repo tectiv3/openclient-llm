@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { execFileSync } from 'node:child_process'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { runPushSetup } from './push-setup'
 
 const RC_KEY = Symbol.for('pi-rc')
 const PORT = 47800
@@ -1094,10 +1095,25 @@ export default function rc(pi: ExtensionAPI): void {
     state.handleSocketData = (client, chunk) => handleSocketData(state, client, chunk)
     registerEventHandlers(pi, state)
     pi.registerCommand('rc', {
-        description: 'Toggle remote-control WebSocket server',
-        handler: async (_args, ctx) => {
+        description: 'Toggle remote-control WebSocket server (subcommand: push-setup)',
+        getArgumentCompletions: (argumentPrefix: string) =>
+            argumentPrefix === '' || 'push-setup'.startsWith(argumentPrefix)
+                ? [
+                      {
+                          value: 'push-setup',
+                          label: 'push-setup',
+                          description: 'Configure APNs push delivery for the rc app',
+                      },
+                  ]
+                : null,
+        handler: async (args, ctx) => {
             dbgLog('command /rc invoked')
             state.bind(pi, ctx)
+            if (args.trim() === 'push-setup') {
+                dbgLog('command /rc push-setup invoked')
+                await runPushSetup(state, ctx.ui, sessionId(state))
+                return
+            }
             if (state.server) {
                 await state.stop('toggled_off', 'manual /rc toggle off')
                 ctx.ui.notify('rc stopped', 'info')
