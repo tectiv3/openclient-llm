@@ -20,7 +20,7 @@ APNs push covers the suspended case.
 | 1 | Delivery path | APNs **direct from the pi rc server** (not a Casa/relay proxy). APNs is a public HTTPS/HTTP2 endpoint; the rc server needs only outbound egress, which it already has (LLM calls). Rejected: local notifications only (dead after the ~30 s background window — the case this feature targets); silent push (content-available) to wake the app (throttled by Apple for battery, unreliable); Casa proxy (extra hop, no benefit — Casa would only be for the app, not for pushing to the app) |
 | 2 | Trigger points | `agent_settled` → "Agent finished" (normal); `ask()` creating a remote question → "Agent has a question — answer needed" with `timeSensitive`. Push bodies are **fixed strings, chosen at send time by the server** — no LLM-generated or agent/user-controlled text in any push payload. Only when a token is registered |
 | 3 | Server impl | Node stdlib only (constraint preserved): `node:http2` + `node:tls` for APNs HTTP/2 over TLS, `node:crypto` for a per-send ES256 JWT (5-min TTL) from a P-256 key parsed out of a `.p8` PEM file |
-| 4 | Config | Env vars on the pi machine, nothing committed. Push is **disabled** (no-op, single log line) unless key file + team id + key id are all set; all other RC features unaffected |
+| 4 | Config | Env vars on the pi machine (`PI_RC_APNS_*`) or `~/.pi/agent/rc-push.json` (written by the `/rc push-setup` command, chmod 600, holds team id + key id + key path — never key contents); env overrides config file. Nothing committed. Push is **disabled** (no-op, single log line) unless key file + team id + key id are all set; all other RC features unaffected |
 | 5 | Protocol | Additive: one new client→server message `push_token`. **No new server→client messages** — pushes go via APNs, never over the WS |
 | 6 | Token lifetime | **Singleton-persistent**: the last-registered token wins and is kept on the pi-rc singleton (globalThis state, consistent with the existing RC singleton's `clients`/streaming state). Survives client disconnects and process-suspension churn on the phone. This is what makes pushes work for the **full phone-suspension lifetime**: by then the WS is dead and the client's reconnects may be exhausted, so a per-connection token would be long gone before the push is triggered. Accepted trade-off: a tailnet client running the current client code could register *its own* device token and replace the stored one — but APNs device tokens are per-device, so this **redirects pushes only** (and the payload carries no agent/user text, so there is nothing sensitive to leak) |
 | 7 | iOS app | Push capability + Time Sensitive Notifications entitlement; `registerForRemoteNotifications` at app init; notification authorization requested contextually on first RC connect (not at launch). Push registration code is `#if os(iOS)` — macOS target must compile, macOS gets no push |
@@ -90,9 +90,11 @@ the session is connected (covers token arrival/refresh mid-session).
 
   `apns-notification-traversal` is **not** used. Cache one h2 session per
   authority; recreate on error.
-- **Config** (env on the pi machine; push disabled unless all three of
-  key file / team id / key id are set — log once "APNs push disabled (missing
-  PI_RC_APNS_*)", every other RC feature unaffected):
+- **Config** (env vars or `~/.pi/agent/rc-push.json` via `/rc
+  push-setup` — see the `/rc push-setup command` section; env overrides
+  the config file; push disabled unless all three of key file / team id /
+  key id are set — log once "APNs push disabled (missing PI_RC_APNS_*)",
+  every other RC feature unaffected):
   - `PI_RC_APNS_KEY_FILE` — path to the `.p8` private key (never committed)
   - `PI_RC_APNS_TEAM_ID`
   - `PI_RC_APNS_KEY_ID`
@@ -144,6 +146,83 @@ one push. The accepted trade-off (Decision 6): a tailnet client with the
 current code could replace the token and redirect pushes to its own device —
 harmless in practice because the payload is fixed text with no session
 content.
+
+## /rc push-setup command
+
+Explicit setup command alongside the `/rc` toggle. Replaces the
+env-var-export step as the primary way to configure push on the pi
+machine (env vars remain supported — see config precedence below).
+
+- **Registration**: the existing `pi.registerCommand('rc', ...)` in
+  `pi-extensions/rc/index.ts`. Its handler has signature
+  `(args: string, ctx) => Promise<void>` and currently ignores `_args`
+  (pure toggle). Add a branch inside the same handler:
+  `args.trim() === 'push-setup'` → run the setup flow; any other args
+  keep the existing toggle behavior (a bare `/rc` still toggles).
+  Optional: `getArgumentCompletions` suggesting `push-setup`.
+- **What it collects** — three prompts, in order: (1) APNs Team ID,
+  (2) APNs Key ID, (3) the FILE PATH to the `.p8` private key.
+  **Never prompt for key contents** — ask() answers transit the WS and
+  land in the pi session transcript, so anything prompted for becomes
+  session content; only IDs and a path are ever asked.
+- **Prompt transport** (same dual path as the question extension,
+  `pi-extensions/question/index.ts`):
+  - If `rc.isServing() && rc.hasConnectedClients()` →
+    `rc.ask({ kind: 'question', params: { question, options: [],
+    allowOther: true } })`; the answer comes from the connected
+    phone's question modal (free-text entry) as
+    `{ value, wasCustom }`, or `null`.
+  - Otherwise → TUI `ctx.ui.input(title, placeholder)`; returns a
+    string or `undefined`.
+  Both paths surface cancellation as a nullish result. Note on
+  `rc.ask()` cancellation semantics (verified in `index.ts`): it
+  resolves `null` immediately when the server is not serving or no
+  client is connected, and the pending ask is also resolved `null`
+  (with a `question_resolved { by: 'cancelled' }` broadcast) when a new
+  ask supersedes it or the server stops — so a `null` answer always
+  means "cancelled/aborted", never a real value.
+- **Validation** (per value, immediately when it arrives; an invalid
+  value re-asks the same question, with the precise reason):
+  - Team ID and Key ID: exactly 10 alphanumeric characters
+    (`/^[A-Za-z0-9]{10}$/`).
+  - Key file path (expand a leading `~`): file exists and is readable;
+    parses via `crypto.createPrivateKey({ key: <pem>, format: 'pem',
+    type: 'pkcs8' })` as a P-256 EC key; and a test signature of a
+    fixed buffer via `crypto.sign('sha256', buf, { key,
+    dsaEncoding: 'ieee-p1363' })` yields exactly 64 bytes. (Same
+    ES256/IEEE-P1363 trap as the JWT path above: Node's default DER
+    encoding would pass a naive parse but is rejected by APNs.)
+  - Cross-check: if the key file's basename matches
+    `AuthKey_<KEYID>.p8`, compare the embedded KEYID against the
+    entered Key ID; on mismatch, confirm via one more prompt (remote
+    question or TUI confirm) — do not silently accept.
+- **Persistence**: `~/.pi/agent/rc-push.json`, written `chmod 600`
+  (same pattern as the rc auth-file writer: write to a temp file in the
+  same directory, `rename` over the target — atomic, and only after
+  all three values are validated):
+
+    { "teamId": "<TEAM_ID>", "keyId": "<KEYID>", "keyFile": "<path to AuthKey_<KEYID>.p8>" }
+
+  (placeholder values, not real IDs)
+- **Config precedence** (the APNs module reads config once at first
+  use / on `/rc` toggle-on): env vars `PI_RC_APNS_TEAM_ID` /
+  `PI_RC_APNS_KEY_ID` / `PI_RC_APNS_KEY_FILE` (when set) **override**
+  the config file, field by field. `PI_RC_APNS_HOST` stays env-only —
+  it is a test seam and is never read from or written to the config
+  file.
+- **Output**: a confirmation summarizing the effective source per
+  value (env vs config file) and the validation results, or the
+  precise failure reason. If push is already fully configured, report
+  the current source (env vs `rc-push.json`) up front and offer
+  re-entry, which rewrites the config file (env vars are not
+  modifiable by the command).
+- **Failure / cancellation handling**: any `null` answer (cancel on
+  either transport, or `rc.ask()` returning `null` because the phone
+  disconnected / the server stopped) → print a short guidance line
+  (what `/rc push-setup` expects, where the `.p8` lives) and exit.
+  **No partial writes**: the config file is written exactly once,
+  after all three values are collected and validated (atomic
+  temp-file + rename).
 
 ## iOS app
 
@@ -279,10 +358,14 @@ content.
 3. **APNs key**: Certificates, Identifiers & Profiles → Keys → "Apple Push
    Notifications" key (ES256) → download `.p8` once; note the Key ID. Note
    the Team ID from the account page.
-4. **pi machine**: place the `.p8` (e.g. `~/.pi/agent/apns/AuthKey_<ID>.p8`)
-   and set `PI_RC_APNS_KEY_FILE`, `PI_RC_APNS_TEAM_ID`, `PI_RC_APNS_KEY_ID`
-   in the pi process env (`PI_RC_APNS_TOPIC` defaults correctly; leave
-   `PI_RC_APNS_HOST` unset). Verify the "APNs push enabled" / "disabled"
+4. **pi machine**: place the `.p8` (e.g. `~/.pi/agent/apns/AuthKey_<ID>.p8`
+   — placeholder, use the real filename) and run `/rc push-setup` to
+   record the Team ID, Key ID, and key path in
+   `~/.pi/agent/rc-push.json` (chmod 600). Env vars
+   (`PI_RC_APNS_KEY_FILE` / `PI_RC_APNS_TEAM_ID` / `PI_RC_APNS_KEY_ID`)
+   remain an alternative/override; if set, they win over the config
+   file. `PI_RC_APNS_TOPIC` defaults correctly; leave
+   `PI_RC_APNS_HOST` unset. Verify the "APNs push enabled" / "disabled"
    log line on `/rc` toggle-on.
 5. **Phone**: re-install the app build with the push capability; open the
    Code tab, connect once (authorization prompt appears), lock the phone,
