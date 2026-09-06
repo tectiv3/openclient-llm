@@ -18,46 +18,7 @@ no TUI and usually no RC server — the tools are dead. This feature relays a
 child's question to the **parent session's TUI** and returns the user's answer
 to the child, so a subagent can ask the human mid-task.
 
-## Current state (verified 2026-09-06)
-
-### Live breakage (RESOLVED 2026-09-06 — diagnosis kept below)
-
-- RESOLVED: the live extension `~/.pi/agent/extensions/subagent/index.ts` is now a
-  **symlink to the repo fork** `pi-extensions/subagent/` (committed `5c0e921`), spawned
-  clean (`--no-session` equivalent, no stdio pipes, no relay env). The pi-mono
-  uncommitted relay diff is no longer reachable from live sessions. The stdin root-cause
-  diagnosis below is unchanged and is WHY the socket design exists.
-- (Historical) The breakage: the live symlink pointed at
-  `pi-mono/packages/coding-agent/examples/extensions/subagent/index.ts` carrying an
-  **uncommitted** diff that spawned children with `stdio: ["pipe","pipe","pipe"]` +
-  `env: { PI_SUBAGENT_RELAY: "1" }`.
-- Root cause, verified against installed pi 0.85.1 (`dist/main.js`):
-  `if (appMode !== "rpc") await readPipedStdin()`, and `readPipedStdin()`
-  returns early only when `process.stdin.isTTY`; on a kept-open non-TTY pipe it
-  blocks until EOF. Children run `--mode json -p --no-session` → they hang at
-  startup, before any extension loads. **Every subagent invocation hangs.**
-- The uncommitted pi-mono diff mixes TWO features:
-  1. **Relay (the breakage)**: stdio pipe, `PI_SUBAGENT_RELAY=1`,
-     `relaySubagentQuestion()` (`ctx.ui.select`/`input` → answer written to the
-     child's stdin), and a `pi_subagent_question` branch in the parent's
-     child-stdout NDJSON loop.
-  2. **Model inheritance** (orthogonal, ALSO uncommitted — not in any pi-mono
-     commit; last committed change to the extension is `8af7690c4`): child
-     inherits the parent's active model unless frontmatter pins one.
-- Child side, committed in openclient-llm as `5b59248`
-  (`pi-extensions/question/index.ts`, `pi-extensions/questionnaire/index.ts`):
-  path order RC → TUI → relay → error. Relay path (gated on
-  `PI_SUBAGENT_RELAY=1`) writes `{"type":"pi_subagent_question", id, kind, ...}`
-  to stdout and awaits a `{"type":"pi_subagent_question_response", id, answer,
-  cancelled}` line on stdin; EOF → "cancelled or closed" error. Without the env
-  var the child degrades gracefully to the plain "UI not available" error — so
-  removing the parent env line alone makes the committed child code safe.
-- Live `~/.pi/agent/extensions/{question,questionnaire}/index.ts` are **plain
-  files** (not symlinks), currently byte-identical to the repo files.
-- The parent's stdout parser swallows non-JSON lines (try/catch → skip), so
-  stdout pollution was never the parsing risk — the fatal flaw is fd 0 only.
-
-### Repo fork (DONE `5c0e921`)
+## Current state
 
 The subagent extension is forked into this repo (`pi-extensions/subagent/`) and the
 live symlink repointed here. All three extensions — question, questionnaire, subagent
@@ -111,9 +72,9 @@ from `~/.pi/agent/*.json`, and both live scout runs executed on the config defau
 
 ## Open questions (decision log)
 
-1. ~~Scope of immediate revert~~ — resolved by the fork: live file becomes the
-   repo copy. Decision still needed: does the fork carry model inheritance
-   (keep / drop / ship untested)?
+1. ~~Scope of immediate revert~~ — resolved by the fork (DONE `5c0e921`): live file
+   becomes the repo copy. ~~Does the fork carry model inheritance~~ — resolved:
+   kept (see "Repo fork" above), with the silent-fallback caveat on unresolvable pins.
 2. v1 scope: question only vs question + questionnaire.
 3. Response timeout value (30 min proposed) and whether per-question reconnect
    is acceptable (proposed: yes).
