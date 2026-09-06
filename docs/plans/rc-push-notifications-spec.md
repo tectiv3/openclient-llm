@@ -73,9 +73,11 @@ the session is connected (covers token arrival/refresh mid-session).
   aud: "apns", iat: now, exp: now + 300 }` (APNs rejects a JWT missing `kid`
   in the header, `sub`, or `aud: "apns"`). Key object from
   `crypto.createPrivateKey({ key: <p8 PEM>, format: "pem", type: "pkcs8" })`
-  (P-256); signature via `crypto.sign("sha256", data, p256Key)` — this yields
-  raw R||S (64 bytes), which is exactly the format APNs expects for ES256, so
-  no DER→raw conversion is needed. Base64url parts.
+  (P-256); signature via `crypto.sign("sha256", data, { key: p256Key,
+  dsaEncoding: "ieee-p1363" })` — the `dsaEncoding` option is REQUIRED: Node's
+  default for EC keys is DER (~71 bytes, verified), which APNs rejects; IEEE
+  P-1363 yields the raw R||S (64 bytes) format APNs expects for ES256.
+  Base64url parts.
 - **Send**: APNs speaks HTTP/2 **over TLS** — connect with `tls.connect` to
   the authority (default `api.push.apple.com:443`), then `http2.connect` on
   that socket; plaintext h2 is not acceptable. `POST /3/device/<token>` with
