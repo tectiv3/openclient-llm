@@ -3,7 +3,6 @@
 //  openclient-llm
 //
 //  Created by tectiv3 on 05/09/2026.
-//  Copyright © 2026 Arturo Carretero Calvo. All rights reserved.
 //
 
 import Foundation
