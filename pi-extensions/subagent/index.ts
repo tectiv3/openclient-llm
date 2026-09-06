@@ -40,6 +40,8 @@ const INSPECT_DEFAULT_LIMIT = 20;
 const INSPECT_TASK_PREVIEW_CHARS = 200;
 const INSPECT_ENTRY_PREVIEW_CHARS = 100;
 const INSPECT_FINAL_OUTPUT_CAP = 2000;
+const LIST_ID_SHORT_CHARS = 8;
+const LIST_TASK_PREVIEW_CHARS = 60;
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -72,6 +74,11 @@ function formatUsageStats(
 	}
 	if (model) parts.push(model);
 	return parts.join(" ");
+}
+
+function previewText(text: string, maxChars: number): string {
+	const collapsed = text.replace(/\s+/g, " ").trim();
+	return collapsed.length > maxChars ? `${collapsed.slice(0, maxChars)}...` : collapsed;
 }
 
 function formatToolCall(
@@ -396,10 +403,9 @@ function listPersistedSubagents(): PersistedSubagentEntry[] {
 function formatPersistedSubagentsList(entries: PersistedSubagentEntry[]): string[] {
 	return entries.map((entry) => {
 		if (!entry.meta) return `- ${entry.id} — (meta sidecar unreadable)`;
-		const taskPreview = entry.meta.task.replace(/\s+/g, " ").trim();
-		return `- ${entry.id} — agent: ${entry.meta.agent}, status: ${entry.meta.status ?? "unknown"}, task: ${
-			taskPreview.length > 60 ? `${taskPreview.slice(0, 60)}...` : taskPreview
-		}`;
+		return `- ${entry.id} — agent: ${entry.meta.agent}, status: ${
+			entry.meta.status ?? "unknown"
+		}, task: ${previewText(entry.meta.task, LIST_TASK_PREVIEW_CHARS)}`;
 	});
 }
 
@@ -414,6 +420,42 @@ function formatAvailableSubagentsError(resumeId: string): string {
 	return [
 		`No subagent found with id "${resumeId}" (completed runs are cleaned up). Available subagents:`,
 		...formatPersistedSubagentsList(entries),
+	].join("\n");
+}
+
+function formatSessionFileSize(sessionPath: string): string {
+	try {
+		const bytes = fs.statSync(sessionPath).size;
+		if (bytes < 1024) return `${bytes} B`;
+		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} kB`;
+		return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+	} catch {
+		// pi creates the session file at the first message_end, so runs interrupted
+		// before that point have no file yet.
+		return "no file yet";
+	}
+}
+
+function buildSubagentsListReport(): string {
+	// Successful runs are cleaned up, so every persisted entry is running, interrupted, or failed.
+	// Missing-meta entries fall back to the uuidv7 id, which embeds a creation timestamp.
+	const entries = [...listPersistedSubagents()].sort(
+		(a, b) => (b.meta?.startedAt ?? b.id).localeCompare(a.meta?.startedAt ?? a.id),
+	);
+	if (entries.length === 0) return "No persisted subagent sessions.";
+
+	const dir = getSubagentsDir();
+	const lines = entries.map((entry) => {
+		const status = formatSubagentStatus(deriveSubagentRunStatus(entry.id, entry.meta));
+		const agent = entry.meta?.agent ?? "unknown";
+		const task = entry.meta ? previewText(entry.meta.task, LIST_TASK_PREVIEW_CHARS) : "(meta sidecar unreadable)";
+		const size = formatSessionFileSize(getSubagentFilePaths(entry.id).session);
+		return `- ${entry.id.slice(0, LIST_ID_SHORT_CHARS)} — agent: ${agent}, status: ${status}, size: ${size}, task: ${task}`;
+	});
+	return [
+		...lines,
+		`${entries.length} persisted subagent session${entries.length === 1 ? "" : "s"} in ${dir}`,
+		`inspect: subagent_inspect <id>; resume: subagent {agent, task, resume}; delete: rm ${dir}/<id>.*`,
 	].join("\n");
 }
 
@@ -492,6 +534,24 @@ function readSubagentPid(pidPath: string): number | undefined {
 	}
 }
 
+interface SubagentRunStatus {
+	status: string;
+	runningPid?: number;
+}
+
+function deriveSubagentRunStatus(subagentId: string, meta: SubagentMeta | undefined): SubagentRunStatus {
+	const { pid: pidPath } = getSubagentFilePaths(subagentId);
+	const pid = readSubagentPid(pidPath);
+	if (pid !== undefined && isProcessAlive(pid)) return { status: "running", runningPid: pid };
+	// Stale pidfile (parent crashed before cleanup): unlock so the run stays resumable.
+	if (pid !== undefined) removeSubagentFile(pidPath);
+	return { status: meta?.status ?? "unknown" };
+}
+
+function formatSubagentStatus(runStatus: SubagentRunStatus): string {
+	return runStatus.runningPid !== undefined ? `${runStatus.status} (pid ${runStatus.runningPid})` : runStatus.status;
+}
+
 function parseSubagentTranscript(sessionPath: string): Message[] {
 	let content: string;
 	try {
@@ -541,7 +601,7 @@ function plainThemeFg(_color: any, text: string): string {
 }
 
 function buildSubagentInspectReport(subagentId: string, limit: number): string {
-	const { session: sessionPath, pid: pidPath, meta: metaPath } = getSubagentFilePaths(subagentId);
+	const { session: sessionPath, meta: metaPath } = getSubagentFilePaths(subagentId);
 
 	let meta: SubagentMeta | undefined;
 	try {
@@ -550,28 +610,14 @@ function buildSubagentInspectReport(subagentId: string, limit: number): string {
 		/* absent or unreadable sidecar */
 	}
 
-	let status: string;
-	let runningPid: number | undefined;
-	const pid = readSubagentPid(pidPath);
-	if (pid !== undefined && isProcessAlive(pid)) {
-		status = "running";
-		runningPid = pid;
-	} else {
-		// Stale pidfile (parent crashed before cleanup): unlock so the run stays resumable.
-		if (pid !== undefined) removeSubagentFile(pidPath);
-		status = meta?.status ?? "unknown";
-	}
+	const runStatus = deriveSubagentRunStatus(subagentId, meta);
+	const status = runStatus.status;
 
 	const lines: string[] = [`Subagent: ${subagentId}`];
-	lines.push(`Status: ${status}${runningPid !== undefined ? ` (pid ${runningPid})` : ""}`);
+	lines.push(`Status: ${formatSubagentStatus(runStatus)}`);
 	if (meta) {
 		lines.push(`Agent: ${meta.agent}`);
-		const taskPreview = meta.task.replace(/\s+/g, " ").trim();
-		const truncatedTask =
-			taskPreview.length > INSPECT_TASK_PREVIEW_CHARS
-				? `${taskPreview.slice(0, INSPECT_TASK_PREVIEW_CHARS)}...`
-				: taskPreview;
-		lines.push(`Task: ${truncatedTask}`);
+		lines.push(`Task: ${previewText(meta.task, INSPECT_TASK_PREVIEW_CHARS)}`);
 		if (meta.model) lines.push(`Model: ${meta.model}`);
 		lines.push(`Started: ${meta.startedAt}`);
 		if ((meta.resumedCount ?? 0) > 0) {
@@ -1567,6 +1613,16 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, _options, _theme, _context) {
 			const text = result.content[0];
 			return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+		},
+	});
+
+	pi.registerCommand("subagents", {
+		description: "List persisted subagent sessions (running, aborted, or failed runs)",
+		handler: async (_args, ctx) => {
+			const report = buildSubagentsListReport();
+			// ctx.ui.notify is a no-op without a UI (pi -p / --mode json); print mode writes to stdout instead.
+			if (ctx.mode === "print") console.log(report);
+			else ctx.ui.notify(report, "info");
 		},
 	});
 }
