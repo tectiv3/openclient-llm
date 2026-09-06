@@ -33,7 +33,7 @@ export type ApnsConfig = {
 }
 
 export type PushOutcome =
-    | { ok: 'sent'; status: number }
+    | { ok: 'sent'; status: number; reason?: string }
     | { ok: 'disabled'; reason: string }
     | { ok: 'no_token' }
     | { ok: 'dropped'; status: number; reason?: string }
@@ -60,19 +60,46 @@ function envValue(name: string): string | undefined {
     return value ? value : undefined
 }
 
-function readConfigFile(): { teamId?: string; keyId?: string; keyFile?: string } {
+function readRawConfig(): JsonObject {
     try {
         const parsed: unknown = JSON.parse(readFileSync(apnsConfigPath(), 'utf8'))
         if (typeof parsed !== 'object' || parsed === null) return {}
-        const out: { teamId?: string; keyId?: string; keyFile?: string } = {}
-        for (const field of ['teamId', 'keyId', 'keyFile'] as const) {
-            const value = (parsed as JsonObject)[field]
-            if (typeof value === 'string' && value.length > 0) out[field] = value
-        }
-        return out
+        return parsed as JsonObject
     } catch {
         return {}
     }
+}
+
+function writeRawConfig(obj: JsonObject): void {
+    const path = apnsConfigPath()
+    const dir = dirname(path)
+    if (dir !== '.' && !existsSync(dir)) mkdirSync(dir, { recursive: true })
+    const tempFile = `${path}.${process.pid}.${Date.now()}.tmp`
+    writeFileSync(tempFile, `${JSON.stringify(obj, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+    renameSync(tempFile, path)
+}
+
+function readConfigFile(): { teamId?: string; keyId?: string; keyFile?: string } {
+    const raw = readRawConfig()
+    const out: { teamId?: string; keyId?: string; keyFile?: string } = {}
+    for (const field of ['teamId', 'keyId', 'keyFile'] as const) {
+        const value = raw[field]
+        if (typeof value === 'string' && value.length > 0) out[field] = value
+    }
+    return out
+}
+
+export function readStoredDeviceToken(): string | null {
+    const value = readRawConfig().token
+    if (typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value)) return value.toLowerCase()
+    return null
+}
+
+export function saveDeviceToken(token: string | null): void {
+    const raw = readRawConfig()
+    if (token === null) delete raw.token
+    else raw.token = token
+    writeRawConfig(raw)
 }
 
 // Resolved on every use rather than cached: /rc push-setup can rewrite the
@@ -126,15 +153,8 @@ export function missingConfigFields(): string {
 }
 
 export function writeApnsConfig(teamId: string, keyId: string, keyFile: string): void {
-    const path = apnsConfigPath()
-    const dir = dirname(path)
-    if (dir !== '.' && !existsSync(dir)) mkdirSync(dir, { recursive: true })
-    const tempFile = `${path}.${process.pid}.${Date.now()}.tmp`
-    writeFileSync(tempFile, `${JSON.stringify({ teamId, keyId, keyFile }, null, 2)}\n`, {
-        encoding: 'utf8',
-        mode: 0o600,
-    })
-    renameSync(tempFile, path)
+    // Merge, not replace: a saved device token survives a push-setup rewrite.
+    writeRawConfig({ ...readRawConfig(), teamId, keyId, keyFile })
 }
 
 export function loadApnsKey(keyFile: string): KeyValidation {
@@ -304,8 +324,8 @@ export async function sendApnsPush(
         dbgLog('apns push: device token invalid (status', result.status, 'reason', result.reason ?? '-', '— token dropped')
         return { ok: 'dropped', status: result.status, reason: result.reason }
     }
-    dbgLog('apns push sent: status', result.status, 'collapseId', collapseId)
-    return { ok: 'sent', status: result.status }
+    dbgLog('apns push sent: status', result.status, 'reason', result.reason ?? '-', 'collapseId', collapseId)
+    return { ok: 'sent', status: result.status, reason: result.reason }
 }
 
 function postToApns(
