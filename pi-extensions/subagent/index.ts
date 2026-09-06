@@ -160,6 +160,7 @@ interface SingleResult {
 	usage: UsageStats;
 	model?: string;
 	stopReason?: string;
+	aborted?: boolean;
 	errorMessage?: string;
 	step?: number;
 }
@@ -197,7 +198,9 @@ function getFinalOutput(messages: Message[]): string {
 }
 
 function isFailedResult(result: SingleResult): boolean {
-	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+	return (
+		result.aborted === true || result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted"
+	);
 }
 
 function getResultOutput(result: SingleResult): string {
@@ -205,6 +208,38 @@ function getResultOutput(result: SingleResult): string {
 		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
 	}
 	return getFinalOutput(result.messages) || "(no output)";
+}
+
+function sessionArtifactsPersisted(result: SingleResult): boolean {
+	if (!result.subagentId) return false;
+	const { session, meta } = getSubagentFilePaths(result.subagentId);
+	return fs.existsSync(session) || fs.existsSync(meta);
+}
+
+function formatResumeHint(result: SingleResult): string | null {
+	// Resume is only meaningful when spawn artifacts exist; pre-spawn failures
+	// (e.g. unknown agent) leave nothing to inspect or resume.
+	if (!sessionArtifactsPersisted(result)) return null;
+	return [
+		`Subagent ID: ${result.subagentId}`,
+		`Inspect with subagent_inspect; continue with subagent ` +
+			`{agent: "${result.agent}", task: "<continuation instruction>", resume: "${result.subagentId}"}.`,
+	].join("\n");
+}
+
+function formatFailureReport(result: SingleResult): string {
+	const outcome = result.aborted
+		? "aborted"
+		: `failed${result.stopReason && result.stopReason !== "end" ? ` (${result.stopReason})` : ""}`;
+	const lines: string[] = [`Agent "${result.agent}" ${outcome}.`];
+	const diagnostic = result.errorMessage || result.stderr.trim();
+	if (diagnostic) lines.push(diagnostic);
+	const partialOutput = getFinalOutput(result.messages);
+	if (partialOutput) lines.push(`Partial output:\n${partialOutput}`);
+	else if (result.aborted) lines.push("No partial output was persisted before interruption.");
+	const hint = formatResumeHint(result);
+	if (hint) lines.push(hint);
+	return lines.join("\n\n");
 }
 
 function truncateParallelOutput(output: string): string {
@@ -488,9 +523,10 @@ async function runSingleAgent(
 				currentResult.stderr += data.toString();
 			});
 
-			proc.on("close", (code) => {
+			proc.on("close", (code, killSignal) => {
 				if (buffer.trim()) processLine(buffer);
-				resolve(code ?? 0);
+				// Signal kills report code === null; a killed child must not look successful.
+				resolve(killSignal ? 1 : (code ?? 0));
 			});
 
 			proc.on("error", () => {
@@ -511,6 +547,10 @@ async function runSingleAgent(
 		});
 
 		currentResult.exitCode = exitCode;
+		if (wasAborted) {
+			currentResult.aborted = true;
+			currentResult.stopReason = "aborted";
+		}
 
 		const status = wasAborted ? "aborted" : isFailedResult(currentResult) ? "failed" : "succeeded";
 		removeSubagentFile(pidPath);
@@ -527,7 +567,6 @@ async function runSingleAgent(
 			});
 		}
 
-		if (wasAborted) throw new Error("Subagent was aborted");
 		return currentResult;
 	} finally {
 		if (tmpPromptPath)
@@ -692,9 +731,13 @@ export default function (pi: ExtensionAPI) {
 
 					const isError = isFailedResult(result);
 					if (isError) {
-						const errorMsg = getResultOutput(result);
 						return {
-							content: [{ type: "text", text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}` }],
+							content: [
+								{
+									type: "text",
+									text: `Chain stopped at step ${i + 1} (${step.agent}):\n\n${formatFailureReport(result)}`,
+								},
+							],
 							details: makeDetails("chain")(results),
 							isError: true,
 						};
@@ -775,18 +818,25 @@ export default function (pi: ExtensionAPI) {
 				});
 
 				const successCount = results.filter((r) => !isFailedResult(r)).length;
+				const abortedCount = results.filter((r) => r.aborted === true).length;
+				const headerText =
+					`Parallel: ${successCount}/${results.length} succeeded` +
+					(abortedCount > 0 ? `, ${abortedCount} aborted` : "");
 				const summaries = results.map((r) => {
 					const output = truncateParallelOutput(getResultOutput(r));
-					const status = isFailedResult(r)
-						? `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`
-						: "completed";
-					return `### [${r.agent}] ${status}\n\n${output}`;
+					const status = r.aborted
+						? "aborted"
+						: isFailedResult(r)
+							? `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`
+							: "completed";
+					const hint = isFailedResult(r) ? formatResumeHint(r) : null;
+					return `### [${r.agent}] ${status}\n\n${output}${hint ? `\n\n${hint}` : ""}`;
 				});
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n---\n\n")}`,
+							text: `${headerText}\n\n${summaries.join("\n\n---\n\n")}`,
 						},
 					],
 					details: makeDetails("parallel")(results),
@@ -808,9 +858,8 @@ export default function (pi: ExtensionAPI) {
 				);
 				const isError = isFailedResult(result);
 				if (isError) {
-					const errorMsg = getResultOutput(result);
 					return {
-						content: [{ type: "text", text: `Agent ${result.stopReason || "failed"}: ${errorMsg}` }],
+						content: [{ type: "text", text: formatFailureReport(result) }],
 						details: makeDetails("single")([result]),
 						isError: true,
 					};
