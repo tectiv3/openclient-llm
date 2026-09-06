@@ -9,10 +9,12 @@ import { runPushSetup } from './push-setup'
 import {
     FINISHED_COLLAPSE_ID,
     QUESTION_COLLAPSE_ID,
+    TEST_COLLAPSE_ID,
     finishedPayload,
     questionPayload,
     resolveApnsConfig,
     sendApnsPush,
+    testPayload,
     type PushOutcome,
 } from './apns'
 
@@ -95,6 +97,7 @@ type RcSingleton = {
     heartbeat: ReturnType<typeof setInterval> | null
     rateLimits: Map<string, RateLimitEntry>
     pushToken: string | null
+    lastPush: string | null
     isStreaming: boolean
     currentTurnBuffer: ContentBlock[]
     pendingAsk: PendingAsk | null
@@ -129,6 +132,7 @@ function singleton(): RcSingleton {
         heartbeat: null,
         rateLimits: new Map<string, RateLimitEntry>(),
         pushToken: null,
+        lastPush: null,
         isStreaming: false,
         currentTurnBuffer: [],
         pendingAsk: null,
@@ -623,7 +627,7 @@ function handlePushOutcome(state: RcSingleton, outcome: PushOutcome, label: stri
     // registration that landed while this send was in flight must survive.
     if (outcome.ok === 'dropped' && state.pushToken === token) {
         state.pushToken = null
-        refreshStatus(state)
+        recordPushOutcome(state, outcome)
         dbgLog(
             'push_token dropped (token invalid per APNs):',
             label,
@@ -636,9 +640,11 @@ function handlePushOutcome(state: RcSingleton, outcome: PushOutcome, label: stri
     }
     if (outcome.ok === 'dropped') {
         dbgLog('push_token drop ignored (token already replaced):', label)
+        recordPushOutcome(state, outcome)
         return
     }
     dbgLog('apns push outcome:', label, outcome)
+    recordPushOutcome(state, outcome)
 }
 
 function writeSessionSnapshot(client: RcClient, state: RcSingleton): void {
@@ -1065,13 +1071,29 @@ function pushStatusText(state: RcSingleton): string {
     return state.pushToken ? 'push ok' : 'push: no token'
 }
 
+function pushOutcomeText(outcome: PushOutcome): string {
+    if (outcome.ok === 'sent') return `apns ${outcome.status}`
+    if (outcome.ok === 'disabled') return `apns disabled: ${outcome.reason}`
+    if (outcome.ok === 'no_token') return 'apns no token'
+    if (outcome.ok === 'dropped')
+        return `apns ${outcome.status}${outcome.reason ? ` ${outcome.reason}` : ''} (token dropped)`
+    const detail = outcome.detail.length > 48 ? `${outcome.detail.slice(0, 48)}…` : outcome.detail
+    return `apns error: ${detail}`
+}
+
+function recordPushOutcome(state: RcSingleton, outcome: PushOutcome): void {
+    state.lastPush = pushOutcomeText(outcome)
+    refreshStatus(state)
+}
+
 function refreshStatus(state: RcSingleton): void {
     if (!state.server || !state.host || !state.code) return
     const clients = connectedClientCount(state)
     const clientsText = clients === 0 ? 'no clients' : `${clients} client${clients === 1 ? '' : 's'}`
+    const lastPush = state.lastPush ? ` · ${state.lastPush}` : ''
     safeSetStatus(
         state.binding?.ctx,
-        `rc: ws://${state.host}:${state.port} code ${state.code} · ${clientsText} · ${pushStatusText(state)}`
+        `rc: ws://${state.host}:${state.port} code ${state.code} · ${clientsText} · ${pushStatusText(state)}${lastPush}`
     )
 }
 
@@ -1166,23 +1188,36 @@ export default function rc(pi: ExtensionAPI): void {
     state.refreshStatus = () => refreshStatus(state)
     registerEventHandlers(pi, state)
     pi.registerCommand('rc', {
-        description: 'Toggle remote-control WebSocket server (subcommand: push-setup)',
-        getArgumentCompletions: (argumentPrefix: string) =>
-            argumentPrefix === '' || 'push-setup'.startsWith(argumentPrefix)
-                ? [
-                      {
-                          value: 'push-setup',
-                          label: 'push-setup',
-                          description: 'Configure APNs push delivery for the rc app',
-                      },
-                  ]
-                : null,
+        description: 'Toggle remote-control WebSocket server (subcommands: push-setup, push-test)',
+        getArgumentCompletions: (argumentPrefix: string) => {
+            const subs = [
+                { value: 'push-setup', label: 'push-setup', description: 'Configure APNs push delivery for the rc app' },
+                { value: 'push-test', label: 'push-test', description: 'Send a test push to the registered phone token' },
+            ]
+            return subs.filter(sub => sub.value.startsWith(argumentPrefix))
+        },
         handler: async (args, ctx) => {
             dbgLog('command /rc invoked')
             state.bind(pi, ctx)
             if (args.trim() === 'push-setup') {
                 dbgLog('command /rc push-setup invoked')
                 await runPushSetup(state, ctx.ui, sessionId(state))
+                return
+            }
+            if (args.trim() === 'push-test') {
+                dbgLog('command /rc push-test invoked')
+                const token = state.pushToken
+                if (!token) {
+                    ctx.ui.notify(
+                        'push-test: no device token registered — connect the phone once (it sends its token after hello_ok), then retry',
+                        'warning'
+                    )
+                    return
+                }
+                const outcome = await sendApnsPush(token, TEST_COLLAPSE_ID, testPayload(sessionId(state)))
+                handlePushOutcome(state, outcome, 'test', token)
+                const severity = outcome.ok === 'sent' ? 'info' : 'warning'
+                ctx.ui.notify(`push-test: ${pushOutcomeText(outcome)}`, severity)
                 return
             }
             if (state.server) {

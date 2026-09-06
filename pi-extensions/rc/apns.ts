@@ -12,6 +12,7 @@ const SEND_TIMEOUT_MS = 15_000
 
 export const FINISHED_COLLAPSE_ID = 'rc-finished'
 export const QUESTION_COLLAPSE_ID = 'rc-question'
+export const TEST_COLLAPSE_ID = 'rc-test'
 
 type JsonObject = Record<string, unknown>
 
@@ -257,6 +258,16 @@ export function questionPayload(sessionId: string): JsonObject {
             sound: 'default',
             'thread-id': sessionId,
             timeSensitive: true,
+        },
+    }
+}
+
+export function testPayload(sessionId: string): JsonObject {
+    return {
+        aps: {
+            alert: { title: 'RC push test', body: 'RC push test' },
+            sound: 'default',
+            'thread-id': sessionId,
         },
     }
 }
