@@ -161,6 +161,7 @@ interface SingleResult {
 	model?: string;
 	stopReason?: string;
 	aborted?: boolean;
+	resumeNote?: string;
 	errorMessage?: string;
 	step?: number;
 }
@@ -179,10 +180,16 @@ interface SubagentMeta {
 	thinkingLevel?: ThinkingLevel;
 	startedAt: string;
 	promptHash: string;
+	resumedCount?: number;
 	status?: "succeeded" | "failed" | "aborted";
 	stopReason?: string;
 	exitCode?: number;
 	sessionHeaderId?: string;
+}
+
+interface ResumeTarget {
+	id: string;
+	meta: SubagentMeta;
 }
 
 function getFinalOutput(messages: Message[]): string {
@@ -347,6 +354,90 @@ function removeSubagentFile(filePath: string): void {
 	}
 }
 
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		// ESRCH means the pid is gone; EPERM means the process exists but is owned by another user.
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+function formatAvailableSubagentsError(resumeId: string): string {
+	const dir = getSubagentsDir();
+	let metaFiles: string[];
+	try {
+		metaFiles = fs.readdirSync(dir).filter((file) => file.endsWith(".meta"));
+	} catch {
+		metaFiles = [];
+	}
+	if (metaFiles.length === 0) {
+		return (
+			`No subagent found with id "${resumeId}" (completed runs are cleaned up). ` +
+			`No persisted subagent sessions are available in ${dir}.`
+		);
+	}
+	const entries = metaFiles
+		.map((file) => {
+			const id = file.slice(0, -".meta".length);
+			try {
+				const meta = JSON.parse(fs.readFileSync(path.join(dir, file), "utf-8")) as SubagentMeta;
+				const taskPreview = meta.task.replace(/\s+/g, " ").trim();
+				return `- ${id} — agent: ${meta.agent}, status: ${meta.status ?? "unknown"}, task: ${
+					taskPreview.length > 60 ? `${taskPreview.slice(0, 60)}...` : taskPreview
+				}`;
+			} catch {
+				return `- ${id} — (meta sidecar unreadable)`;
+			}
+		})
+		.sort();
+	return [
+		`No subagent found with id "${resumeId}" (completed runs are cleaned up). Available subagents:`,
+		...entries,
+	].join("\n");
+}
+
+function resolveResumeTarget(resumeId: string, agentName: string, agents: AgentConfig[]): ResumeTarget | string {
+	const { session: sessionPath, pid: pidPath, meta: metaPath } = getSubagentFilePaths(resumeId);
+
+	if (!fs.existsSync(sessionPath)) return formatAvailableSubagentsError(resumeId);
+
+	if (fs.existsSync(pidPath)) {
+		const pid = Number.parseInt(fs.readFileSync(pidPath, "utf-8").trim(), 10);
+		if (pid > 0 && isProcessAlive(pid)) {
+			return (
+				`Subagent "${resumeId}" is still running (pid ${pid}). ` +
+				"Wait for it to finish or inspect it with subagent_inspect instead of resuming."
+			);
+		}
+		// Stale pidfile: the parent died before cleanup. Unlock and treat the run as interrupted.
+		removeSubagentFile(pidPath);
+	}
+
+	let meta: SubagentMeta;
+	try {
+		meta = JSON.parse(fs.readFileSync(metaPath, "utf-8")) as SubagentMeta;
+	} catch {
+		return `Cannot resume "${resumeId}": its meta sidecar is missing or unreadable. Start a fresh delegation instead.`;
+	}
+
+	if (meta.agent !== agentName) {
+		return (
+			`Cannot resume "${resumeId}" with agent "${agentName}": the original run used agent "${meta.agent}". ` +
+			"Resuming under a different agent changes the system prompt and toolset; use the original agent."
+		);
+	}
+
+	const agent = agents.find((a) => a.name === agentName);
+	const currentPromptHash = agent ? createHash("sha256").update(agent.systemPrompt).digest("hex") : undefined;
+	if (!agent || currentPromptHash !== meta.promptHash) {
+		return `Cannot resume "${resumeId}": the "${agentName}" agent definition changed since the original run; start a fresh delegation instead.`;
+	}
+
+	return { id: resumeId, meta };
+}
+
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	const currentScript = process.argv[1];
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
@@ -381,8 +472,9 @@ async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
+	resume?: ResumeTarget,
 ): Promise<SingleResult> {
-	const subagentId = uuidv7();
+	const subagentId = resume?.id ?? uuidv7();
 	const { session: sessionPath, pid: pidPath, meta: metaPath } = getSubagentFilePaths(subagentId);
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -403,12 +495,27 @@ async function runSingleAgent(
 	}
 
 	const args: string[] = ["--mode", "json", "-p", "--session", sessionPath];
-	const inheritsDispatchConfig = !agent.model;
-	const model = agent.model ?? dispatchDefaults.model;
-	if (model) args.push("--model", model);
-	if (inheritsDispatchConfig && dispatchDefaults.thinkingLevel) {
-		args.push("--thinking", dispatchDefaults.thinkingLevel);
+	// Resumes re-pass the recorded model/thinking because they reflect the original run;
+	// continuity matters more than the current dispatch defaults.
+	let model: string | undefined;
+	let thinkingLevel: ThinkingLevel | undefined;
+	let resumeNote: string | undefined;
+	if (resume) {
+		model = resume.meta.model;
+		thinkingLevel = resume.meta.thinkingLevel;
+		if (!model) {
+			model = dispatchDefaults.model;
+			resumeNote = model
+				? `Resumed with the current dispatch model (${model}); the original run recorded none.`
+				: "Resumed without a recorded model; the child used its own default model.";
+		}
+	} else {
+		model = agent.model ?? dispatchDefaults.model;
+		// Only agents without a pinned model inherit the dispatch thinking level.
+		if (!agent.model) thinkingLevel = dispatchDefaults.thinkingLevel;
 	}
+	if (model) args.push("--model", model);
+	if (thinkingLevel) args.push("--thinking", thinkingLevel);
 	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
 
 	let tmpPromptDir: string | null = null;
@@ -426,6 +533,7 @@ async function runSingleAgent(
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 		model,
 		step,
+		resumeNote,
 	};
 
 	const emitUpdate = () => {
@@ -453,9 +561,10 @@ async function runSingleAgent(
 			agent: agentName,
 			task,
 			model,
-			thinkingLevel: inheritsDispatchConfig ? dispatchDefaults.thinkingLevel : undefined,
+			thinkingLevel,
 			startedAt: new Date().toISOString(),
 			promptHash: createHash("sha256").update(agent.systemPrompt).digest("hex"),
+			resumedCount: resume ? (resume.meta.resumedCount ?? 0) + 1 : undefined,
 		};
 		writeSubagentMetaFile(metaPath, spawnMeta);
 
@@ -604,6 +713,9 @@ const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
 const SubagentParams = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (for single mode)" })),
 	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
+	resume: Type.Optional(
+		Type.String({ description: "Id of a persisted subagent run to resume (single mode only)" }),
+	),
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
 	agentScope: Type.Optional(AgentScopeSchema),
@@ -620,6 +732,8 @@ export default function (pi: ExtensionAPI) {
 		description: [
 			"Delegate tasks to specialized subagents with isolated context.",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
+			"Resume: in single mode pass resume: <subagentId> to continue a persisted interrupted/failed run " +
+				"(agent must match the original run).",
 			`Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
 		].join(" "),
@@ -656,6 +770,19 @@ export default function (pi: ExtensionAPI) {
 						{
 							type: "text",
 							text: `Invalid parameters. Provide exactly one mode.\nAvailable agents: ${available}`,
+						},
+					],
+				details: makeDetails("single")([]),
+				};
+			}
+
+			if (params.resume && (hasChain || hasTasks)) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: 'Invalid parameters: "resume" is single-mode only ({agent, task, resume}). ' +
+								'Remove "resume" or restructure as a single delegation.',
 						},
 					],
 					details: makeDetails("single")([]),
@@ -844,6 +971,18 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (params.agent && params.task) {
+				let resume: ResumeTarget | undefined;
+				if (params.resume) {
+					const resolved = resolveResumeTarget(params.resume, params.agent, agents);
+					if (typeof resolved === "string") {
+						return {
+							content: [{ type: "text", text: resolved }],
+							details: makeDetails("single")([]),
+							isError: true,
+						};
+					}
+					resume = resolved;
+				}
 				const result = await runSingleAgent(
 					ctx.cwd,
 					dispatchDefaults,
@@ -855,6 +994,7 @@ export default function (pi: ExtensionAPI) {
 					signal,
 					onUpdate,
 					makeDetails("single"),
+					resume,
 				);
 				const isError = isFailedResult(result);
 				if (isError) {
@@ -864,8 +1004,11 @@ export default function (pi: ExtensionAPI) {
 						isError: true,
 					};
 				}
+				const finalOutput = getFinalOutput(result.messages) || "(no output)";
 				return {
-					content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
+					content: [
+						{ type: "text", text: result.resumeNote ? `${finalOutput}\n\n${result.resumeNote}` : finalOutput },
+					],
 					details: makeDetails("single")([result]),
 				};
 			}
