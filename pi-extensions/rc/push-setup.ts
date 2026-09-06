@@ -14,6 +14,7 @@ import { dbgLog } from './debug'
 interface RcRemoteLike {
     isServing(): boolean
     hasConnectedClients(): boolean
+    refreshStatus(): void
     ask(opts: { kind: 'question'; params: unknown }): Promise<{
         value: string
         wasCustom: boolean
@@ -48,6 +49,7 @@ export async function runPushSetup(
     ui: ExtensionContext['ui'],
     sessionId: string
 ): Promise<void> {
+    remote.refreshStatus()
     const config = resolveApnsConfig()
     if (config) {
         ui.notify(
@@ -101,6 +103,7 @@ export async function runPushSetup(
         `apns push configured: teamId ${teamId}, keyId ${keyId}, keyFile ${keyFile} → ${apnsConfigPath()}`,
         'info'
     )
+    remote.refreshStatus()
     dbgLog('push-setup: wrote config, teamId', teamId, 'keyId', keyId, 'keyFile', keyFile, 'sessionId', sessionId)
 }
 

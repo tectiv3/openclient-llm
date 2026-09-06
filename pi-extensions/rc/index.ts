@@ -11,6 +11,7 @@ import {
     QUESTION_COLLAPSE_ID,
     finishedPayload,
     questionPayload,
+    resolveApnsConfig,
     sendApnsPush,
     type PushOutcome,
 } from './apns'
@@ -105,6 +106,7 @@ type RcSingleton = {
     start(ctx: ExtensionContext): Promise<void>
     stop(reason: string, detail?: string): Promise<void>
     broadcast(message: JsonObject): void
+    refreshStatus(): void
     hasConnectedClients(): boolean
     isServing(): boolean
     ask(opts: {
@@ -137,6 +139,9 @@ function singleton(): RcSingleton {
         },
         handleSocketData(client, chunk) {
             handleSocketData(this, client, chunk)
+        },
+        refreshStatus() {
+            refreshStatus(this)
         },
         bind(pi, ctx) {
             this.binding = { pi, ctx }
@@ -178,7 +183,7 @@ function singleton(): RcSingleton {
             const status = `rc: ws://${this.host}:${PORT} code ${this.code}`
             dbgLog('server started:', status)
             ctx.ui.notify(status, 'info')
-            safeSetStatus(ctx, status)
+            refreshStatus(this)
             writeRunningAuth(this.host, PORT, this.code)
         },
         async stop(reason, detail) {
@@ -214,9 +219,7 @@ function singleton(): RcSingleton {
             }
         },
         hasConnectedClients() {
-            return Array.from(this.clients).some(
-                client => client.authenticated && !client.socket.destroyed
-            )
+            return connectedClientCount(this) > 0
         },
         isServing() {
             return this.server !== null
@@ -418,6 +421,7 @@ function writeFrame(socket: RcSocket, payload: Buffer, opcode: number): void {
 
 function closeClient(state: RcSingleton, client: RcClient, code?: number): void {
     state.clients.delete(client)
+    refreshStatus(state)
     if (!client.socket.destroyed) {
         try {
             writeFrame(client.socket, closeFramePayload(code), 0x8)
@@ -521,6 +525,7 @@ function handleHello(state: RcSingleton, client: RcClient, message: JsonObject):
     }
     state.rateLimits.delete(client.ip)
     client.authenticated = true
+    refreshStatus(state)
     writeJson(client, { type: 'hello_ok', version: VERSION })
     writeSessionSnapshot(client, state)
     if (state.pendingAsk) writeJson(client, state.pendingAsk.message)
@@ -593,6 +598,7 @@ function handlePushToken(state: RcSingleton, client: RcClient, message: JsonObje
         return
     }
     state.pushToken = token
+    refreshStatus(state)
     dbgLog('push_token registered:', client.ip)
 }
 
@@ -617,6 +623,7 @@ function handlePushOutcome(state: RcSingleton, outcome: PushOutcome, label: stri
     // registration that landed while this send was in flight must survive.
     if (outcome.ok === 'dropped' && state.pushToken === token) {
         state.pushToken = null
+        refreshStatus(state)
         dbgLog(
             'push_token dropped (token invalid per APNs):',
             label,
@@ -1035,6 +1042,14 @@ function writeQuitStoppedAuth(state: RcSingleton, detail?: string): void {
     writeStoppedAuth('quit', detail)
 }
 
+function connectedClientCount(state: RcSingleton): number {
+    let count = 0
+    for (const client of state.clients) {
+        if (client.authenticated && !client.socket.destroyed) count += 1
+    }
+    return count
+}
+
 function safeSetStatus(ctx: ExtensionContext | undefined, text: string | undefined): void {
     const setStatus = ctx?.ui?.setStatus
     if (typeof setStatus !== 'function') return
@@ -1043,6 +1058,21 @@ function safeSetStatus(ctx: ExtensionContext | undefined, text: string | undefin
     } catch {
         // Status support varies by harness mode; rc operation should not depend on it.
     }
+}
+
+function pushStatusText(state: RcSingleton): string {
+    if (!resolveApnsConfig()) return 'push: not configured'
+    return state.pushToken ? 'push ok' : 'push: no token'
+}
+
+function refreshStatus(state: RcSingleton): void {
+    if (!state.server || !state.host || !state.code) return
+    const clients = connectedClientCount(state)
+    const clientsText = clients === 0 ? 'no clients' : `${clients} client${clients === 1 ? '' : 's'}`
+    safeSetStatus(
+        state.binding?.ctx,
+        `rc: ws://${state.host}:${state.port} code ${state.code} · ${clientsText} · ${pushStatusText(state)}`
+    )
 }
 
 function registerProcessExitHandler(state: RcSingleton): void {
@@ -1133,6 +1163,7 @@ export default function rc(pi: ExtensionAPI): void {
     const state = singleton()
     state.handleUpgrade = (req, socket, head) => handleUpgrade(state, req, socket, head)
     state.handleSocketData = (client, chunk) => handleSocketData(state, client, chunk)
+    state.refreshStatus = () => refreshStatus(state)
     registerEventHandlers(pi, state)
     pi.registerCommand('rc', {
         description: 'Toggle remote-control WebSocket server (subcommand: push-setup)',
