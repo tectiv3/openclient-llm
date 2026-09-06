@@ -349,7 +349,7 @@ function handleSocketData(state: RcSingleton, client: RcClient, chunk: Buffer): 
                 sendErrorAndClose(state, client, 'invalid_message')
                 return
             }
-            dbgLog('recv from', client.ip, safeJson(message))
+            dbgLog('recv from', client.ip, message)
             handleClientMessage(state, client, message)
         }
     } catch {
@@ -391,7 +391,7 @@ function readFrame(
 }
 
 function writeJson(client: RcClient, message: JsonObject): boolean {
-    dbgLog('send to', client.ip, safeJson(message))
+    dbgLog('send to', client.ip, message)
     try {
         writeFrame(client.socket, Buffer.from(JSON.stringify(message), 'utf8'), 0x1)
         return true
@@ -631,7 +631,7 @@ function handlePushOutcome(state: RcSingleton, outcome: PushOutcome, label: stri
         dbgLog('push_token drop ignored (token already replaced):', label)
         return
     }
-    dbgLog('apns push outcome:', label, safeJson(outcome))
+    dbgLog('apns push outcome:', label, outcome)
 }
 
 function writeSessionSnapshot(client: RcClient, state: RcSingleton): void {
