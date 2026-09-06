@@ -123,6 +123,13 @@ extension CodeViewModel {
         }
 
         updateSession(session)
+
+        // The server only sends `state` on connect / session_start /
+        // get_state, so refresh after the agent settles to keep the context
+        // estimate current.
+        if event.name == "agent_settled" {
+            send(.refreshState)
+        }
     }
 }
 
@@ -219,61 +226,54 @@ private extension CodeViewModel {
             return false
         }) else { return }
 
-        if case .assistant(let id, var content, _)
-            = session.items[lastIndex] {
-            let text = event.payload["text"]
-            let thinking = event.payload["thinking"]
+        // The server forwards the raw pi `message_update` frame; its
+        // `message.content` is a full snapshot of the partial message, so
+        // replace (not diff) the streaming bubble's content on every frame.
+        guard let content = messageContentBlocks(event.payload["message"])
+        else { return }
 
-            if case .string(let textValue) = text {
-                appendOrUpdateTextBlock(
-                    .text(textValue), in: &content
-                )
-            }
-            if case .string(let thinkingValue) = thinking {
-                appendOrUpdateTextBlock(
-                    .thinking(thinkingValue), in: &content
-                )
-            }
-
+        if case .assistant(let id, _, _) = session.items[lastIndex] {
             session.items[lastIndex] = .assistant(
                 id: id, content: content, isStreaming: true
             )
         }
     }
 
-    func appendOrUpdateTextBlock(
-        _ block: CodeContentBlock,
-        in content: inout [CodeContentBlock]
-    ) {
-        switch block {
-        case .text(let newText):
-            if case .text(let existing) = content.last {
-                content[content.count - 1] = .text(
-                    existing + newText
-                )
-            } else {
-                content.append(block)
-            }
-
-        case .thinking(let newText):
-            if let lastThinkingIndex = content.lastIndex(where: {
-                if case .thinking = $0 { return true }
-                return false
-            }), case .thinking(let existing)
-                = content[lastThinkingIndex] {
-                content[lastThinkingIndex] = .thinking(
-                    existing + newText
-                )
-            } else {
-                content.append(block)
-            }
-
-        case .toolUse:
-            content.append(block)
-
-        case .unknown:
-            break
+    /// Parses the raw pi assistant `message.content` array carried by a
+    /// `message_update` frame. The wire shape differs from the normalized
+    /// history shape (thinking blocks use a `thinking` key, tool calls are
+    /// `{type: "toolCall", ...}`), so the strict `CodeContentBlock` decoder
+    /// cannot consume it directly. Only text and thinking blocks are
+    /// transcript-relevant here; tool steps are driven by
+    /// `tool_execution_*` events.
+    func messageContentBlocks(
+        _ message: AnyCodableValue?
+    ) -> [CodeContentBlock]? {
+        guard case .object(let message)? = message,
+              case .array(let content)? = message["content"] else {
+            return nil
         }
+
+        var blocks: [CodeContentBlock] = []
+        for part in content {
+            guard case .object(let part) = part,
+                  case .string(let type)? = part["type"] else {
+                continue
+            }
+            switch type {
+            case "text":
+                if case .string(let text)? = part["text"] {
+                    blocks.append(.text(text))
+                }
+            case "thinking":
+                if case .string(let thinking)? = part["thinking"] {
+                    blocks.append(.thinking(thinking))
+                }
+            default:
+                break
+            }
+        }
+        return blocks
     }
 
     func appendToolStep(

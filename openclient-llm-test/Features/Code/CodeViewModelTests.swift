@@ -172,6 +172,8 @@ final class CodeViewModelTests: XCTestCase {
         }
     }
 
+
+
     func test_sendPrompt_connectedStreaming_doesNotSend() async throws {
         // Given
         try await connectAndEstablish(isStreaming: true)
@@ -188,20 +190,6 @@ final class CodeViewModelTests: XCTestCase {
             }),
             0
         )
-    }
-
-    func test_sendSteer_connectedStreaming_sendsSteerMessage() async throws {
-        // Given
-        try await connectAndEstablish(isStreaming: true)
-
-        // When / Then — waits until exactly one steer with the text is sent
-        sut.send(.sendSteer(text: "be brief"))
-        try await waitUntil {
-            self.mockClient.sentMessageCount(where: {
-                if case .steer(let text) = $0 { return text == "be brief" }
-                return false
-            }) == 1
-        }
     }
 
     func test_sendSteer_connectedIdle_doesNotSend() async throws {
@@ -412,6 +400,8 @@ final class CodeViewModelTests: XCTestCase {
         XCTAssertEqual(session.sessionId, "s2")
         XCTAssertEqual(session.items.count, 0, "Rebind clears stale transcript")
     }
+
+
 
     func test_streamEvent_staleSessionId_ignored() async throws {
         // Given

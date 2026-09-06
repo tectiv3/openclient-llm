@@ -213,20 +213,36 @@ private extension CodeViewModel {
     }
 
     func handleSendPrompt(_ text: String) {
-        guard case .connected(let session) = state,
+        guard case .connected(var session) = state,
               !session.isStreaming else { return }
+        appendLocalEcho(text, to: &session)
+        updateSession(session)
         Task { await client.send(.prompt(text: text)) }
     }
 
     func handleSendSteer(_ text: String) {
-        guard case .connected(let session) = state,
+        guard case .connected(var session) = state,
               session.isStreaming else { return }
+        appendLocalEcho(text, to: &session)
+        updateSession(session)
         Task { await client.send(.steer(text: text)) }
     }
 
     func handleAbort() {
         guard case .connected = state else { return }
         Task { await client.send(.abort) }
+    }
+
+    /// Local echo so the prompt renders immediately instead of waiting for
+    /// the next server history sync. Deduped against a trailing identical
+    /// user item, which can only exist if the same text was already synced
+    /// from the server history.
+    func appendLocalEcho(_ text: String, to session: inout SessionState) {
+        if case .user(_, let lastText)? = session.items.last,
+           lastText == text {
+            return
+        }
+        session.items.append(.user(id: UUID(), text: text))
     }
 }
 

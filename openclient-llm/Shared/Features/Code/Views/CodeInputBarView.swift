@@ -41,7 +41,7 @@ struct CodeInputBarView: View {
 
                 actionButtons
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 16)
             .padding(.vertical, 8)
         }
         .glassEffect(
