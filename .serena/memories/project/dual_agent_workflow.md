@@ -1,6 +1,6 @@
-# Dual-agent workflow on branch code-rc
+# Dual-agent workflow on branch main (was code-rc)
 
-Two agents work the SAME branch concurrently. File ownership:
+Two agents work the SAME branch concurrently. `code-rc` was merged into `main` on 2026-09-06 (merge `bddf716` + fixup `5c3c650`); work now happens on `main` — the ownership split below is a courtesy convention, not a boundary: this agent has been committing Swift-side files via subagents since the other agent hit its rate limit (e.g. `492cb95` APNs Swift client). File ownership (original split):
 
 | Agent | Owns |
 |---|---|

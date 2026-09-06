@@ -87,6 +87,7 @@ enum CodeClientMessage: Sendable {
     case getState
     case getHistory(cursor: String?)
     case ping
+    case pushToken(token: String)
 }
 
 // MARK: - Implementation
@@ -563,6 +564,10 @@ private extension CodeServerClient {
 
         case .ping:
             dict["type"] = .string("ping")
+
+        case let .pushToken(token):
+            dict["type"] = .string("push_token")
+            dict["token"] = .string(token)
         }
 
         return try? encoder.encode(dict)

@@ -34,7 +34,7 @@ final class LocalNotificationManager: LocalNotificationManagerProtocol, @uncheck
     func requestAuthorization() async {
         do {
             let granted = try await UNUserNotificationCenter.current()
-                .requestAuthorization(options: [.alert, .sound, .badge])
+                .requestAuthorization(options: [.alert, .sound, .badge, .timeSensitive])
             LogManager.info("Notification permission granted=\(granted)")
         } catch {
             LogManager.error("Notification permission failed: \(error)")

@@ -17,6 +17,7 @@ final class CodeViewModelTests: XCTestCase {
     var mockSettings: MockSettingsManager!
     var mockBackground: MockCodeBackgroundUseCase!
     var mockNotifications: MockLocalNotificationManager!
+    var mockPush: MockRemoteNotificationManager!
 
     // MARK: - Setup
 
@@ -26,11 +27,13 @@ final class CodeViewModelTests: XCTestCase {
         mockSettings = MockSettingsManager()
         mockBackground = MockCodeBackgroundUseCase()
         mockNotifications = MockLocalNotificationManager()
+        mockPush = MockRemoteNotificationManager()
         sut = CodeViewModel(
             client: mockClient,
             settingsManager: mockSettings,
             backgroundUseCase: mockBackground,
-            notificationManager: mockNotifications
+            notificationManager: mockNotifications,
+            remoteNotificationManager: mockPush
         )
     }
 
@@ -41,6 +44,7 @@ final class CodeViewModelTests: XCTestCase {
         mockSettings = nil
         mockBackground = nil
         mockNotifications = nil
+        mockPush = nil
         super.tearDown()
     }
 

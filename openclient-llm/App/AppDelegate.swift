@@ -8,9 +8,10 @@
 
 import StoreKit
 import SwiftUI
+import UserNotifications
 
 @MainActor
-final class AppDelegate: NSObject, UIApplicationDelegate {
+final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     // MARK: - Properties
 
     private var transactionObserverTask: Task<Void, Never>?
@@ -19,7 +20,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     func application(
         _ application: UIApplication,
-        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+        didFinishLaunchingWithOptions _: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         application.shortcutItems = [
             UIApplicationShortcutItem(
@@ -39,22 +40,64 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 localizedTitle: String(localized: "Search"),
                 localizedSubtitle: String(localized: "Find a conversation"),
                 icon: UIApplicationShortcutIcon(type: .search)
-            )
+            ),
         ]
 
         transactionObserverTask = Task {
             for await result in Transaction.updates {
-                if case .verified(let transaction) = result {
+                if case let .verified(transaction) = result {
                     await transaction.finish()
                 }
             }
         }
 
+        UNUserNotificationCenter.current().delegate = self
+        UIApplication.shared.registerForRemoteNotifications()
+
         return true
     }
 
+    // MARK: - Remote Notification Registration
+
     func application(
-        _ application: UIApplication,
+        _: UIApplication,
+        didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+    ) {
+        let token = deviceToken.map { String(format: "%02.0x", $0) }.joined()
+        RemoteNotificationManager.shared.updateToken(token)
+    }
+
+    func application(
+        _: UIApplication,
+        didFailToRegisterForRemoteNotificationsWithError error: Error
+    ) {
+        RemoteNotificationManager.shared.handleRegistrationFailure(error)
+    }
+
+    // MARK: - UNUserNotificationCenterDelegate
+
+    func userNotificationCenter(
+        _: UNUserNotificationCenter,
+        willPresent _: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        // Suppress foreground banners: the live RC UI already shows these
+        // events over the WebSocket connection.
+        completionHandler([])
+    }
+
+    func userNotificationCenter(
+        _: UNUserNotificationCenter,
+        didReceive _: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        // The payload carries no deep-link data; foregrounding the app lets
+        // the Code feature's foreground auto-reconnect do the rest.
+        completionHandler()
+    }
+
+    func application(
+        _: UIApplication,
         handleEventsForBackgroundURLSession identifier: String,
         completionHandler: @escaping () -> Void
     ) {
@@ -68,9 +111,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     // MARK: - Scene Configuration
 
     func application(
-        _ application: UIApplication,
+        _: UIApplication,
         configurationForConnecting connectingSceneSession: UISceneSession,
-        options: UIScene.ConnectionOptions
+        options _: UIScene.ConnectionOptions
     ) -> UISceneConfiguration {
         let config = UISceneConfiguration(name: "Default Configuration", sessionRole: connectingSceneSession.role)
         config.delegateClass = SceneDelegate.self

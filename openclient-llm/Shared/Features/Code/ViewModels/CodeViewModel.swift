@@ -94,6 +94,7 @@ final class CodeViewModel {
 
     private(set) var backgroundUseCase: CodeBackgroundUseCaseProtocol
     private(set) var notificationManager: LocalNotificationManagerProtocol
+    private(set) var remoteNotificationManager: RemoteNotificationManagerProtocol
 
     /// Persists across state transitions so editable fields survive
     /// .disconnected → .connecting → .disconnected cycles.
@@ -129,7 +130,9 @@ final class CodeViewModel {
         client: CodeServerClientProtocol = CodeServerClient(),
         settingsManager: SettingsManagerProtocol = SettingsManager(),
         backgroundUseCase: CodeBackgroundUseCaseProtocol = CodeBackgroundUseCase(),
-        notificationManager: LocalNotificationManagerProtocol = LocalNotificationManager()
+        notificationManager: LocalNotificationManagerProtocol = LocalNotificationManager(),
+        remoteNotificationManager: RemoteNotificationManagerProtocol =
+            RemoteNotificationManager.shared
     ) {
         let host = settingsManager.getCodeHost() ?? ""
         let port = settingsManager.getCodePort()
@@ -144,6 +147,10 @@ final class CodeViewModel {
         self.settingsManager = settingsManager
         self.backgroundUseCase = backgroundUseCase
         self.notificationManager = notificationManager
+        self.remoteNotificationManager = remoteNotificationManager
+        self.remoteNotificationManager.setOnTokenUpdate { [weak self] token in
+            self?.sendPushTokenIfNeeded(token)
+        }
     }
 
     func send(_ event: Event) {
@@ -192,6 +199,9 @@ private extension CodeViewModel {
         lastConnect = ConnectCredentials(
             host: host, port: port, code: code
         )
+        // The user-facing "connect to RC" moment: ask for push permission
+        // so RC finished/question pushes can reach this device.
+        Task { await remoteNotificationManager.requestAuthorization() }
         establishConnection(host: host, port: port, code: code)
     }
 
@@ -412,12 +422,23 @@ extension CodeViewModel {
         switch state {
         case .connecting:
             state = .connected(SessionState())
+            sendPushTokenIfNeeded()
         case let .reconnecting(session):
             state = .connected(session)
             sendQueuedAnswerIfNeeded()
+            sendPushTokenIfNeeded()
         default:
             break
         }
+    }
+
+    /// Registers the device token with the server now that the handshake
+    /// completed. Fires on first connect and on every reconnect. Duplicate
+    /// sends are harmless: the server keeps the last-registered token.
+    private func sendPushTokenIfNeeded(_ token: String? = nil) {
+        let tokenToSend = token ?? remoteNotificationManager.getToken()
+        guard let tokenToSend, case .connected = state else { return }
+        Task { await client.send(.pushToken(token: tokenToSend)) }
     }
 
     private func handleStateInfo(_ info: CodeSessionInfo) {

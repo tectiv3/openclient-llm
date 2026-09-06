@@ -40,6 +40,9 @@
       },
       "shouldTranslate" : false
     },
+    "%@ — failed to send" : {
+
+    },
     "%@ tokens, %lld percent" : {
       "localizations" : {
         "de" : {
@@ -10122,12 +10125,6 @@
         }
       }
     },
-    "Failed to send — tap to retry" : {
-
-    },
-    "Failed to send. Tap to retry." : {
-
-    },
     "Favourites" : {
       "comment" : "A title for a screen that shows the user's favourite messages.",
       "localizations" : {
@@ -19518,6 +19515,9 @@
       "shouldTranslate" : false
     },
     "Override capabilities when the server does not report them." : {
+
+    },
+    "Pairing code expired — re-pair from pi" : {
 
     },
     "PDF Document" : {

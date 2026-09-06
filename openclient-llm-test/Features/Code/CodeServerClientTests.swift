@@ -5,15 +5,15 @@
 //  Created by tectiv3 on 05/09/2026.
 //
 
-import XCTest
 @testable import openclient_llm
+import XCTest
 
 @MainActor
 final class CodeServerClientTests: XCTestCase {
     // MARK: - Properties
 
     private var transport: MockCodeWebSocketTransport!
-    // Fast ping cadence keeps the ping/pong tests under a few seconds.
+    /// Fast ping cadence keeps the ping/pong tests under a few seconds.
     private var sut: CodeServerClient!
 
     // MARK: - Setup
@@ -39,10 +39,10 @@ final class CodeServerClientTests: XCTestCase {
 
     func test_send_hello_encodesHelloFrame() async throws {
         // Given
-let stream = sut.connect(host: "10.0.0.1", port: 47800, code: "abc123")
-// Keep the stream alive for the duration of the test;
-// releasing it would terminate the client's continuation.
-defer { _ = stream }
+        let stream = sut.connect(host: "10.0.0.1", port: 47800, code: "abc123")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
         let task = try XCTUnwrap(transport.lastTask)
 
         // When
@@ -57,10 +57,10 @@ defer { _ = stream }
 
     func test_send_prompt_encodesPromptFrame() async throws {
         // Given
-let stream = sut.connect(host: "h", port: 1, code: "c")
-// Keep the stream alive for the duration of the test;
-// releasing it would terminate the client's continuation.
-defer { _ = stream }
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
         let task = try XCTUnwrap(transport.lastTask)
 
         // When
@@ -74,10 +74,10 @@ defer { _ = stream }
 
     func test_send_steer_encodesSteerFrame() async throws {
         // Given
-let stream = sut.connect(host: "h", port: 1, code: "c")
-// Keep the stream alive for the duration of the test;
-// releasing it would terminate the client's continuation.
-defer { _ = stream }
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
         let task = try XCTUnwrap(transport.lastTask)
 
         // When
@@ -91,10 +91,10 @@ defer { _ = stream }
 
     func test_send_abort_encodesAbortFrame() async throws {
         // Given
-let stream = sut.connect(host: "h", port: 1, code: "c")
-// Keep the stream alive for the duration of the test;
-// releasing it would terminate the client's continuation.
-defer { _ = stream }
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
         let task = try XCTUnwrap(transport.lastTask)
 
         // When
@@ -108,10 +108,10 @@ defer { _ = stream }
 
     func test_send_answer_encodesAnswerFrameWithIndex() async throws {
         // Given
-let stream = sut.connect(host: "h", port: 1, code: "c")
-// Keep the stream alive for the duration of the test;
-// releasing it would terminate the client's continuation.
-defer { _ = stream }
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
         let task = try XCTUnwrap(transport.lastTask)
 
         // When
@@ -128,10 +128,10 @@ defer { _ = stream }
 
     func test_send_answerWithoutIndex_omitsIndexKey() async throws {
         // Given
-let stream = sut.connect(host: "h", port: 1, code: "c")
-// Keep the stream alive for the duration of the test;
-// releasing it would terminate the client's continuation.
-defer { _ = stream }
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
         let task = try XCTUnwrap(transport.lastTask)
 
         // When
@@ -148,10 +148,10 @@ defer { _ = stream }
 
     func test_send_answerQuestionnaire_encodesAnswersArray() async throws {
         // Given
-let stream = sut.connect(host: "h", port: 1, code: "c")
-// Keep the stream alive for the duration of the test;
-// releasing it would terminate the client's continuation.
-defer { _ = stream }
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
         let task = try XCTUnwrap(transport.lastTask)
         let answers = [
             CodeQuestionnaireAnswer(
@@ -159,7 +159,7 @@ defer { _ = stream }
             ),
             CodeQuestionnaireAnswer(
                 id: "q2", value: "b", label: "B", wasCustom: true, index: nil
-            )
+            ),
         ]
 
         // When
@@ -177,10 +177,10 @@ defer { _ = stream }
 
     func test_send_getState_and_getHistory_encodeExpectedFrames() async throws {
         // Given
-let stream = sut.connect(host: "h", port: 1, code: "c")
-// Keep the stream alive for the duration of the test;
-// releasing it would terminate the client's continuation.
-defer { _ = stream }
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
         let task = try XCTUnwrap(transport.lastTask)
 
         // When
@@ -197,6 +197,25 @@ defer { _ = stream }
         XCTAssertNil(frames[2]["cursor"])
     }
 
+    func test_send_pushToken_encodesPushTokenFrame() async throws {
+        // Given
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
+        let task = try XCTUnwrap(transport.lastTask)
+        let token = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+        // When
+        await sut.send(.pushToken(token: token))
+
+        // Then
+        let frame = try? Self.decodeFrame(try XCTUnwrap(task.lastSentFrame))
+        XCTAssertEqual(frame?.count, 2)
+        XCTAssertEqual(frame?["type"] as? String, "push_token")
+        XCTAssertEqual(frame?["token"] as? String, token)
+    }
+
     // MARK: - Tests — Server -> Client framing
 
     func test_connect_helloOkJson_decodesHelloOkEvent() async throws {
@@ -208,7 +227,7 @@ defer { _ = stream }
         let event = try await nextEvent(from: stream)
 
         // Then
-        guard case .helloOk(let version) = event else {
+        guard case let .helloOk(version) = event else {
             return XCTFail("Expected helloOk, got \(String(describing: event))")
         }
         XCTAssertEqual(version, 1)
@@ -228,7 +247,7 @@ defer { _ = stream }
         let event = try await nextEvent(from: stream)
 
         // Then
-        guard case .state(let info) = event else {
+        guard case let .state(info) = event else {
             return XCTFail("Expected state, got \(String(describing: event))")
         }
         XCTAssertEqual(info.sessionId, "s1")
@@ -253,7 +272,7 @@ defer { _ = stream }
         let event = try await nextEvent(from: stream)
 
         // Then
-        guard case .history(let history) = event else {
+        guard case let .history(history) = event else {
             return XCTFail("Expected history, got \(String(describing: event))")
         }
         XCTAssertEqual(history.sessionId, "s1")
@@ -274,7 +293,7 @@ defer { _ = stream }
         let event = try await nextEvent(from: stream)
 
         // Then
-        guard case .streamingBuffer(let sessionId, let content) = event else {
+        guard case let .streamingBuffer(sessionId, content) = event else {
             return XCTFail(
                 "Expected streamingBuffer, got \(String(describing: event))"
             )
@@ -309,7 +328,7 @@ defer { _ = stream }
         let event = try await nextEvent(from: stream)
 
         // Then
-        guard case .authFailed(let serverError) = event else {
+        guard case let .authFailed(serverError) = event else {
             return XCTFail("Expected authFailed, got \(String(describing: event))")
         }
         XCTAssertEqual(serverError.code, "bad_code")
@@ -317,7 +336,9 @@ defer { _ = stream }
         let deadline = Date.now.addingTimeInterval(1.0)
         while task.cancelCount == 0 {
             try await Task.sleep(for: .milliseconds(10))
-            if Date.now > deadline { break }
+            if Date.now > deadline {
+                break
+            }
         }
         XCTAssertGreaterThan(task.cancelCount, 0, "Client must close the socket")
     }
@@ -331,7 +352,7 @@ defer { _ = stream }
         let event = try await nextEvent(from: stream)
 
         // Then
-        guard case .authFailed(let serverError) = event else {
+        guard case let .authFailed(serverError) = event else {
             return XCTFail("Expected authFailed, got \(String(describing: event))")
         }
         XCTAssertEqual(serverError.code, "rate_limited")
@@ -348,7 +369,7 @@ defer { _ = stream }
         let event = try await nextEvent(from: stream)
 
         // Then
-        guard case .error(let serverError) = event else {
+        guard case let .error(serverError) = event else {
             return XCTFail("Expected error, got \(String(describing: event))")
         }
         XCTAssertEqual(serverError.code, "not_idle")
@@ -359,10 +380,10 @@ defer { _ = stream }
 
     func test_pingLoop_pongReceived_sendsPingsAndKeepsConnection() async throws {
         // Given
-let stream = sut.connect(host: "h", port: 1, code: "c")
-// Keep the stream alive for the duration of the test;
-// releasing it would terminate the client's continuation.
-defer { _ = stream }
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
         let task = try XCTUnwrap(transport.lastTask)
 
         // When
@@ -376,10 +397,10 @@ defer { _ = stream }
     func test_pingLoop_missingPong_reconnectsAndResendsHello() async throws {
         // Given
         transport.autoPong = false
-let stream = sut.connect(host: "h", port: 1, code: "c")
-// Keep the stream alive for the duration of the test;
-// releasing it would terminate the client's continuation.
-defer { _ = stream }
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
 
         // When
         try await Task.sleep(for: .seconds(3.0))
@@ -397,10 +418,10 @@ defer { _ = stream }
 
     func test_receiveLoop_connectionLoss_cancelsStaleTask() async throws {
         // Given
-let stream = sut.connect(host: "h", port: 1, code: "c")
-// Keep the stream alive for the duration of the test;
-// releasing it would terminate the client's continuation.
-defer { _ = stream }
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
         let task = try XCTUnwrap(transport.lastTask)
 
         // When
