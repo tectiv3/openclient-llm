@@ -47,7 +47,7 @@ extension CodeViewModelTests {
         try await connectAndEstablish()
         sut.send(.sendPrompt(text: "hi"))
         try await waitUntil {
-            self.mockClient.sentMessageCount(where: {
+            self.mockClient.attemptsCount(where: {
                 if case .prompt = $0 {
                     return true
                 }
@@ -113,7 +113,7 @@ extension CodeViewModelTests {
         try await waitUntil { self.lastUserItem()?.failed == false }
         XCTAssertEqual(currentSession()?.items.count, 1)
         try await waitUntil {
-            self.mockClient.sentMessageCount(where: {
+            self.mockClient.attemptsCount(where: {
                 if case let .prompt(text) = $0 {
                     return text == "hi"
                 }
@@ -146,7 +146,7 @@ extension CodeViewModelTests {
         try await waitUntil { self.lastUserItem()?.failed == false }
         XCTAssertEqual(currentSession()?.items.count, 1)
         try await waitUntil {
-            self.mockClient.sentMessageCount(where: {
+            self.mockClient.attemptsCount(where: {
                 if case let .prompt(text) = $0 {
                     return text == "hi"
                 }
@@ -175,7 +175,7 @@ extension CodeViewModelTests {
 
         // Then — the prompt is sent despite streaming
         try await waitUntil {
-            self.mockClient.sentMessageCount(where: {
+            self.mockClient.attemptsCount(where: {
                 if case let .prompt(text) = $0 {
                     return text == "hi"
                 }
@@ -184,7 +184,204 @@ extension CodeViewModelTests {
         }
     }
 
+    // MARK: - Tests — not_idle correlation by pending prompt ID
+
+    func test_errorNotIdle_trailingAcceptedSteer_marksPromptNotSteer()
+        async throws
+    {
+        // Given — the exact mis-attribution repro: prompt A was accepted
+        // and is pending, then a steer (never rejected not_idle) was
+        // accepted and is the trailing echo
+        try await connectAndEstablish()
+        sut.send(.sendPrompt(text: "hi"))
+        try await waitUntil {
+            self.mockClient.attemptsCount(where: {
+                if case .prompt = $0 {
+                    return true
+                }
+                return false
+            }) == 1
+        }
+        mockClient.emit(.state(sessionInfo(isStreaming: true)))
+        try await waitUntil {
+            (self.currentSession()?.isStreaming ?? false) == true
+        }
+        sut.send(.sendSteer(text: "be brief"))
+        try await waitUntil {
+            self.mockClient.attemptsCount(where: {
+                if case .steer = $0 {
+                    return true
+                }
+                return false
+            }) == 1
+        }
+
+        // When — the busy-rejection arrives while the steer echo trails
+        mockClient.emit(.error(CodeServerError(
+            code: "not_idle", message: "agent is busy"
+        )))
+
+        // Then — the prompt echo is marked, the trailing steer is not
+        try await waitUntil {
+            self.userItems().contains {
+                $0.text == "hi" && $0.failed
+            }
+        }
+        let items = userItems()
+        XCTAssertEqual(items.count, 2)
+        let steer = try XCTUnwrap(
+            items.first { $0.text == "be brief" },
+            "Steer echo missing from transcript"
+        )
+        XCTAssertFalse(steer.failed)
+    }
+
+    func test_errorNotIdle_noPendingEcho_mutatesNothing() async throws {
+        // Given — no prompt was ever sent, so nothing is pending
+        try await connectAndEstablish()
+
+        // When
+        mockClient.emit(.error(CodeServerError(
+            code: "not_idle", message: "agent is busy"
+        )))
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Then — the toast-only path: transcript untouched
+        XCTAssertEqual(currentSession()?.items.count, 0)
+    }
+
+    func test_errorNotIdle_afterAgentStart_mutatesNothing() async throws {
+        // Given — the prompt was accepted (agent_start), so its pending
+        // entry is cleared and a later rejection cannot re-attribute it
+        try await connectAndEstablish()
+        sut.send(.sendPrompt(text: "hi"))
+        try await waitUntil {
+            self.mockClient.attemptsCount(where: {
+                if case .prompt = $0 {
+                    return true
+                }
+                return false
+            }) == 1
+        }
+        mockClient.emit(.event(CodeStreamEvent(
+            sessionId: "s1", name: "agent_start", payload: [:]
+        )))
+
+        // When — a stray not_idle arrives after the run is underway
+        mockClient.emit(.error(CodeServerError(
+            code: "not_idle", message: "agent is busy"
+        )))
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Then — nothing was marked failed
+        let items = try XCTUnwrap(currentSession()?.items)
+        XCTAssertEqual(items.count, 1)
+        XCTAssertFalse(items.contains {
+            if case .user(_, _, true) = $0 {
+                return true
+            }
+            return false
+        })
+    }
+
+    // MARK: - Tests — retry guards
+
+    func test_retryPrompt_nonFailedItem_doesNotResend() async throws {
+        // Given — a delivered (non-failed) echo; a double-tap on the
+        // badge must not re-send the prompt
+        try await connectAndEstablish()
+        sut.send(.sendPrompt(text: "hi"))
+        try await waitUntil {
+            self.mockClient.attemptsCount(where: {
+                if case .prompt = $0 {
+                    return true
+                }
+                return false
+            }) == 1
+        }
+        let echoId = try XCTUnwrap(lastUserItem()).id
+
+        // When
+        sut.send(.retryPrompt(id: echoId))
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Then — no second prompt, transcript untouched
+        XCTAssertEqual(
+            mockClient.attemptsCount(where: {
+                if case .prompt = $0 {
+                    return true
+                }
+                return false
+            }),
+            1
+        )
+        let item = try XCTUnwrap(lastUserItem())
+        XCTAssertEqual(item.text, "hi")
+        XCTAssertFalse(item.failed)
+        XCTAssertEqual(currentSession()?.items.count, 1)
+    }
+
+    func test_errorNotIdle_afterHistoryReplacement_marksNothing()
+        async throws
+    {
+        // Given — the prompt was sent and deduped onto a synced history
+        // item, then a fresh history sync replaced the transcript with
+        // new UUIDs, so any pending echo ID is now stale
+        try await connectAndEstablish()
+        mockClient.emit(.history(CodeHistory(
+            sessionId: "s1",
+            messages: [.user(text: "hi")],
+            cursor: nil
+        )))
+        try await waitUntil {
+            (self.currentSession()?.items.count ?? 0) == 1
+        }
+        sut.send(.sendPrompt(text: "hi"))
+        try await waitUntil {
+            self.mockClient.attemptsCount(where: {
+                if case .prompt = $0 {
+                    return true
+                }
+                return false
+            }) == 1
+        }
+        let staleId = try XCTUnwrap(lastUserItem()).id
+        mockClient.emit(.history(CodeHistory(
+            sessionId: "s1",
+            messages: [.user(text: "hi")],
+            cursor: nil
+        )))
+        try await waitUntil {
+            (self.currentSession()?.items.first?.id != staleId)
+        }
+
+        // When — the in-flight rejection arrives for the churned UUID
+        mockClient.emit(.error(CodeServerError(
+            code: "not_idle", message: "agent is busy"
+        )))
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Then — no crash, the replacement item is untouched
+        let items = try XCTUnwrap(currentSession()?.items)
+        XCTAssertEqual(items.count, 1)
+        guard case let .user(id, text, failed) = items[0] else {
+            return XCTFail("Expected user item, got \(items[0])")
+        }
+        XCTAssertNotEqual(id, staleId)
+        XCTAssertEqual(text, "hi")
+        XCTAssertFalse(failed)
+    }
+
     // MARK: - Helpers
+
+    func userItems() -> [(id: UUID, text: String, failed: Bool)] {
+        (currentSession()?.items ?? []).compactMap {
+            if case let .user(id, text, failed) = $0 {
+                return (id, text, failed)
+            }
+            return nil
+        }
+    }
 
     func lastUserItem() -> (id: UUID, text: String, failed: Bool)? {
         guard let items = currentSession()?.items,

@@ -15,7 +15,8 @@ final class MockCodeServerClient: CodeServerClientProtocol, @unchecked Sendable 
     private(set) var eventContinuation: AsyncStream<CodeEvent>.Continuation?
     private(set) var connectCalls: [(host: String, port: Int, code: String)] = []
     private(set) var disconnectCount = 0
-    private(set) var sentMessages: [CodeClientMessage] = []
+    private(set) var attemptedMessages: [CodeClientMessage] = []
+    private(set) var successfulMessages: [CodeClientMessage] = []
 
     /// Failure injection for `send`: when set to `false`, `send` reports
     /// failure to the caller (mirroring a dead socket).
@@ -32,7 +33,10 @@ final class MockCodeServerClient: CodeServerClientProtocol, @unchecked Sendable 
 
     @discardableResult
     func send(_ message: CodeClientMessage) async -> Bool {
-        sentMessages.append(message)
+        attemptedMessages.append(message)
+        if sendResult {
+            successfulMessages.append(message)
+        }
         return sendResult
     }
 
@@ -51,7 +55,11 @@ final class MockCodeServerClient: CodeServerClientProtocol, @unchecked Sendable 
         eventContinuation?.finish()
     }
 
-    func sentMessageCount(where matches: (CodeClientMessage) -> Bool) -> Int {
-        sentMessages.filter(matches).count
+    func attemptsCount(where matches: (CodeClientMessage) -> Bool) -> Int {
+        attemptedMessages.filter(matches).count
+    }
+
+    func successCount(where matches: (CodeClientMessage) -> Bool) -> Int {
+        successfulMessages.filter(matches).count
     }
 }

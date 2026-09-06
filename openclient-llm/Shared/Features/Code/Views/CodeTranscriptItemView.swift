@@ -71,32 +71,38 @@ private extension CodeTranscriptItemView {
                 )
                 .overlay(alignment: .bottom) {
                     if failed {
-                        failedBadge
+                        retryBadgeButton(id: id)
                     }
                 }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    if failed {
-                        onRetry(id)
-                    }
-                }
+                // Keep the prompt text in the label so VoiceOver users
+                // don't lose the content; the retry itself is an explicit
+                // action on the badge below, not part of the label.
                 .accessibilityLabel(
                     failed
-                        ? String(localized: "Failed to send. Tap to retry.")
+                        ? String(localized: "\(text) — failed to send")
                         : text
                 )
         }
     }
 
-    var failedBadge: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "exclamationmark.circle.fill")
-                .font(.caption2)
-            Text(String(localized: "Failed to send — tap to retry"))
-                .font(.caption2)
+    /// Retry affordance on a failed bubble. A Button rather than a tap
+    /// gesture on the selectable text, so the hit is reliable and
+    /// VoiceOver exposes it as a discrete "Retry" action.
+    func retryBadgeButton(id: UUID) -> some View {
+        Button {
+            onRetry(id)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.caption2)
+                Text(String(localized: "Retry"))
+                    .font(.caption2)
+            }
+            .foregroundStyle(Color.red.opacity(0.9))
+            .padding(.bottom, 6)
         }
-        .foregroundStyle(Color.red.opacity(0.9))
-        .padding(.bottom, 6)
+        .buttonStyle(.plain)
+        .accessibilityLabel(String(localized: "Retry"))
     }
 
     // MARK: Assistant

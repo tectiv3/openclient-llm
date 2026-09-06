@@ -96,6 +96,10 @@ extension CodeViewModel {
             // message_start/turn_end fire per LLM turn and would flicker
             // during multi-turn tool runs.
             session.isStreaming = true
+            // The run is underway, so every earlier prompt send was either
+            // accepted (this run) or already rejected (not_idle consumed
+            // its entry); nothing may stay pending.
+            pendingPromptEchoes.removeAll()
 
         case "agent_settled":
             session.isStreaming = false

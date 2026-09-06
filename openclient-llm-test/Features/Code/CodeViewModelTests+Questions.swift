@@ -5,8 +5,8 @@
 //  Created by tectiv3 on 05/09/2026.
 //
 
-import XCTest
 @testable import openclient_llm
+import XCTest
 
 // MARK: - CodeViewModelTests — Questions
 
@@ -26,7 +26,7 @@ extension CodeViewModelTests {
         // Then
         let pending = try XCTUnwrap(currentSession()?.pendingQuestion)
         XCTAssertEqual(pending.id, "q1")
-        guard case .question(let params) = pending.kind else {
+        guard case let .question(params) = pending.kind else {
             return XCTFail("Expected question kind")
         }
         XCTAssertEqual(params.question, "Pick one")
@@ -92,8 +92,8 @@ extension CodeViewModelTests {
         // When
         sut.send(.answer(id: "q1", value: "yes", wasCustom: false, index: 0))
         try await waitUntil {
-            self.mockClient.sentMessageCount(where: {
-                if case .answer(let id, let value, let wasCustom, let index) = $0 {
+            self.mockClient.attemptsCount(where: {
+                if case let .answer(id, value, wasCustom, index) = $0 {
                     return id == "q1" && value == "yes"
                         && !wasCustom && index == 0
                 }
@@ -110,15 +110,19 @@ extension CodeViewModelTests {
         try await connectAndEstablish()
         mockClient.emit(.disconnected)
         try await waitUntil {
-            if case .reconnecting = self.sut.state { return true }
+            if case .reconnecting = self.sut.state {
+                return true
+            }
             return false
         }
 
         // When
         sut.send(.answer(id: "q1", value: "yes", wasCustom: false, index: nil))
         XCTAssertEqual(
-            mockClient.sentMessageCount(where: {
-                if case .answer = $0 { return true }
+            mockClient.attemptsCount(where: {
+                if case .answer = $0 {
+                    return true
+                }
                 return false
             }),
             0, "Answer must not be sent while the transport is down"
@@ -126,16 +130,20 @@ extension CodeViewModelTests {
 
         mockClient.emit(.helloOk(version: 1))
         try await waitUntil {
-            self.mockClient.sentMessageCount(where: {
-                if case .answer = $0 { return true }
+            self.mockClient.attemptsCount(where: {
+                if case .answer = $0 {
+                    return true
+                }
                 return false
             }) == 1
         }
 
         // Then — queued answer sent exactly once on re-hello
         XCTAssertEqual(
-            self.mockClient.sentMessageCount(where: {
-                if case .answer = $0 { return true }
+            mockClient.attemptsCount(where: {
+                if case .answer = $0 {
+                    return true
+                }
                 return false
             }),
             1
@@ -152,14 +160,14 @@ extension CodeViewModelTests {
         let answers = [
             CodeQuestionnaireAnswer(
                 id: "q1", value: "a", label: "A", wasCustom: false, index: 0
-            )
+            ),
         ]
 
         // When
         sut.send(.answerQuestionnaire(id: "s1a", answers: answers))
         try await waitUntil {
-            self.mockClient.sentMessageCount(where: {
-                if case .answerQuestionnaire(let id, let sent) = $0 {
+            self.mockClient.attemptsCount(where: {
+                if case let .answerQuestionnaire(id, sent) = $0 {
                     return id == "s1a"
                         && sent.count == 1
                         && sent.first?.id == "q1"
@@ -195,8 +203,9 @@ extension CodeViewModelTests {
         let items = try XCTUnwrap(currentSession()?.items)
         XCTAssertEqual(items.count, 1)
         XCTAssertNil(currentSession()?.pendingQuestion)
-        guard case .resolvedQuestion(_, let questionText, let answerText, _)
-            = items[0] else {
+        guard case let .resolvedQuestion(_, questionText, answerText, _)
+            = items[0]
+        else {
             return XCTFail("Expected resolvedQuestion item, got \(items[0])")
         }
         XCTAssertEqual(questionText, "Pick one")
@@ -214,7 +223,7 @@ extension CodeViewModelTests {
                 question: "Pick one",
                 options: [
                     CodeQuestionOption(label: "Yes", value: "yes"),
-                    CodeQuestionOption(label: "No", value: "no")
+                    CodeQuestionOption(label: "No", value: "no"),
                 ]
             )
         )
@@ -232,10 +241,10 @@ extension CodeViewModelTests {
                         label: nil,
                         prompt: "Pick one",
                         options: [
-                            CodeQuestionOption(label: "A", value: "a")
+                            CodeQuestionOption(label: "A", value: "a"),
                         ],
                         allowOther: nil
-                    )
+                    ),
                 ]
             )
         )

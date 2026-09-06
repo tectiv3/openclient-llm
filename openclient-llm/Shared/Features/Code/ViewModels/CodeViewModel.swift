@@ -105,6 +105,13 @@ final class CodeViewModel {
     /// displayed by the session view which clears it after dismissal.
     var transientToast: String?
 
+    /// Prompt-echo UUIDs sent but not yet acknowledged (agent_start) or
+    /// rejected (not_idle). An ordered array so the rejection can always
+    /// be attributed to the newest pending echo; steers are excluded
+    /// because the server never rejects them not_idle. Shared with the
+    /// CodeViewModel+Messages extension (agent_start clears the list).
+    var pendingPromptEchoes: [UUID] = []
+
     /// Testability seam: production reads UIApplication state on every call;
     /// tests override this to simulate backgrounding without UIApplication.
     var isBackgrounded: @MainActor () -> Bool = {
@@ -236,7 +243,8 @@ private extension CodeViewModel {
                   }
                   return false
               }),
-              case let .user(_, text, _) = session.items[index]
+              case let .user(_, text, failed) = session.items[index],
+              failed
         else { return }
 
         let echo = CodeTranscriptItem.user(
@@ -264,6 +272,7 @@ private extension CodeViewModel {
     /// `handleRetryPrompt` so a failed transport marks the echoed item
     /// failed in both paths.
     func sendPromptText(_ text: String, echo: CodeTranscriptItem) {
+        pendingPromptEchoes.append(echo.id)
         let id = echo.id
         Task {
             let sent = await client.send(.prompt(text: text))
@@ -418,6 +427,7 @@ extension CodeViewModel {
         if isRebind {
             session.items = []
             session.pendingQuestion = nil
+            pendingPromptEchoes.removeAll()
         }
 
         session.sessionId = info.sessionId
@@ -440,6 +450,9 @@ extension CodeViewModel {
         guard var session = currentSession else { return }
         guard history.sessionId == session.sessionId else { return }
 
+        // The transcript is replaced wholesale, so local-echo UUIDs are
+        // gone: a failure mark arriving for one is a safe no-op.
+        pendingPromptEchoes.removeAll()
         let items = mapHistoryToItems(history.messages)
         session.items = items
         updateSession(session)
@@ -464,31 +477,37 @@ extension CodeViewModel {
         transientToast = error.message
             ?? String(localized: "Cannot send while streaming")
 
-        // Error frames carry no prompt text, so correlate positionally:
-        // the rejected prompt is the trailing local echo — a user item
-        // with no assistant/tool item after it. Any other trailing item
-        // means the error is uncorrelatable, so leave items untouched.
+        // The error frame carries no prompt text, so correlate by ID:
+        // the server processes prompts in order and rejects only prompts
+        // (a steer always goes through), so the rejection belongs to the
+        // newest echo still pending.
+        markPendingEchoFailed()
+    }
+
+    /// Marks the newest pending prompt echo failed by UUID and removes it
+    /// from the pending list. No-op when the echo no longer exists in the
+    /// transcript (e.g. a history sync replaced the items in the meantime).
+    private func markPendingEchoFailed() {
         guard var session = currentSession,
-              let index = session.items.lastIndex(where: {
-                  if case .user = $0 {
-                      return true
-                  }
-                  return false
-              }),
-              !session.items[(index + 1)...].contains(where: {
-                  if case .assistant = $0 {
-                      return true
-                  }
-                  if case .toolStep = $0 {
-                      return true
-                  }
-                  return false
-              })
+              !pendingPromptEchoes.isEmpty
         else { return }
 
-        if case let .user(id, text, _) = session.items[index] {
+        let id = pendingPromptEchoes.removeLast()
+        guard let index = session.items.firstIndex(where: {
+            if case let .user(itemId, _, _) = $0 {
+                return itemId == id
+            }
+            return false
+        }) else {
+            LogManager.warning(
+                "Code not_idle: pending prompt echo not found"
+            )
+            return
+        }
+
+        if case let .user(itemId, text, _) = session.items[index] {
             session.items[index] = .user(
-                id: id, text: text, failed: true
+                id: itemId, text: text, failed: true
             )
             updateSession(session)
         }
@@ -560,6 +579,7 @@ extension CodeViewModel {
     }
 
     func resetToDisconnected() {
+        pendingPromptEchoes.removeAll()
         state = .disconnected(disconnectedForm())
     }
 

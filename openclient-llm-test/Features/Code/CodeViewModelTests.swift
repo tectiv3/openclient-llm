@@ -54,7 +54,7 @@ final class CodeViewModelTests: XCTestCase {
         XCTAssertEqual(sut.state, .connecting)
         XCTAssertEqual(mockClient.connectCalls.count, 1)
         try await waitUntil {
-            self.mockClient.sentMessageCount(where: {
+            self.mockClient.attemptsCount(where: {
                 if case .hello = $0 {
                     return true
                 }
@@ -173,7 +173,7 @@ final class CodeViewModelTests: XCTestCase {
         // When / Then — waits until exactly one prompt with the text is sent
         sut.send(.sendPrompt(text: "hi"))
         try await waitUntil {
-            self.mockClient.sentMessageCount(where: {
+            self.mockClient.attemptsCount(where: {
                 if case let .prompt(text) = $0 {
                     return text == "hi"
                 }
@@ -192,7 +192,7 @@ final class CodeViewModelTests: XCTestCase {
 
         // Then
         XCTAssertEqual(
-            mockClient.sentMessageCount(where: {
+            mockClient.attemptsCount(where: {
                 if case .prompt = $0 {
                     return true
                 }
@@ -212,7 +212,7 @@ final class CodeViewModelTests: XCTestCase {
 
         // Then
         XCTAssertEqual(
-            mockClient.sentMessageCount(where: {
+            mockClient.attemptsCount(where: {
                 if case .steer = $0 {
                     return true
                 }
@@ -229,7 +229,7 @@ final class CodeViewModelTests: XCTestCase {
         // When / Then — waits until exactly one abort is sent
         sut.send(.abort)
         try await waitUntil {
-            self.mockClient.sentMessageCount(where: {
+            self.mockClient.attemptsCount(where: {
                 if case .abort = $0 {
                     return true
                 }
@@ -245,7 +245,7 @@ final class CodeViewModelTests: XCTestCase {
 
         // Then
         XCTAssertEqual(
-            mockClient.sentMessageCount(where: {
+            mockClient.attemptsCount(where: {
                 if case .abort = $0 {
                     return true
                 }
@@ -394,7 +394,7 @@ final class CodeViewModelTests: XCTestCase {
         sut.send(.appWillEnterForeground)
         try await waitUntil {
             self.mockClient.connectCalls.count == 2 &&
-                self.mockClient.sentMessageCount(where: {
+                self.mockClient.attemptsCount(where: {
                     if case .hello = $0 {
                         return true
                     }

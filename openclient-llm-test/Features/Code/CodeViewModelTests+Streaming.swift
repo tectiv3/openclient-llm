@@ -49,7 +49,7 @@ extension CodeViewModelTests {
         // The prompt is still sent exactly once (dedup skips the echo,
         // not the send).
         try await waitUntil {
-            self.mockClient.sentMessageCount(where: {
+            self.mockClient.attemptsCount(where: {
                 if case .prompt = $0 {
                     return true
                 }
@@ -65,7 +65,7 @@ extension CodeViewModelTests {
         // When / Then — waits until exactly one steer with the text is sent
         sut.send(.sendSteer(text: "be brief"))
         try await waitUntil {
-            self.mockClient.sentMessageCount(where: {
+            self.mockClient.attemptsCount(where: {
                 if case let .steer(text) = $0 {
                     return text == "be brief"
                 }
@@ -196,7 +196,7 @@ extension CodeViewModelTests {
 
         // Then
         try await waitUntil {
-            self.mockClient.sentMessageCount(where: {
+            self.mockClient.attemptsCount(where: {
                 if case .getState = $0 {
                     return true
                 }
