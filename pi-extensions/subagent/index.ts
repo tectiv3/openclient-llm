@@ -13,12 +13,13 @@
  */
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
-import { StringEnum } from "@earendil-works/pi-ai";
+import { StringEnum, uuidv7 } from "@earendil-works/pi-ai";
 import {
 	CONFIG_DIR_NAME,
 	type ExtensionAPI,
@@ -34,6 +35,7 @@ const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
+const SUBAGENTS_DIR_MODE = 0o700;
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -150,6 +152,8 @@ interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
 	task: string;
+	subagentId: string;
+	sessionPath: string;
 	exitCode: number;
 	messages: Message[];
 	stderr: string;
@@ -165,6 +169,19 @@ interface SubagentDetails {
 	agentScope: AgentScope;
 	projectAgentsDir: string | null;
 	results: SingleResult[];
+}
+
+interface SubagentMeta {
+	agent: string;
+	task: string;
+	model?: string;
+	thinkingLevel?: ThinkingLevel;
+	startedAt: string;
+	promptHash: string;
+	status?: "succeeded" | "failed" | "aborted";
+	stopReason?: string;
+	exitCode?: number;
+	sessionHeaderId?: string;
 }
 
 function getFinalOutput(messages: Message[]): string {
@@ -246,6 +263,55 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 	return { dir: tmpDir, filePath };
 }
 
+function getSubagentsDir(): string {
+	return path.join(getAgentDir(), "subagents");
+}
+
+function getSubagentFilePaths(subagentId: string): { session: string; pid: string; meta: string } {
+	return {
+		session: path.join(getSubagentsDir(), `${subagentId}.jsonl`),
+		pid: path.join(getSubagentsDir(), `${subagentId}.pid`),
+		meta: path.join(getSubagentsDir(), `${subagentId}.meta`),
+	};
+}
+
+function ensureSubagentsDir(): void {
+	try {
+		fs.mkdirSync(getSubagentsDir(), { recursive: true, mode: SUBAGENTS_DIR_MODE });
+		// mkdir's mode is masked by the process umask; enforce the private mode explicitly.
+		fs.chmodSync(getSubagentsDir(), SUBAGENTS_DIR_MODE);
+	} catch {
+		/* persistence setup failures must not crash the delegation; the child run surfaces them */
+	}
+}
+
+function writeSubagentMetaFile(metaPath: string, meta: SubagentMeta): void {
+	try {
+		fs.writeFileSync(metaPath, JSON.stringify(meta, null, "\t"), { encoding: "utf-8", mode: 0o600 });
+	} catch {
+		/* ignore */
+	}
+}
+
+function readSessionHeaderId(sessionPath: string): string | undefined {
+	try {
+		const firstLine = fs.readFileSync(sessionPath, "utf-8").split("\n", 1)[0];
+		const entry = JSON.parse(firstLine);
+		if (entry?.type === "session" && typeof entry.id === "string") return entry.id;
+	} catch {
+		/* missing session file, torn first line, or unparsable header */
+	}
+	return undefined;
+}
+
+function removeSubagentFile(filePath: string): void {
+	try {
+		fs.rmSync(filePath, { force: true });
+	} catch {
+		/* ignore */
+	}
+}
+
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	const currentScript = process.argv[1];
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
@@ -281,6 +347,8 @@ async function runSingleAgent(
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
 ): Promise<SingleResult> {
+	const subagentId = uuidv7();
+	const { session: sessionPath, pid: pidPath, meta: metaPath } = getSubagentFilePaths(subagentId);
 	const agent = agents.find((a) => a.name === agentName);
 
 	if (!agent) {
@@ -289,6 +357,8 @@ async function runSingleAgent(
 			agent: agentName,
 			agentSource: "unknown",
 			task,
+			subagentId,
+			sessionPath,
 			exitCode: 1,
 			messages: [],
 			stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
@@ -297,7 +367,7 @@ async function runSingleAgent(
 		};
 	}
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session"];
+	const args: string[] = ["--mode", "json", "-p", "--session", sessionPath];
 	const inheritsDispatchConfig = !agent.model;
 	const model = agent.model ?? dispatchDefaults.model;
 	if (model) args.push("--model", model);
@@ -313,6 +383,8 @@ async function runSingleAgent(
 		agent: agentName,
 		agentSource: agent.source,
 		task,
+		subagentId,
+		sessionPath,
 		exitCode: 0,
 		messages: [],
 		stderr: "",
@@ -341,6 +413,17 @@ async function runSingleAgent(
 		args.push(`Task: ${task}`);
 		let wasAborted = false;
 
+		ensureSubagentsDir();
+		const spawnMeta: SubagentMeta = {
+			agent: agentName,
+			task,
+			model,
+			thinkingLevel: inheritsDispatchConfig ? dispatchDefaults.thinkingLevel : undefined,
+			startedAt: new Date().toISOString(),
+			promptHash: createHash("sha256").update(agent.systemPrompt).digest("hex"),
+		};
+		writeSubagentMetaFile(metaPath, spawnMeta);
+
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
 			const proc = spawn(invocation.command, invocation.args, {
@@ -348,6 +431,13 @@ async function runSingleAgent(
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
+			if (proc.pid !== undefined) {
+				try {
+					fs.writeFileSync(pidPath, `${proc.pid}\n`, { encoding: "utf-8", mode: 0o600 });
+				} catch {
+					/* ignore */
+				}
+			}
 			let buffer = "";
 
 			const processLine = (line: string) => {
@@ -421,6 +511,22 @@ async function runSingleAgent(
 		});
 
 		currentResult.exitCode = exitCode;
+
+		const status = wasAborted ? "aborted" : isFailedResult(currentResult) ? "failed" : "succeeded";
+		removeSubagentFile(pidPath);
+		if (status === "succeeded") {
+			removeSubagentFile(sessionPath);
+			removeSubagentFile(metaPath);
+		} else {
+			writeSubagentMetaFile(metaPath, {
+				...spawnMeta,
+				status,
+				stopReason: currentResult.stopReason,
+				exitCode,
+				sessionHeaderId: readSessionHeaderId(sessionPath),
+			});
+		}
+
 		if (wasAborted) throw new Error("Subagent was aborted");
 		return currentResult;
 	} finally {
@@ -622,6 +728,8 @@ export default function (pi: ExtensionAPI) {
 						agent: params.tasks[i].agent,
 						agentSource: "unknown",
 						task: params.tasks[i].task,
+						subagentId: "",
+						sessionPath: "",
 						exitCode: -1, // -1 = still running
 						messages: [],
 						stderr: "",
