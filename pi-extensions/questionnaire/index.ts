@@ -211,10 +211,13 @@ export default function questionnaire(pi: ExtensionAPI) {
 					if (!resp || resp.cancelled || typeof resp.answer !== "object" || resp.answer === null) {
 						return errorResult("Error: questionnaire relay was cancelled or closed", questions);
 					}
-					const answerMap = resp.answer as Record<string, string>;
+					if (typeof resp.answer !== "object" || resp.answer === null || Array.isArray(resp.answer)) {
+						return errorResult("Error: questionnaire relay returned malformed answer", questions);
+					}
+					const answerMap = resp.answer as Record<string, unknown>;
 					const answers: Answer[] = questions
 						.filter((q) => typeof answerMap[q.id] === "string")
-						.map((q) => ({ id: q.id, value: answerMap[q.id], label: answerMap[q.id], wasCustom: false }));
+						.map((q) => ({ id: q.id, value: answerMap[q.id] as string, label: answerMap[q.id] as string, wasCustom: false }));
 					if (answers.length === 0) {
 						return errorResult("Error: questionnaire relay returned no answers", questions);
 					}

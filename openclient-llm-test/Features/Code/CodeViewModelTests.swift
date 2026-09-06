@@ -102,10 +102,10 @@ final class CodeViewModelTests: XCTestCase {
         sut.send(.disconnect)
 
         // Then
-        guard case let .disconnected(form) = sut.state else {
+        guard case .disconnected = sut.state else {
             return XCTFail("Expected disconnected, got \(sut.state)")
         }
-        XCTAssertNil(form.errorMessage)
+        XCTAssertNil(sut.connectForm.errorMessage)
         XCTAssertEqual(mockClient.disconnectCount, 1)
     }
 
@@ -158,10 +158,10 @@ final class CodeViewModelTests: XCTestCase {
         }
 
         // Then
-        guard case let .disconnected(form) = sut.state else {
+        guard case .disconnected = sut.state else {
             return XCTFail("Expected disconnected, got \(sut.state)")
         }
-        XCTAssertNotNil(form.errorMessage)
+        XCTAssertNotNil(sut.connectForm.errorMessage)
     }
 
     // MARK: - Tests — Prompt / steer / abort routing

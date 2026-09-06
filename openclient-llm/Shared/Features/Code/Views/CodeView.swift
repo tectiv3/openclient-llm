@@ -10,16 +10,9 @@ import SwiftUI
 struct CodeView: View {
     // MARK: - Properties
 
-    var viewModel: CodeViewModel
+    @Bindable var viewModel: CodeViewModel
     var onBack: () -> Void = {}
     @Environment(\.scenePhase) private var scenePhase
-
-    // Connect form fields live here (not in CodeConnectView) so they survive
-    // the .disconnected → .connecting → .disconnected transitions.
-    @State private var connectHost: String = ""
-    @State private var connectPortText: String = ""
-    @State private var connectCode: String = ""
-    @State private var hasPrefilledConnectFields = false
 
     // MARK: - View
 
@@ -27,12 +20,9 @@ struct CodeView: View {
         NavigationStack {
             Group {
                 switch viewModel.state {
-                case let .disconnected(form):
+                case .disconnected:
                     CodeConnectView(
-                        form: form,
-                        host: $connectHost,
-                        portText: $connectPortText,
-                        code: $connectCode
+                        form: $viewModel.connectForm
                     ) { host, port, code in
                         viewModel.send(.connect(
                             host: host, port: port, code: code
@@ -41,10 +31,7 @@ struct CodeView: View {
 
                 case .connecting:
                     CodeConnectView(
-                        form: connectFormWhileConnecting,
-                        host: $connectHost,
-                        portText: $connectPortText,
-                        code: $connectCode,
+                        form: $viewModel.connectForm,
                         isConnecting: true
                     ) { _, _, _ in }
                     cancelConnectOverlay
@@ -68,12 +55,6 @@ struct CodeView: View {
                     failedView(errorMessage)
                 }
             }
-            .onAppear {
-                prefillConnectFieldsIfNeeded()
-            }
-            .onChange(of: viewModel.state) { _, newState in
-                syncConnectFields(from: newState)
-            }
             .navigationTitle(String(localized: "Code"))
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
@@ -95,14 +76,6 @@ struct CodeView: View {
 // MARK: - Private
 
 private extension CodeView {
-    var connectFormWhileConnecting: CodeViewModel.ConnectForm {
-        CodeViewModel.ConnectForm(
-            host: connectHost,
-            port: Int(connectPortText) ?? 47800,
-            hasSavedHost: true
-        )
-    }
-
     var cancelConnectOverlay: some View {
         VStack {
             Spacer()
@@ -145,23 +118,6 @@ private extension CodeView {
             .buttonStyle(.plain)
         }
         .padding()
-    }
-
-    func prefillConnectFieldsIfNeeded() {
-        guard !hasPrefilledConnectFields,
-              case let .disconnected(form) = viewModel.state
-        else { return }
-        hasPrefilledConnectFields = true
-        connectHost = form.host
-        connectPortText = form.port > 0 ? "\(form.port)" : "47800"
-        connectCode = form.code
-    }
-
-    func syncConnectFields(from state: CodeViewModel.State) {
-        guard case let .disconnected(form) = state else { return }
-        connectHost = form.host
-        connectPortText = form.port > 0 ? "\(form.port)" : "47800"
-        connectCode = form.code
     }
 }
 

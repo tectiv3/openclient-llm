@@ -1,10 +1,10 @@
 import { createHash, randomBytes, randomInt } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { execFileSync } from 'node:child_process'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { dbgLog } from './debug'
 import { runPushSetup } from './push-setup'
 import {
     FINISHED_COLLAPSE_ID,
@@ -52,7 +52,7 @@ type PendingAsk = {
     id: string
     kind: 'question' | 'questionnaire'
     message: JsonObject
-    resolve: (result: RemoteQuestionAnswer | RemoteQuestionnaireAnswer | null) => void
+    resolve: (result: RemoteQuestionAnswer | RemoteQuestionnaireAnswer[] | null) => void
 }
 
 type RateLimitEntry = {
@@ -246,7 +246,7 @@ function singleton(): RcSingleton {
             dbgLog('ask created:', id, opts.kind)
             this.broadcast(message)
             fireQuestionPush(this)
-            return new Promise<RemoteQuestionAnswer | RemoteQuestionnaireAnswer | null>(
+            return new Promise<RemoteQuestionAnswer | RemoteQuestionnaireAnswer[] | null>(
                 resolve => {
                     pending.resolve = result => {
                         if (this.pendingAsk === pending) this.pendingAsk = null
@@ -1021,35 +1021,6 @@ function writeAuth(payload: JsonObject): void {
     renameSync(tempFile, file)
 }
 
-// Diagnostic file logging. Enable with PI_RC_DEBUG=1 (writes to
-// ~/.pi/agent/rc-debug.log) or PI_RC_DEBUG_FILE=<path>. Off by default.
-function debugLogPath(): string | null {
-    const file = process.env.PI_RC_DEBUG_FILE?.trim()
-    if (file) return file
-    if (process.env.PI_RC_DEBUG?.trim()) return join(homedir(), '.pi', 'agent', 'rc-debug.log')
-    return null
-}
-
-function safeJson(value: unknown): string {
-    try {
-        return JSON.stringify(value) ?? String(value)
-    } catch {
-        return String(value)
-    }
-}
-
-function dbgLog(...parts: unknown[]): void {
-    const path = debugLogPath()
-    if (!path) return
-    const line = parts
-        .map(part => (typeof part === 'string' ? part : safeJson(part)))
-        .join(' ')
-    try {
-        appendFileSync(path, `[${new Date().toISOString()}] ${line}\n`)
-    } catch {
-        // Diagnostics must never break the server
-    }
-}
 
 // Test seam only: written solely when a harness sets PI_RC_AUTH_FILE.
 // Production never touches the filesystem for RC state (TUI shows it via notify).

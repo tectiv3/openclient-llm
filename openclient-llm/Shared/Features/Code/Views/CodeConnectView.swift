@@ -7,20 +7,17 @@
 
 import SwiftUI
 
-/// Connect form for the Code tab. Field values are owned by the parent
-/// (`CodeView`) so they survive the `.disconnected` → `.connecting` transition.
 struct CodeConnectView: View {
     // MARK: - Properties
 
-    let form: CodeViewModel.ConnectForm
-    @Binding var host: String
-    @Binding var portText: String
-    @Binding var code: String
+    @Binding var form: CodeViewModel.ConnectForm
     var isConnecting: Bool = false
     let onConnect: (String, Int, String) -> Void
 
     @State private var showHostFields: Bool = false
+    @State private var portText: String = ""
     @State private var now: Date = .now
+    @State private var didSyncPort = false
     @FocusState private var focusedField: Field?
 
     private enum Field: Hashable {
@@ -72,6 +69,10 @@ struct CodeConnectView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .onAppear {
+            if !didSyncPort {
+                portText = form.port > 0 ? "\(form.port)" : "47800"
+                didSyncPort = true
+            }
             if form.hasSavedHost {
                 focusedField = .code
             } else {
@@ -118,25 +119,25 @@ private extension CodeConnectView {
         VStack(spacing: 12) {
             TextField(
                 String(localized: "Host (e.g. mac.ts.net)"),
-                text: $host
+                text: $form.host
             )
             .textFieldStyle(.roundedBorder)
             .autocorrectionDisabled()
-#if os(iOS)
-            .textInputAutocapitalization(.never)
-            .keyboardType(.URL)
-#endif
-            .focused($focusedField, equals: .host)
+            #if os(iOS)
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+            #endif
+                .focused($focusedField, equals: .host)
 
             TextField(
                 String(localized: "Port"),
                 text: $portText
             )
             .textFieldStyle(.roundedBorder)
-#if os(iOS)
-            .keyboardType(.numberPad)
-#endif
-            .focused($focusedField, equals: .port)
+            #if os(iOS)
+                .keyboardType(.numberPad)
+            #endif
+                .focused($focusedField, equals: .port)
 
             codeField
         }
@@ -145,19 +146,21 @@ private extension CodeConnectView {
     var codeField: some View {
         TextField(
             String(localized: "Code"),
-            text: $code
+            text: $form.code
         )
         .textFieldStyle(.roundedBorder)
         .font(.system(.title2, design: .monospaced))
         .multilineTextAlignment(.center)
         .autocorrectionDisabled()
-#if os(iOS)
-        .keyboardType(.numberPad)
-#endif
-        .focused($focusedField, equals: .code)
-        .onSubmit {
-            if isValid { submitConnect() }
-        }
+        #if os(iOS)
+            .keyboardType(.numberPad)
+        #endif
+            .focused($focusedField, equals: .code)
+            .onSubmit {
+                if isValid {
+                    submitConnect()
+                }
+            }
     }
 
     var connectButton: some View {
@@ -182,10 +185,10 @@ private extension CodeConnectView {
 
     var isValid: Bool {
         let portValue = Int(portText) ?? 0
-        return !host.isEmpty
+        return !form.host.isEmpty
             && portValue > 0
             && portValue <= 65535
-            && code.count == 6
+            && form.code.count == 6
     }
 
     var isRateLimited: Bool {
@@ -195,14 +198,14 @@ private extension CodeConnectView {
 
     func submitConnect() {
         let portValue = Int(portText) ?? 47800
-        onConnect(host, portValue, code)
+        onConnect(form.host, portValue, form.code)
     }
 
     /// Ticks `now` once per second while the pairing-code lockout is active so
     /// the countdown and Connect button re-evaluate.
     func tickRateLimit() async {
         guard let until = form.rateLimitedUntil else { return }
-        while !Task.isCancelled && Date.now < until {
+        while !Task.isCancelled, Date.now < until {
             try? await Task.sleep(for: .seconds(1))
             now = .now
         }
@@ -214,57 +217,42 @@ private extension CodeConnectView {
 
 #Preview("First Time") {
     CodeConnectView(
-        form: .init(),
-        host: .constant(""),
-        portText: .constant("47800"),
-        code: .constant("")
+        form: .constant(.init())
     ) { _, _, _ in }
 }
 
 #Preview("Repeat") {
     CodeConnectView(
-        form: .init(host: "mac.ts.net", port: 47800, hasSavedHost: true),
-        host: .constant("mac.ts.net"),
-        portText: .constant("47800"),
-        code: .constant("")
+        form: .constant(.init(host: "mac.ts.net", port: 47800, hasSavedHost: true))
     ) { _, _, _ in }
 }
 
 #Preview("Error") {
     CodeConnectView(
-        form: .init(
+        form: .constant(.init(
             host: "mac.ts.net",
             port: 47800,
             errorMessage: "Invalid code — check the code shown in pi",
             hasSavedHost: true
-        ),
-        host: .constant("mac.ts.net"),
-        portText: .constant("47800"),
-        code: .constant("")
+        ))
     ) { _, _, _ in }
 }
 
 #Preview("Connecting") {
     CodeConnectView(
-        form: .init(host: "mac.ts.net", port: 47800, hasSavedHost: true),
-        host: .constant("mac.ts.net"),
-        portText: .constant("47800"),
-        code: .constant("1A2B3C"),
+        form: .constant(.init(host: "mac.ts.net", port: 47800, code: "1A2B3C", hasSavedHost: true)),
         isConnecting: true
     ) { _, _, _ in }
 }
 
 #Preview("Rate Limited") {
     CodeConnectView(
-        form: .init(
+        form: .constant(.init(
             host: "mac.ts.net",
             port: 47800,
             errorMessage: "Too many attempts — wait 60s",
             hasSavedHost: true,
             rateLimitedUntil: .now.addingTimeInterval(45)
-        ),
-        host: .constant("mac.ts.net"),
-        portText: .constant("47800"),
-        code: .constant("1A2B3C")
+        ))
     ) { _, _, _ in }
 }

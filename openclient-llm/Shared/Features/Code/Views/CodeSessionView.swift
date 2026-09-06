@@ -154,7 +154,11 @@ private extension CodeSessionView {
     var pendingQuestion: Binding<CodeViewModel.PendingQuestion?> {
         Binding(
             get: { session.pendingQuestion },
-            set: { _ in }
+            set: { newValue in
+                if newValue == nil {
+                    viewModel.send(.abort)
+                }
+            }
         )
     }
 

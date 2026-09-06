@@ -21,22 +21,20 @@ struct CodeQuestionContent: View {
     // MARK: - View
 
     var body: some View {
-        Group {
-            switch question.kind {
-            case .question(let params):
-                SingleQuestionView(
-                    questionId: question.id,
-                    params: params,
-                    onAnswer: onAnswer
-                )
+        switch question.kind {
+        case let .question(params):
+            SingleQuestionView(
+                questionId: question.id,
+                params: params,
+                onAnswer: onAnswer
+            )
 
-            case .questionnaire(let params):
-                QuestionnaireView(
-                    questionId: question.id,
-                    params: params,
-                    onAnswerQuestionnaire: onAnswerQuestionnaire
-                )
-            }
+        case let .questionnaire(params):
+            QuestionnaireView(
+                questionId: question.id,
+                params: params,
+                onAnswerQuestionnaire: onAnswerQuestionnaire
+            )
         }
     }
 }
@@ -94,7 +92,7 @@ private struct SingleQuestionView: View {
         Button {
             onAnswer(
                 questionId,
-                option.label,
+                option.value,
                 false,
                 index
             )
@@ -134,7 +132,7 @@ private struct SingleQuestionView: View {
                         axis: .vertical
                     )
                     .textFieldStyle(.plain)
-                    .lineLimit(1...3)
+                    .lineLimit(1 ... 3)
                     .focused($isCustomFocused)
                     .onSubmit {
                         submitCustom()
@@ -213,13 +211,12 @@ private struct QuestionnaireView: View {
                         .tag(index)
                 }
             }
-#if os(iOS)
+            #if os(iOS)
             .tabViewStyle(.page(indexDisplayMode:
                 params.questions.count >= 7
                     ? .never
-                    : .automatic
-            ))
-#endif
+                    : .automatic))
+            #endif
 
             if currentPage == params.questions.count - 1 {
                 submitButton
@@ -274,7 +271,7 @@ private struct QuestionnaireView: View {
 
     func questionPage(
         _ question: CodeSubQuestion,
-        index: Int
+        index _: Int
     ) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -291,7 +288,7 @@ private struct QuestionnaireView: View {
                             option,
                             questionId: question.id,
                             isSelected: answers[question.id]
-                                == option.label
+                                == option.value
                         )
 
                         if optIndex < question.options.count - 1 {
@@ -313,7 +310,7 @@ private struct QuestionnaireView: View {
                             axis: .vertical
                         )
                         .textFieldStyle(.plain)
-                        .lineLimit(1...3)
+                        .lineLimit(1 ... 3)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 12)
 
@@ -353,7 +350,7 @@ private struct QuestionnaireView: View {
         isSelected: Bool
     ) -> some View {
         Button {
-            answers[questionId] = option.label
+            answers[questionId] = option.value
         } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
@@ -391,12 +388,13 @@ private struct QuestionnaireView: View {
                 guard let selected = answers[question.id]
                 else { return nil }
                 let index = question.options.firstIndex {
-                    $0.label == selected
+                    $0.value == selected
                 }
+                let label = index.map { question.options[$0].label } ?? selected
                 return CodeQuestionnaireAnswer(
                     id: question.id,
                     value: selected,
-                    label: selected,
+                    label: label,
                     wasCustom: index == nil,
                     index: index
                 )

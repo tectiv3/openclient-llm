@@ -37,7 +37,7 @@ final class CodeViewModel {
     }
 
     enum State: Equatable {
-        case disconnected(ConnectForm)
+        case disconnected
         case connecting
         case connected(SessionState)
         case reconnecting(SessionState)
@@ -87,18 +87,19 @@ final class CodeViewModel {
 
     private(set) var state: State
 
-    let client: CodeServerClientProtocol
-    let settingsManager: SettingsManagerProtocol
+    private(set) var client: CodeServerClientProtocol
+    private(set) var settingsManager: SettingsManagerProtocol
     var eventTask: Task<Void, Never>?
     var queuedAnswer: CodeClientMessage?
 
-    // Shared with the CodeViewModel+Background / +Questions extensions.
-    let backgroundUseCase: CodeBackgroundUseCaseProtocol
-    let notificationManager: LocalNotificationManagerProtocol
+    private(set) var backgroundUseCase: CodeBackgroundUseCaseProtocol
+    private(set) var notificationManager: LocalNotificationManagerProtocol
 
-    // Last successful-connect credentials (code is ephemeral, so the VM must
-    // retain it to auto-reconnect after a background disconnect).
-    var lastConnect: ConnectCredentials?
+    /// Persists across state transitions so editable fields survive
+    /// .disconnected → .connecting → .disconnected cycles.
+    var connectForm: ConnectForm
+
+    private(set) var lastConnect: ConnectCredentials?
     var backgroundDisconnected = false
 
     /// Transient toast text (e.g. question resolved on another device),
@@ -133,11 +134,12 @@ final class CodeViewModel {
         let host = settingsManager.getCodeHost() ?? ""
         let port = settingsManager.getCodePort()
         let hasSaved = !host.isEmpty
-        state = .disconnected(ConnectForm(
+        connectForm = ConnectForm(
             host: host,
             port: port > 0 ? port : 47800,
             hasSavedHost: hasSaved
-        ))
+        )
+        state = .disconnected
         self.client = client
         self.settingsManager = settingsManager
         self.backgroundUseCase = backgroundUseCase
@@ -546,17 +548,28 @@ extension CodeViewModel {
     }
 
     private func handleAuthFailed(_ error: CodeServerError) {
+        let wasReconnecting: Bool
+        if case .reconnecting = state {
+            wasReconnecting = true
+        } else {
+            wasReconnecting = false
+        }
+
         backgroundUseCase.end()
-        var form = disconnectedForm(
-            errorMessage: authErrorMessage(error)
-        )
+
+        let message: String
+        if wasReconnecting, error.code == "bad_code" {
+            message = String(localized: "Pairing code expired — re-pair from pi")
+        } else {
+            message = authErrorMessage(error)
+        }
+
+        connectForm = disconnectedForm(errorMessage: message)
         if error.code == "rate_limited" {
-            // Server lockout is a fixed 60s (spec A7); expose the lift
-            // date so the connect screen can render a countdown.
-            form.rateLimitedUntil = Date.now
+            connectForm.rateLimitedUntil = Date.now
                 .addingTimeInterval(Self.rateLimitSeconds)
         }
-        state = .disconnected(form)
+        state = .disconnected
     }
 
     private func sendQueuedAnswerIfNeeded() {
@@ -580,7 +593,8 @@ extension CodeViewModel {
 
     func resetToDisconnected() {
         pendingPromptEchoes.removeAll()
-        state = .disconnected(disconnectedForm())
+        connectForm = disconnectedForm()
+        state = .disconnected
     }
 
     func updateSession(_ session: SessionState) {
