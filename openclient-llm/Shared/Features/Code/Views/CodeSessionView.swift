@@ -52,6 +52,7 @@ struct CodeSessionView: View {
                 inputText: $inputText,
                 isStreaming: session.isStreaming,
                 isDisabled: isReconnecting,
+                isQuestionPresented: session.pendingQuestion != nil,
                 onSend: handleSend,
                 onStop: { viewModel.send(.abort) }
             )

@@ -13,8 +13,11 @@ struct CodeInputBarView: View {
     @Binding var inputText: String
     let isStreaming: Bool
     var isDisabled: Bool = false
+    var isQuestionPresented: Bool = false
     let onSend: () -> Void
     let onStop: () -> Void
+
+    @FocusState private var inputFocused: Bool
 
     // MARK: - View
 
@@ -30,14 +33,15 @@ struct CodeInputBarView: View {
                 )
                 .textFieldStyle(.plain)
                 .textSelection(.enabled)
-                .lineLimit(1...5)
-#if os(iOS)
-                .submitLabel(.send)
-#endif
-                .onSubmit {
-                    onSend()
-                }
-                .disabled(isDisabled)
+                .lineLimit(1 ... 5)
+                #if os(iOS)
+                    .submitLabel(.send)
+                #endif
+                    .onSubmit {
+                        onSend()
+                    }
+                    .focused($inputFocused)
+                    .disabled(isDisabled)
 
                 actionButtons
             }
@@ -54,6 +58,12 @@ struct CodeInputBarView: View {
         .padding(.bottom, 8)
         .opacity(isDisabled ? 0.5 : 1.0)
         .allowsHitTesting(!isDisabled)
+        .onChange(of: isQuestionPresented) { _, presented in
+            // The question card needs to be fully visible; drop keyboard focus.
+            if presented {
+                inputFocused = false
+            }
+        }
         .accessibilityValue(
             isStreaming
                 ? String(localized: "Steer mode")
