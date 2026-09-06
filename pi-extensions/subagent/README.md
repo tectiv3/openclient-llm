@@ -9,7 +9,9 @@ Delegate tasks to specialized subagents with isolated context windows.
 - **Parallel streaming**: All parallel tasks stream updates simultaneously
 - **Markdown rendering**: Final output rendered with proper formatting (expanded view)
 - **Usage tracking**: Shows turns, tokens, cost, and context usage per agent
-- **Abort support**: Ctrl+C propagates to kill subagent processes
+- **Persistence**: Interrupted or failed runs survive under `~/.pi/agent/subagents/` with a subagent id
+- **Resume**: Continue a persisted run in the same conversation (`resume: "<id>"`, single mode)
+- **Recoverable abort**: Interrupting the parent returns an error tool result with partial output, not an exception
 
 ## Structure
 
@@ -92,9 +94,91 @@ Use a chain: first have scout find the read tool, then have planner suggest impr
 
 | Mode | Parameter | Description |
 |------|-----------|-------------|
-| Single | `{ agent, task }` | One agent, one task |
+| Single | `{ agent, task, resume? }` | One agent, one task; `resume` continues a persisted run |
 | Parallel | `{ tasks: [...] }` | Multiple agents run concurrently (max 8, 4 concurrent) |
 | Chain | `{ chain: [...] }` | Sequential with `{previous}` placeholder |
+
+The extension also registers the `subagent_inspect` tool and the `/subagents` command —
+see [Persistence & Resume](#persistence--resume).
+
+## Persistence & Resume
+
+Every invocation (single task, chain step, or parallel task) gets a UUIDv7 subagent id and
+runs with `--session ~/.pi/agent/subagents/<id>.jsonl`, so the child's transcript survives
+the parent process.
+
+**Artifacts** — in `~/.pi/agent/subagents/`, created with directory mode `0700` (session
+files contain full tool output, potentially secrets):
+
+| File | Contents |
+|------|----------|
+| `<id>.jsonl` | pi session file, written by the child |
+| `<id>.meta` | JSON sidecar (mode `0600`): agent, task, model, thinking level, startedAt, sha256 `promptHash` of the agent system prompt; updated on close with status, stopReason, exitCode, and the session header id |
+| `<id>.pid` | Child pid, present while the child is running |
+
+- **Retention**: a clean success deletes all three files — the output already lives in the
+  parent's tool result. Aborted/failed/killed runs persist until resumed to completion or
+  manually deleted (`rm ~/.pi/agent/subagents/<id>.*`; `/subagents` lists what is there).
+- The directory sits outside the per-project sessions tree, so subagent runs never appear
+  in the `/resume` picker.
+- **Recovery granularity**: pi creates the session file only at the child's first
+  `message_end`. A run interrupted during its first message persists no transcript — there
+  is nothing to inspect or resume, and the failure report says so. Expected behavior, not
+  a bug.
+
+### Aborting
+
+- **Escape** (`app.interrupt`) aborts the running subagent: the child process is killed and
+  the tool returns a recoverable **error tool result** — not an exception — with the partial
+  output up to the last `message_end`, the subagent id, and a resume hint.
+- **Ctrl+C does not abort subagents** (it clears the editor / exits the session instead).
+- Children that fail or are killed externally produce the same failure report. The behavior
+  is uniform across modes: chain stops at the failing step; parallel tasks each get their
+  own failure report and id.
+
+### Resuming
+
+```
+subagent { agent: "scout", task: "<continuation instruction>", resume: "<id>" }
+```
+
+- Single mode only — `resume` alongside `tasks`/`chain` is rejected.
+- The child is spawned with `--session <same path>`, which continues the existing
+  conversation (not `--resume`, the interactive picker flag, which is unusable headless).
+  The `task` text is the continuation instruction.
+- The original run's model and thinking level are re-passed from the meta sidecar; if the
+  original run recorded no model, the current dispatch model (or the child's default) is
+  used, noted in the tool result.
+- Guards, in order:
+  1. The session file must exist — otherwise the error lists the available persisted ids
+     (completed runs are cleaned up).
+  2. The pidfile must not belong to a live process — a stale pidfile (parent crashed before
+     cleanup) is auto-removed and the run is treated as interrupted.
+  3. The meta sidecar must be readable — missing or corrupt sidecars refuse the resume.
+  4. `agent` must match the original run — a different agent means a different system
+     prompt and toolset.
+  5. The agent definition's `promptHash` must match — a changed agent file is refused with
+     a suggestion to start a fresh delegation.
+- Each resume increments `resumedCount` in the sidecar (shown by `subagent_inspect`).
+
+### Inspecting runs: `subagent_inspect`
+
+`subagent_inspect { id, limit? }` reports status, agent, task, model, usage, and the last
+`limit` transcript entries (default 20; entries render like the collapsed view).
+
+- `id` may be the exact filename id or a unique prefix (ambiguous prefixes list the matches).
+- Status is `running` (via the pidfile), `aborted`, `failed`, or `unknown` (no meta sidecar).
+  Successful runs are deleted on completion, so a bare id with no artifacts is
+  indistinguishable from a completed run — its output is in the parent's tool result.
+- Works on still-running children (the JSONL is appended incrementally) — useful for
+  debugging a stuck subagent.
+- Torn final lines (child killed mid-append) and unknown entry types are skipped.
+
+### Listing runs: `/subagents`
+
+List-only: short id (first 8 characters), agent, status, session size, and a task preview,
+with a footer showing the inspect/resume/delete hints. There is no interactive delete — by
+design, `subagent_inspect` covers the model and `rm` covers the user.
 
 ## Output Display
 
@@ -160,13 +244,30 @@ Project agents override user agents with the same name when `agentScope: "both"`
 
 ## Error Handling
 
-- **Exit code != 0**: Tool returns error with stderr/output
-- **stopReason "error"**: LLM error propagated with error message
-- **stopReason "aborted"**: User abort (Ctrl+C) kills subprocess, throws error
-- **Chain mode**: Stops at first failing step, reports which step failed
+Failed and aborted children return error tool results (not exceptions). Whenever spawn
+artifacts were persisted, the report includes the partial output, the subagent id, and a
+resume hint:
+
+- **Exit code != 0**: Failure report with stderr/diagnostics and partial output
+- **stopReason "error"**: LLM error message propagated in the failure report
+- **stopReason "aborted"**: Abort kills the subprocess; the report carries the partial
+  output up to the last `message_end`, or states that none was persisted
+- **Pre-spawn failures** (e.g. unknown agent): error result without id or hint — nothing
+  was spawned or persisted
+- **Chain mode**: Stops at the first failing step and reports which step failed
+- **Parallel mode**: The batch is not rejected; each failed task gets a per-task summary
+  with its own id and resume hint
 
 ## Limitations
 
 - Output truncated to last 10 items in collapsed view (expand to see all)
 - Agents discovered fresh on each invocation (allows editing mid-session)
 - Parallel mode limited to 8 tasks, 4 concurrent
+- **L1 — resume inherits the original cwd**: pi reads the session's working directory from
+  the JSONL header, so a resumed child runs in the original project's context even when
+  resumed from a different parent cwd
+- **L2 — agent prompt is re-read at resume**: the original run's temp prompt file is deleted
+  after the run; resume re-reads the agent's markdown file. The `promptHash` guard detects a
+  changed prompt and refuses the resume
+- **L3 — recovery is per-`message_end`**: partial output survives only up to the last
+  completed message; a run interrupted during its first message persists no transcript
