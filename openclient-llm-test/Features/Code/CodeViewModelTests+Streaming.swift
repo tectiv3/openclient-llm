@@ -41,8 +41,19 @@ extension CodeViewModelTests {
         // When
         sut.send(.sendPrompt(text: "hi"))
 
-        // Then
+        // Then — echo deduped to the existing history item
         XCTAssertEqual(currentSession()?.items.count, 1)
+
+        // The prompt is still sent exactly once (dedup skips the echo,
+        // not the send).
+        try await waitUntil {
+            self.mockClient.sentMessageCount(where: {
+                if case .prompt = $0 {
+                    return true
+                }
+                return false
+            }) == 1
+        }
     }
 
     func test_sendSteer_connectedStreaming_sendsSteerMessage() async throws {
@@ -80,7 +91,7 @@ extension CodeViewModelTests {
             (self.currentSession()?.items.count ?? 0) == 1
         }
 
-        // When — raw pi frame: full partial message snapshot
+        // When — first raw pi frame: full partial message snapshot
         mockClient.emit(.event(messageUpdateEvent(
             thinking: "let's think", text: "hello "
         )))
@@ -95,12 +106,90 @@ extension CodeViewModelTests {
             ]
         }
 
-        // Then — snapshot replaced the empty bubble, in order
+        // When — second frame with a longer snapshot: replace, not append
+        mockClient.emit(.event(messageUpdateEvent(
+            thinking: "let's think", text: "hello world"
+        )))
+        try await waitUntil {
+            guard let items = self.currentSession()?.items,
+                  case let .assistant(_, content, _)? = items.last
+            else {
+                return false
+            }
+            return content == [
+                .thinking("let's think"), .text("hello world"),
+            ]
+        }
+
+        // Then — snapshot replaced the bubble content, in order
         let items = try XCTUnwrap(currentSession()?.items)
         guard case let .assistant(_, content, _)? = items.last else {
             return XCTFail("Expected assistant item, got \(items.last)")
         }
-        XCTAssertEqual(content, [.thinking("let's think"), .text("hello ")])
+        XCTAssertEqual(content, [.thinking("let's think"), .text("hello world")])
+    }
+
+    func test_messageUpdate_skipsToolCallBlocksFromSnapshot() async throws {
+        // Given
+        try await connectAndEstablish(isStreaming: true)
+        mockClient.emit(.event(CodeStreamEvent(
+            sessionId: "s1",
+            name: "message_start",
+            payload: [:]
+        )))
+        try await waitUntil {
+            (self.currentSession()?.items.count ?? 0) == 1
+        }
+
+        // When — raw pi frame carrying a toolCall block alongside text
+        mockClient.emit(.event(messageUpdateEventWithToolCall(text: "checking")))
+
+        // Then — text kept, toolCall block skipped
+        try await waitUntil {
+            guard let items = self.currentSession()?.items,
+                  case let .assistant(_, content, _)? = items.last
+            else {
+                return false
+            }
+            return content == [.text("checking")]
+        }
+        let items = try XCTUnwrap(currentSession()?.items)
+        guard case let .assistant(_, content, _)? = items.last else {
+            return XCTFail("Expected assistant item, got \(items.last)")
+        }
+        XCTAssertEqual(content, [.text("checking")])
+    }
+
+    func test_messageUpdate_malformedFrame_doesNotCrash() async throws {
+        // Given
+        try await connectAndEstablish(isStreaming: true)
+        mockClient.emit(.event(CodeStreamEvent(
+            sessionId: "s1",
+            name: "message_start",
+            payload: [:]
+        )))
+        try await waitUntil {
+            (self.currentSession()?.items.count ?? 0) == 1
+        }
+
+        // When — malformed frame: content is a string, not an array
+        mockClient.emit(.event(CodeStreamEvent(
+            sessionId: "s1",
+            name: "message_update",
+            payload: [
+                "message": .object([
+                    "content": .string("not-an-array"),
+                ]),
+            ]
+        )))
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Then — no crash, existing bubble content unchanged
+        let items = try XCTUnwrap(currentSession()?.items)
+        guard case let .assistant(_, content, _)? = items.last else {
+            return XCTFail("Expected assistant item, got \(items.last)")
+        }
+        XCTAssertEqual(content, [])
     }
 
     func test_agentSettled_triggersStateRefresh() async throws {
@@ -259,6 +348,31 @@ extension CodeViewModelTests {
                         .object([
                             "type": .string("text"),
                             "text": .string(text),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+    }
+
+    /// Builds a raw pi `message_update` frame whose `message.content`
+    /// snapshot includes a `toolCall` block alongside the text block.
+    func messageUpdateEventWithToolCall(text: String) -> CodeStreamEvent {
+        CodeStreamEvent(
+            sessionId: "s1",
+            name: "message_update",
+            payload: [
+                "message": .object([
+                    "content": .array([
+                        .object([
+                            "type": .string("text"),
+                            "text": .string(text),
+                        ]),
+                        .object([
+                            "type": .string("toolCall"),
+                            "toolCall": .string("tc1"),
+                            "name": .string("bash"),
+                            "arguments": .object([:]),
                         ]),
                     ]),
                 ]),

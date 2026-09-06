@@ -5,8 +5,8 @@
 //  Created by tectiv3 on 05/09/2026.
 //
 
-import XCTest
 @testable import openclient_llm
+import XCTest
 
 @MainActor
 final class CodeMessageMapperTests: XCTestCase {
@@ -42,7 +42,7 @@ final class CodeMessageMapperTests: XCTestCase {
 
         // Then
         XCTAssertEqual(items.count, 1)
-        guard case .user(_, let text) = items[0] else {
+        guard case let .user(_, text) = items[0] else {
             return XCTFail("Expected user item, got \(items[0])")
         }
         XCTAssertEqual(text, "hi")
@@ -60,7 +60,7 @@ final class CodeMessageMapperTests: XCTestCase {
 
         // Then
         XCTAssertEqual(items.count, 1)
-        guard case .assistant(_, let content, let isStreaming) = items[0] else {
+        guard case let .assistant(_, content, isStreaming) = items[0] else {
             return XCTFail("Expected assistant item, got \(items[0])")
         }
         XCTAssertEqual(content, [.text("hello")])
@@ -78,7 +78,7 @@ final class CodeMessageMapperTests: XCTestCase {
         let items = sut.mapHistoryToItems(messages)
 
         // Then
-        guard case .assistant(_, let content, _) = items[0] else {
+        guard case let .assistant(_, content, _) = items[0] else {
             return XCTFail("Expected assistant item, got \(items[0])")
         }
         XCTAssertEqual(content, [.thinking("hmm")])
@@ -99,12 +99,13 @@ final class CodeMessageMapperTests: XCTestCase {
 
         // Then
         XCTAssertEqual(items.count, 2)
-        guard case .assistant(_, let content, _) = items[0] else {
+        guard case let .assistant(_, content, _) = items[0] else {
             return XCTFail("Expected assistant item first, got \(items[0])")
         }
         XCTAssertEqual(content, [.text("let me check")])
-        guard case .toolStep(_, let toolName, let toolCallId, _, let output,
-                             let isComplete) = items[1] else {
+        guard case let .toolStep(_, toolName, toolCallId, _, output,
+                                 isComplete) = items[1]
+        else {
             return XCTFail("Expected toolStep item second, got \(items[1])")
         }
         XCTAssertEqual(toolName, "bash")
@@ -130,7 +131,7 @@ final class CodeMessageMapperTests: XCTestCase {
 
         // Then
         XCTAssertEqual(items.count, 1, "toolResult must merge into existing step")
-        guard case .toolStep(_, _, _, _, let output, let isComplete) = items[0]
+        guard case let .toolStep(_, _, _, _, output, isComplete) = items[0]
         else {
             return XCTFail("Expected toolStep item, got \(items[0])")
         }
@@ -150,7 +151,7 @@ final class CodeMessageMapperTests: XCTestCase {
 
         // Then
         XCTAssertEqual(items.count, 1)
-        guard case .toolStep(_, _, let toolCallId, _, _, let isComplete) = items[0]
+        guard case let .toolStep(_, _, toolCallId, _, _, isComplete) = items[0]
         else {
             return XCTFail("Expected toolStep item, got \(items[0])")
         }
@@ -169,13 +170,13 @@ final class CodeMessageMapperTests: XCTestCase {
 
         // Then
         XCTAssertEqual(items.count, 1)
-        guard case .compaction(_, let summary) = items[0] else {
+        guard case let .compaction(_, summary) = items[0] else {
             return XCTFail("Expected compaction item, got \(items[0])")
         }
         XCTAssertEqual(summary, "condensed")
     }
 
-    func test_mapHistoryToItems_unknownRole_mapsToEmptyCompactionNoCrash() throws {
+    func test_mapHistoryToItems_unknownRole_isDroppedNoCrash() throws {
         // Given
         let messages = try Self.decodeMessages(#"[{"role":"system","text":"x"}]"#)
 
@@ -183,14 +184,10 @@ final class CodeMessageMapperTests: XCTestCase {
         let items = sut.mapHistoryToItems(messages)
 
         // Then
-        XCTAssertEqual(items.count, 1)
-        guard case .compaction(_, let summary) = items[0] else {
-            return XCTFail("Expected compaction fallback, got \(items[0])")
-        }
-        XCTAssertEqual(summary, "")
+        XCTAssertEqual(items.count, 0)
     }
 
-    func test_mapHistoryToItems_unknownContentBlock_mapsToEmptyTextNoCrash() throws {
+    func test_mapHistoryToItems_unknownContentBlock_isDroppedNoCrash() throws {
         // Given
         let json = #"""
         [{"role":"assistant","content":[{"type":"mystery","text":"?","other":1}]}]
@@ -201,11 +198,7 @@ final class CodeMessageMapperTests: XCTestCase {
         let items = sut.mapHistoryToItems(messages)
 
         // Then
-        XCTAssertEqual(items.count, 1)
-        guard case .assistant(_, let content, _) = items[0] else {
-            return XCTFail("Expected assistant item, got \(items[0])")
-        }
-        XCTAssertEqual(content, [.text("")])
+        XCTAssertEqual(items.count, 0)
     }
 
     func test_mapHistoryToItems_malformedJSON_throwsInsteadOfCrashing() {

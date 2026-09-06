@@ -5,8 +5,8 @@
 //  Created by tectiv3 on 05/09/2026.
 //
 
-import XCTest
 @testable import openclient_llm
+import XCTest
 
 @MainActor
 final class CodeViewModelTests: XCTestCase {
@@ -55,7 +55,9 @@ final class CodeViewModelTests: XCTestCase {
         XCTAssertEqual(mockClient.connectCalls.count, 1)
         try await waitUntil {
             self.mockClient.sentMessageCount(where: {
-                if case .hello = $0 { return true }
+                if case .hello = $0 {
+                    return true
+                }
                 return false
             }) == 1
         }
@@ -68,7 +70,9 @@ final class CodeViewModelTests: XCTestCase {
         // When
         mockClient.emit(.helloOk(version: 1))
         try await waitUntil {
-            if case .connected = self.sut.state { return true }
+            if case .connected = self.sut.state {
+                return true
+            }
             return false
         }
 
@@ -98,7 +102,7 @@ final class CodeViewModelTests: XCTestCase {
         sut.send(.disconnect)
 
         // Then
-        guard case .disconnected(let form) = sut.state else {
+        guard case let .disconnected(form) = sut.state else {
             return XCTFail("Expected disconnected, got \(sut.state)")
         }
         XCTAssertNil(form.errorMessage)
@@ -125,12 +129,14 @@ final class CodeViewModelTests: XCTestCase {
         // When
         mockClient.emit(.connectionFailed("boom"))
         try await waitUntil {
-            if case .failed = self.sut.state { return true }
+            if case .failed = self.sut.state {
+                return true
+            }
             return false
         }
 
         // Then
-        guard case .failed(let message) = sut.state else {
+        guard case let .failed(message) = sut.state else {
             return XCTFail("Expected failed, got \(sut.state)")
         }
         XCTAssertEqual(message, "boom")
@@ -145,12 +151,14 @@ final class CodeViewModelTests: XCTestCase {
             CodeServerError(code: "bad_code", message: "invalid")
         ))
         try await waitUntil {
-            if case .disconnected = self.sut.state { return true }
+            if case .disconnected = self.sut.state {
+                return true
+            }
             return false
         }
 
         // Then
-        guard case .disconnected(let form) = sut.state else {
+        guard case let .disconnected(form) = sut.state else {
             return XCTFail("Expected disconnected, got \(sut.state)")
         }
         XCTAssertNotNil(form.errorMessage)
@@ -166,13 +174,13 @@ final class CodeViewModelTests: XCTestCase {
         sut.send(.sendPrompt(text: "hi"))
         try await waitUntil {
             self.mockClient.sentMessageCount(where: {
-                if case .prompt(let text) = $0 { return text == "hi" }
+                if case let .prompt(text) = $0 {
+                    return text == "hi"
+                }
                 return false
             }) == 1
         }
     }
-
-
 
     func test_sendPrompt_connectedStreaming_doesNotSend() async throws {
         // Given
@@ -185,7 +193,9 @@ final class CodeViewModelTests: XCTestCase {
         // Then
         XCTAssertEqual(
             mockClient.sentMessageCount(where: {
-                if case .prompt = $0 { return true }
+                if case .prompt = $0 {
+                    return true
+                }
                 return false
             }),
             0
@@ -203,7 +213,9 @@ final class CodeViewModelTests: XCTestCase {
         // Then
         XCTAssertEqual(
             mockClient.sentMessageCount(where: {
-                if case .steer = $0 { return true }
+                if case .steer = $0 {
+                    return true
+                }
                 return false
             }),
             0
@@ -218,7 +230,9 @@ final class CodeViewModelTests: XCTestCase {
         sut.send(.abort)
         try await waitUntil {
             self.mockClient.sentMessageCount(where: {
-                if case .abort = $0 { return true }
+                if case .abort = $0 {
+                    return true
+                }
                 return false
             }) == 1
         }
@@ -232,7 +246,9 @@ final class CodeViewModelTests: XCTestCase {
         // Then
         XCTAssertEqual(
             mockClient.sentMessageCount(where: {
-                if case .abort = $0 { return true }
+                if case .abort = $0 {
+                    return true
+                }
                 return false
             }),
             0
@@ -250,7 +266,7 @@ final class CodeViewModelTests: XCTestCase {
             sessionId: "s1",
             messages: [
                 .user(text: "hi"),
-                .assistant(content: [.text("yo")])
+                .assistant(content: [.text("yo")]),
             ],
             cursor: nil
         )))
@@ -260,7 +276,7 @@ final class CodeViewModelTests: XCTestCase {
 
         // Then
         let items = try XCTUnwrap(currentSession()?.items)
-        guard case .user(_, let text) = items[0] else {
+        guard case let .user(_, text) = items[0] else {
             return XCTFail("Expected user item, got \(items[0])")
         }
         XCTAssertEqual(text, "hi")
@@ -297,7 +313,7 @@ final class CodeViewModelTests: XCTestCase {
 
         // Then
         let item = try XCTUnwrap(currentSession()?.items.first)
-        guard case .assistant(_, let content, let isStreaming) = item else {
+        guard case let .assistant(_, content, isStreaming) = item else {
             return XCTFail("Expected assistant item, got \(item)")
         }
         XCTAssertEqual(content, [.text("partial")])
@@ -327,7 +343,9 @@ final class CodeViewModelTests: XCTestCase {
         // When
         mockClient.emit(.disconnected)
         try await waitUntil {
-            if case .reconnecting = self.sut.state { return true }
+            if case .reconnecting = self.sut.state {
+                return true
+            }
             return false
         }
 
@@ -341,14 +359,18 @@ final class CodeViewModelTests: XCTestCase {
         try await connectAndEstablish()
         mockClient.emit(.disconnected)
         try await waitUntil {
-            if case .reconnecting = self.sut.state { return true }
+            if case .reconnecting = self.sut.state {
+                return true
+            }
             return false
         }
 
         // When
         mockClient.emit(.helloOk(version: 1))
         try await waitUntil {
-            if case .connected = self.sut.state { return true }
+            if case .connected = self.sut.state {
+                return true
+            }
             return false
         }
 
@@ -371,10 +393,12 @@ final class CodeViewModelTests: XCTestCase {
         sut.send(.appWillEnterForeground)
         try await waitUntil {
             self.mockClient.connectCalls.count == 2 &&
-            self.mockClient.sentMessageCount(where: {
-                if case .hello = $0 { return true }
-                return false
-            }) == 2
+                self.mockClient.sentMessageCount(where: {
+                    if case .hello = $0 {
+                        return true
+                    }
+                    return false
+                }) == 2
         }
 
         // Then — reconnected and re-sent hello
@@ -400,8 +424,6 @@ final class CodeViewModelTests: XCTestCase {
         XCTAssertEqual(session.sessionId, "s2")
         XCTAssertEqual(session.items.count, 0, "Rebind clears stale transcript")
     }
-
-
 
     func test_streamEvent_staleSessionId_ignored() async throws {
         // Given
@@ -430,14 +452,16 @@ final class CodeViewModelTests: XCTestCase {
         mockClient.emit(.helloOk(version: 1))
         mockClient.emit(.state(sessionInfo(sessionId: sessionId, isStreaming: isStreaming)))
         try await waitUntil {
-            if case .connected = self.sut.state { return true }
+            if case .connected = self.sut.state {
+                return true
+            }
             return false
         }
     }
 
     func currentSession() -> CodeViewModel.SessionState? {
         switch sut.state {
-        case .connected(let session), .reconnecting(let session):
+        case let .connected(session), let .reconnecting(session):
             return session
         default:
             return nil

@@ -343,11 +343,13 @@ private extension CodeViewModel {
                               args, existing, _)
             = session.items[index]
         {
-            let newOutput: String
-            if case let .string(text) = event.payload["output"] {
-                newOutput = (existing ?? "") + text
+            // pi sends `partialResult` as a cumulative snapshot (never
+            // `output`), so replace (not append) the step's output.
+            let newOutput: String?
+            if case let .string(text) = event.payload["partialResult"] {
+                newOutput = text
             } else {
-                newOutput = existing ?? ""
+                newOutput = existing
             }
             session.items[index] = .toolStep(
                 id: id,
