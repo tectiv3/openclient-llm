@@ -336,6 +336,18 @@ machine (env vars remain supported — see config precedence below).
 - JWT clock skew: 5-min TTL per send means no caching; a clock-skewed pi
   machine would get `InvalidToken` — same failure class as missing config,
   surfaced in the response status.
+- **Locked-phone question gap (known, accepted for now)**: the question/questionnaire
+  extensions route to `rc.ask()` only when `isServing() && hasConnectedClients()`. A
+  locked phone has a dead WS, so `ask()` is never called and `fireQuestionPush` never
+  fires in the exact scenario the question push targets (agent blocked, user away).
+  The push only works in the background-but-socket-alive window. Proposed fix (not
+  implemented): route to remote ask when serving + a push token is registered, even
+  with 0 clients — `pendingAsk` already survives disconnects and redelivers on
+  reconnect (harness test `question_survives_disconnect_and_is_redelivered`), so the
+  phone would get the timeSensitive push, the user unlocks, taps, reconnects, and the
+  pending question is redelivered. Falls back to TUI when no push token exists.
+  Diagnostic aid added alongside: `/rc push-test` command and the footer's `last`
+  APNs outcome segment.
 
 ## Out of scope
 
