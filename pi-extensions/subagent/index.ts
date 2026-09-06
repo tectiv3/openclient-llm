@@ -381,9 +381,10 @@ async function runSingleAgent(
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: cwd ?? defaultCwd,
 				shell: false,
-				// stdin stays a pipe so question prompts can be relayed back to the child
-				stdio: ["pipe", "pipe", "pipe"],
-				env: { ...process.env, PI_SUBAGENT_RELAY: "1" },
+				// stdin must NOT be a kept-open pipe: pi blocks in readPipedStdin()
+				// at startup for non-RPC modes until EOF. The relay rework uses a
+				// Unix socket instead (docs/plans/subagent-question-relay.md).
+				stdio: ["ignore", "pipe", "pipe"],
 			});
 			let buffer = "";
 
