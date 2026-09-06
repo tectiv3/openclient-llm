@@ -16,7 +16,7 @@ answer the agent's `question`/`questionnaire` prompts from the phone.
 | 1 | Architecture | In-process pi extension with embedded WS server (not a separate RPC bridge daemon) |
 | 2 | Capability scope | View live + prompt + steer + abort + answer agent questions from phone |
 | 3 | Multi-session | Fixed port (47800). On-demand enable. If port is taken (another pi session already serving), this instance cannot start its server |
-| 4 | Auth | Tailnet-only bind + 6-hex pairing code generated fresh on each `/rc` toggle-on, printed in TUI, entered in app. Code is ephemeral (in-memory only, not persisted). Rate-limit failed `hello`: 5 per IP → 60 s lockout. App stores host/port in `CodeSettings` (SettingsManager) for convenience; code is entered each session |
+| 4 | Auth | Tailnet-only bind + 6-digit decimal pairing code generated fresh on each `/rc` toggle-on, printed in TUI, entered in app. Code is ephemeral (in-memory only, not persisted). Rate-limit failed `hello`: 5 per IP → 60 s lockout. App stores host/port in `CodeSettings` (SettingsManager) for convenience; code is entered each session |
 | 5 | App scope | New "Code" tab in the existing tab bar (iOS TabView + macOS sidebar), shared feature code, both platforms |
 | 6 | Persistence | No local transcript persistence — pi session file is the source of truth; history re-fetched on (re)connect |
 | 7 | Server lifetime | Process-level: survives `/new`, `/resume`, `/fork`; dies when pi exits. `session_shutdown`/`session_start` re-point event forwarding only |
@@ -210,7 +210,7 @@ Location: `pi-extensions/rc/` in this repo; symlink `~/.pi/agent/extensions/rc` 
     - If server is off → start it:
       - Get Tailscale IPv4 (`tailscale ip -4` — take first line, trim whitespace),
         bind `node:http` + WS upgrade on `ws://<ip>:47800` (plain WebSocket, no TLS).
-      - Generate fresh 6-hex code (random, in-memory only — not persisted).
+      - Generate fresh 6-digit decimal code (random, in-memory only — not persisted). Digits only so it is trivial to enter on a phone keypad.
       - Print in TUI: `ctx.ui.notify` + footer status
         (`rc: ws://mac.ts.net:47800 code A1B2C3`).
       - If port already in use (EADDRINUSE) → notify "port 47800 busy — another pi
@@ -290,7 +290,7 @@ Client → server:
 
 | type | fields | effect |
 |------|--------|--------|
-| `hello` | `code`, `version` | Validate 6-hex code. Rate-limit: 5 failures per IP in 60 s → `error {code:"rate_limited"}` + close. OK → `hello_ok` + `state` + `history` (+ pending `question`). Bad → `error {code:"bad_code"}` + close |
+| `hello` | `code`, `version` | Validate 6-digit code (exact match). Rate-limit: 5 failures per IP in 60 s → `error {code:"rate_limited"}` + close. OK → `hello_ok` + `state` + `history` (+ pending `question`). Bad → `error {code:"bad_code"}` + close |
 | `prompt` | `text` | Submit user message when idle. Error `not_idle` if streaming |
 | `steer` | `text` | Submit message during streaming (steer equivalent). If not streaming, treated as `prompt` (no error) |
 | `abort` | — | Current turn abort (Esc equivalent). No-op if not streaming |
@@ -628,7 +628,7 @@ Switches on `CodeViewModel.state`:
 - **First time**: Centered branded card — terminal icon (SF Symbol
   `chevron.left.forwardslash.chevron.right`) in a `.glassEffect(.regular, in:
   .circle)`, title "Connect to pi", three fields: host (text, placeholder
-  `mac.ts.net`), port (numeric, default `47800`), code (6-char hex, monospace,
+  `mac.ts.net`), port (numeric, default `47800`), code (6 digits, monospace,
   uppercase, auto-advance). Connect button below. On successful connect, host/port
   saved to `CodeSettings`.
 - **Repeat** (host/port already saved): Shows only the code field (large, centered,
@@ -1023,7 +1023,8 @@ completed task (linter and formatter run on commit hook); never push to remote.
 - Tailscale IPv4 lookup: `tailscale ip -4` must be on PATH in the pi process env;
   may return multiple IPs — take first line, trim. Fail with a clear message if
   not available (safety decision, no fallback to `0.0.0.0`).
-- 6-hex code = 24 bits: acceptable as a tailnet pairing code with rate-limiting.
+- 6-digit decimal code = 20 bits: acceptable as a tailnet pairing code with
+  rate-limiting (5 attempts per IP per 60 s). Digits-only for easy phone entry.
   Generated fresh per `/rc` toggle-on (ephemeral). Document that tailnet membership
   is the real boundary.
 - **Background notifications** (v1 limitation): Local notifications via

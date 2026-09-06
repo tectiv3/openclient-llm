@@ -215,7 +215,7 @@ final class RcE2eServer: @unchecked Sendable {
     }
 
     /// Toggles the rc server on (`/rc`) and waits for the auth file to carry
-    /// a running state with a fresh 6-hex pairing code.
+    /// a running state with a fresh 6-digit pairing code.
     func toggleOn(timeout: TimeInterval = 15) async throws -> RcEndpoint {
         _ = try await rpc(type: "prompt", extra: ["message": "/rc"], timeout: timeout)
         let authPath = try requireTempDir().appendingPathComponent("rc-auth.json").path

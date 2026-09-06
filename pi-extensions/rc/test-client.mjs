@@ -31,7 +31,7 @@ const PI_ARGS = ["--mode", "rpc", "--provider", "openrouter", "--model", "qwen/q
 const READINESS_TIMEOUT_MS = 20_000;
 const AUTH_POLL_INTERVAL_MS = 100;
 const AUTH_WAIT_TIMEOUT_MS = 10_000;
-const CODE_PATTERN = /^[0-9a-f]{6}$/;
+const CODE_PATTERN = /^[0-9]{6}$/;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TEST_PROJECT_SRC = join(HERE, "test-project");

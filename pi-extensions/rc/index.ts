@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomInt } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -141,7 +141,7 @@ function singleton(): RcSingleton {
             )
             try {
                 this.host = resolveBindHost()
-                this.code = randomBytes(3).toString('hex')
+                this.code = randomInt(0, 1_000_000).toString().padStart(6, '0')
                 await listen(server, PORT, this.host)
             } catch (error) {
                 server.close()
@@ -494,7 +494,7 @@ function handleHello(state: RcSingleton, client: RcClient, message: JsonObject):
         return
     }
     const code = typeof message.code === 'string' ? message.code : ''
-    if (!/^[0-9a-f]{6}$/.test(code) || code !== state.code) {
+    if (!/^[0-9]{6}$/.test(code) || code !== state.code) {
         recordFailedHello(state, client.ip)
         const failed = state.rateLimits.get(client.ip)
         sendErrorAndClose(

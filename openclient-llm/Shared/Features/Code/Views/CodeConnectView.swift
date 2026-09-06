@@ -152,20 +152,9 @@ private extension CodeConnectView {
         .multilineTextAlignment(.center)
         .autocorrectionDisabled()
 #if os(iOS)
-        .textInputAutocapitalization(.characters)
+        .keyboardType(.numberPad)
 #endif
         .focused($focusedField, equals: .code)
-        .onChange(of: code) { _, newValue in
-            let filtered = newValue
-                .uppercased()
-                .filter { $0.isHexDigit }
-            if filtered != newValue {
-                code = filtered
-            }
-            if code.count > 6 {
-                code = String(code.prefix(6))
-            }
-        }
         .onSubmit {
             if isValid { submitConnect() }
         }
