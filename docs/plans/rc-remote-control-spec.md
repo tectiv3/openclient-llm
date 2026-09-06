@@ -862,6 +862,10 @@ Automated Node.js script with assertions and exit codes (not manual "check" step
     `{"status":"stopped","reason","detail","ts"}`. Harness reads it to obtain
     the pairing code and to observe toggle/port-busy outcomes (in TUI mode the
     same facts are shown via `ctx.ui.notify`).
+  - `PI_RC_DEBUG` / `PI_RC_DEBUG_FILE` — append every lifecycle event and wire
+    frame (recv/send, hello results, ask lifecycle, stale closes, start
+    failures) to `~/.pi/agent/rc-debug.log` (or the `_FILE` path). Off by
+    default; pure diagnostics, no behavior change.
 - WS client = Node 24 built-in global `WebSocket` (no dependencies).
 - LLM-dependent tests use `openrouter/qwen/qwen3.8-27b` (cheap, verified
   working 2026-09-05). Model round-trips are the slow part — allow 60 s

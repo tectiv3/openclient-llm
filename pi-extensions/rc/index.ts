@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
@@ -156,6 +156,7 @@ function singleton(): RcSingleton {
                     return
                 }
                 const message = error instanceof Error ? error.message : String(error)
+                dbgLog('server start failed:', message)
                 ctx.ui.notify(`rc failed to start: ${message}`, 'error')
                 writeStoppedAuth('start_failed', message)
                 return
@@ -164,12 +165,15 @@ function singleton(): RcSingleton {
             this.quitAuthWritten = false
             this.heartbeat = setInterval(() => closeStaleClients(this), STALE_CHECK_MS)
             const status = `rc: ws://${this.host}:${PORT} code ${this.code}`
+            dbgLog('server started:', status)
             ctx.ui.notify(status, 'info')
             safeSetStatus(ctx, status)
             writeRunningAuth(this.host, PORT, this.code)
         },
         async stop(reason, detail) {
+            dbgLog('server stopped:', reason, detail ?? '')
             if (this.pendingAsk) {
+                dbgLog('ask cancelled:', this.pendingAsk.id)
                 this.broadcast({
                     type: 'question_resolved',
                     id: this.pendingAsk.id,
@@ -209,6 +213,7 @@ function singleton(): RcSingleton {
         async ask(opts) {
             if (!this.server || !this.hasConnectedClients()) return null
             if (this.pendingAsk) {
+                dbgLog('ask cancelled (superseded):', this.pendingAsk.id)
                 this.broadcast({
                     type: 'question_resolved',
                     id: this.pendingAsk.id,
@@ -227,6 +232,7 @@ function singleton(): RcSingleton {
             }
             const pending: PendingAsk = { id, kind: opts.kind, message, resolve: () => {} }
             this.pendingAsk = pending
+            dbgLog('ask created:', id, opts.kind)
             this.broadcast(message)
             return new Promise<RemoteQuestionAnswer | RemoteQuestionnaireAnswer | null>(
                 resolve => {
@@ -289,8 +295,12 @@ function handleUpgrade(
         lastMessageAt: Date.now(),
     }
     state.clients.add(client)
+    dbgLog('connection opened:', client.ip)
     socket.on('data', chunk => state.handleSocketData(client, chunk))
-    socket.on('close', () => state.clients.delete(client))
+    socket.on('close', () => {
+        state.clients.delete(client)
+        dbgLog('connection closed:', client.ip)
+    })
     socket.on('end', () => state.clients.delete(client))
     socket.on('error', () => closeClient(state, client))
     if (head.length > 0) state.handleSocketData(client, head)
@@ -327,6 +337,7 @@ function handleSocketData(state: RcSingleton, client: RcClient, chunk: Buffer): 
                 sendErrorAndClose(state, client, 'invalid_message')
                 return
             }
+            dbgLog('recv from', client.ip, safeJson(message))
             handleClientMessage(state, client, message)
         }
     } catch {
@@ -368,6 +379,7 @@ function readFrame(
 }
 
 function writeJson(client: RcClient, message: JsonObject): boolean {
+    dbgLog('send to', client.ip, safeJson(message))
     try {
         writeFrame(client.socket, Buffer.from(JSON.stringify(message), 'utf8'), 0x1)
         return true
@@ -513,6 +525,7 @@ function handleAnswer(state: RcSingleton, client: RcClient, message: JsonObject)
         return
     }
     pending.resolve({ value, wasCustom, ...(typeof index === 'number' ? { index } : {}) })
+    dbgLog('ask resolved by client:', pending.id)
     state.broadcast({ type: 'question_resolved', id: pending.id, by: 'client', value })
 }
 
@@ -552,6 +565,7 @@ function handleAnswerQuestionnaire(state: RcSingleton, client: RcClient, message
         answers.push(item)
     }
     pending.resolve(answers)
+    dbgLog('ask resolved by client:', pending.id)
     state.broadcast({ type: 'question_resolved', id: pending.id, by: 'client' })
 }
 
@@ -913,6 +927,36 @@ function writeAuth(payload: JsonObject): void {
     renameSync(tempFile, file)
 }
 
+// Diagnostic file logging. Enable with PI_RC_DEBUG=1 (writes to
+// ~/.pi/agent/rc-debug.log) or PI_RC_DEBUG_FILE=<path>. Off by default.
+function debugLogPath(): string | null {
+    const file = process.env.PI_RC_DEBUG_FILE?.trim()
+    if (file) return file
+    if (process.env.PI_RC_DEBUG?.trim()) return join(homedir(), '.pi', 'agent', 'rc-debug.log')
+    return null
+}
+
+function safeJson(value: unknown): string {
+    try {
+        return JSON.stringify(value) ?? String(value)
+    } catch {
+        return String(value)
+    }
+}
+
+function dbgLog(...parts: unknown[]): void {
+    const path = debugLogPath()
+    if (!path) return
+    const line = parts
+        .map(part => (typeof part === 'string' ? part : safeJson(part)))
+        .join(' ')
+    try {
+        appendFileSync(path, `[${new Date().toISOString()}] ${line}\n`)
+    } catch {
+        // Diagnostics must never break the server
+    }
+}
+
 function authFilePath(): string {
     return process.env.PI_RC_AUTH_FILE?.trim() || join(homedir(), '.pi', 'agent', 'rc-auth.json')
 }
@@ -958,7 +1002,10 @@ function closeServer(server: Server): Promise<void> {
 function closeStaleClients(state: RcSingleton): void {
     const now = Date.now()
     for (const client of Array.from(state.clients)) {
-        if (now - client.lastMessageAt > STALE_MS) closeClient(state, client)
+        if (now - client.lastMessageAt > STALE_MS) {
+            dbgLog('stale client closed:', client.ip)
+            closeClient(state, client)
+        }
     }
 }
 
@@ -1022,6 +1069,7 @@ export default function rc(pi: ExtensionAPI): void {
     pi.registerCommand('rc', {
         description: 'Toggle remote-control WebSocket server',
         handler: async (_args, ctx) => {
+            dbgLog('command /rc invoked')
             state.bind(pi, ctx)
             if (state.server) {
                 await state.stop('toggled_off', 'manual /rc toggle off')
