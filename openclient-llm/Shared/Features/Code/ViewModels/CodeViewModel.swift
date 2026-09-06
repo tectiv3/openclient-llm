@@ -437,7 +437,11 @@ extension CodeViewModel {
     /// sends are harmless: the server keeps the last-registered token.
     private func sendPushTokenIfNeeded(_ token: String? = nil) {
         let tokenToSend = token ?? remoteNotificationManager.getToken()
-        guard let tokenToSend, case .connected = state else { return }
+        guard let tokenToSend, case .connected = state else {
+            LogManager.info("Push token skipped: hasToken=\(token != nil || remoteNotificationManager.getToken() != nil)")
+            return
+        }
+        LogManager.info("Sending push token (\(tokenToSend.prefix(8))…)")
         Task { await client.send(.pushToken(token: tokenToSend)) }
     }
 

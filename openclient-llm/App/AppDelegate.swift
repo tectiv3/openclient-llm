@@ -64,7 +64,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _: UIApplication,
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
     ) {
-        let token = deviceToken.map { String(format: "%02.0x", $0) }.joined()
+        let token = deviceToken.map { String(format: "%02x", $0) }.joined()
         RemoteNotificationManager.shared.updateToken(token)
     }
 

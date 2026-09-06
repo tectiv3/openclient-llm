@@ -51,6 +51,7 @@ final class RemoteNotificationManager: RemoteNotificationManagerProtocol {
 
     func updateToken(_ token: String) {
         guard token != self.token else { return }
+        LogManager.info("APNs device token received (\(token.prefix(8))…)")
         self.token = token
         onTokenUpdate?(token)
     }
