@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
+## [Unreleased]
+
+### Added
+
+- Code tab for remotely controlling a local pi instance over WebSocket: connect screen with pairing code, live session transcript, prompt/steer input bar, question/questionnaire modals, context usage bar, and reconnection with streaming buffer recovery
 ## [1.6.15-build-68] - 2026-08-10
 
 ### Removed

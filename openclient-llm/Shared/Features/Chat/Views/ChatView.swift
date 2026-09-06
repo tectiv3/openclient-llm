@@ -15,7 +15,7 @@ struct ChatView: View {
     @State var viewModel: ChatViewModel
     @State private var inputText: String = ""
     @State var shouldAutoScroll: Bool = true
-    @State private var scrollEdgeMetrics = ChatScrollEdgeMetrics()
+    @State private var scrollEdgeMetrics = ScrollEdgeMetrics()
     @State private var scrollPosition = ScrollPosition(idType: UUID.self)
     @State private var visibleMessageIds: [UUID] = []
     @State private var isManuallyScrolling: Bool = false
@@ -377,11 +377,11 @@ private extension ChatView {
         _ loadedState: ChatViewModel.LoadedState
     ) -> some View {
         scrollViewContent(loadedState)
-            .onScrollGeometryChange(for: ChatScrollEdgeMetrics.self) { geometry in
+            .onScrollGeometryChange(for: ScrollEdgeMetrics.self) { geometry in
                 let bottomDistance = geometry.contentSize.height
                     - geometry.contentOffset.y
                     - geometry.containerSize.height
-                return ChatScrollEdgeMetrics(
+                return ScrollEdgeMetrics(
                     isNearBottom: bottomDistance < 150,
                     isAtBottom: bottomDistance < 8,
                     isNearTop: geometry.contentOffset.y < 150
@@ -403,7 +403,9 @@ private extension ChatView {
                 scrollToMessageId: $scrollToMessageId,
                 shouldAutoScroll: $shouldAutoScroll,
                 isManuallyScrolling: $isManuallyScrolling,
-                loadedState: loadedState,
+                messageCount: loadedState.messages.count,
+                contentTrigger: ChatScrollContentTrigger(loadedState: loadedState),
+                sessionId: loadedState.conversation?.id,
                 isAtBottom: scrollEdgeMetrics.isAtBottom
             ))
     }

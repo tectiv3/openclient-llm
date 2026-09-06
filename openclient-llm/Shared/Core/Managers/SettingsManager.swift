@@ -53,6 +53,10 @@ protocol SettingsManagerProtocol: Sendable {
     func setRequestTimeoutSeconds(_ value: Int)
     func getCapabilityOverrides(forModelId modelId: String) -> [String]?
     func setCapabilityOverrides(_ capabilities: [String]?, forModelId modelId: String)
+    func getCodeHost() -> String?
+    func setCodeHost(_ value: String?)
+    func getCodePort() -> Int
+    func setCodePort(_ value: Int)
     func deleteAll()
 }
 
@@ -81,6 +85,8 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         static let lmStudioWebSearchPluginId = "lmStudioWebSearchPluginId"
         static let requestTimeoutSeconds = "requestTimeoutSeconds"
         static let capabilityOverrides = "capabilityOverrides"
+        static let codeHost = "codeHost"
+        static let codePort = "codePort"
 
         static func ttsVoiceKey(forModelId modelId: String) -> String {
             "tts_voice_\(modelId)"
@@ -314,6 +320,23 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         }
     }
 
+    func getCodeHost() -> String? {
+        defaults.string(forKey: Keys.codeHost)
+    }
+
+    func setCodeHost(_ value: String?) {
+        defaults.set(value, forKey: Keys.codeHost)
+    }
+
+    func getCodePort() -> Int {
+        let stored = defaults.integer(forKey: Keys.codePort)
+        return stored > 0 ? stored : 47800
+    }
+
+    func setCodePort(_ value: Int) {
+        defaults.set(value, forKey: Keys.codePort)
+    }
+
     func deleteAll() {
         defaults.removeObject(forKey: Keys.isOnboardingCompleted)
         defaults.removeObject(forKey: Keys.selectedModelId)
@@ -334,6 +357,8 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.removeObject(forKey: Keys.lmStudioWebSearchPluginId)
         defaults.removeObject(forKey: Keys.requestTimeoutSeconds)
         defaults.removeObject(forKey: Keys.capabilityOverrides)
+        defaults.removeObject(forKey: Keys.codeHost)
+        defaults.removeObject(forKey: Keys.codePort)
         defaults.removeObject(forKey: LegacyKeys.serverBaseURL)
         defaults.removeObject(forKey: LegacyKeys.apiKey)
         keychainManager.deleteAll()

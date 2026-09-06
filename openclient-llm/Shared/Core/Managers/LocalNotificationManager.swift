@@ -22,6 +22,7 @@ protocol LocalNotificationManagerProtocol {
     func requestAuthorization() async
     func sendCompletionNotification()
     func sendExpiredNotification()
+    func sendQuestionNotification()
 }
 
 // MARK: - LocalNotificationManager
@@ -53,6 +54,15 @@ final class LocalNotificationManager: LocalNotificationManagerProtocol, @uncheck
         let content = UNMutableNotificationContent()
         content.title = String(localized: "Response interrupted")
         content.body = String(localized: "The response was cut short. Open the app to see what was received.")
+        content.sound = .default
+
+        schedule(content: content)
+    }
+
+    func sendQuestionNotification() {
+        let content = UNMutableNotificationContent()
+        content.title = String(localized: "pi is asking a question")
+        content.body = String(localized: "Tap to answer.")
         content.sound = .default
 
         schedule(content: content)

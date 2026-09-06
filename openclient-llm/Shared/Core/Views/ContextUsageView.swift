@@ -1,5 +1,5 @@
 //
-//  ChatContextUsageView.swift
+//  ContextUsageView.swift
 //  openclient-llm
 //
 //  Created by Arturo Carretero Calvo on 14/07/2026.
@@ -8,7 +8,7 @@
 
 import SwiftUI
 
-struct ChatContextUsageView: View {
+struct ContextUsageView: View {
     let usage: ContextUsage
 
     var body: some View {
@@ -34,7 +34,7 @@ struct ChatContextUsageView: View {
     }
 }
 
-private extension ChatContextUsageView {
+private extension ContextUsageView {
     @ViewBuilder
     var usageText: some View {
         Text(String(localized: "Estimated context"))
@@ -76,7 +76,7 @@ private extension ChatContextUsageView {
 }
 
 #Preview {
-    ChatContextUsageView(
+    ContextUsageView(
         usage: ContextUsage(
             estimatedInputTokens: 7_200,
             maxInputTokens: 8_192,

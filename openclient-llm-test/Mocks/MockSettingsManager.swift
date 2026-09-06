@@ -215,6 +215,14 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         capabilityOverrides[modelId] = capabilities
     }
 
+    var codeHost: String?
+    var codePort: Int = 47800
+
+    func getCodeHost() -> String? { codeHost }
+    func setCodeHost(_ value: String?) { codeHost = value }
+    func getCodePort() -> Int { codePort }
+    func setCodePort(_ value: Int) { codePort = value }
+
     func deleteAll() {
         isOnboardingCompleted = false
         serverBaseURL = ""

@@ -16,7 +16,7 @@ answer the agent's `question`/`questionnaire` prompts from the phone.
 | 1 | Architecture | In-process pi extension with embedded WS server (not a separate RPC bridge daemon) |
 | 2 | Capability scope | View live + prompt + steer + abort + answer agent questions from phone |
 | 3 | Multi-session | Fixed port (47800). On-demand enable. If port is taken (another pi session already serving), this instance cannot start its server |
-| 4 | Auth | Tailnet-only bind + 6-hex pairing code generated fresh on each `/rc` toggle-on, printed in TUI, entered in app. Code is ephemeral (in-memory only, not persisted). Rate-limit failed `hello`: 5 per IP → 60 s lockout. App stores host/port in `CodeSettings` (SettingsManager) for convenience; code is entered each session |
+| 4 | Auth | Tailnet-only bind + 6-digit decimal pairing code generated fresh on each `/rc` toggle-on, printed in TUI, entered in app. Code is ephemeral (in-memory only, not persisted). Rate-limit failed `hello`: 5 per IP → 60 s lockout. App stores host/port in `CodeSettings` (SettingsManager) for convenience; code is entered each session |
 | 5 | App scope | New "Code" tab in the existing tab bar (iOS TabView + macOS sidebar), shared feature code, both platforms |
 | 6 | Persistence | No local transcript persistence — pi session file is the source of truth; history re-fetched on (re)connect |
 | 7 | Server lifetime | Process-level: survives `/new`, `/resume`, `/fork`; dies when pi exits. `session_shutdown`/`session_start` re-point event forwarding only |
@@ -25,52 +25,179 @@ answer the agent's `question`/`questionnaire` prompts from the phone.
 | 10 | Code location | Extension + forked question/questionnaire extensions stored in this repo (`pi-extensions/rc/`, `pi-extensions/question/`, `pi-extensions/questionnaire/`), symlinked into `~/.pi/agent/extensions/`. Commit after each completed task |
 | 11 | Images | Deferred to v2. No evidence of image support in pi's extension API (`sendUserMessage` itself is unverified) |
 
-## Critical unknowns (must verify before Task 1)
+## Verified API surface (Task 0 probe, 2026-09-05)
 
-These are load-bearing API assumptions the spec makes but that could not be confirmed
-from the existing extension source or documentation:
+Verified by driving a real pi v0.85.0 TUI in a pty with a throwaway probe
+extension (`pi-extensions/rc-probe/`, since deleted). Session files written to
+`~/.pi/agent/sessions/` were read back as ground-truth entry shapes. All
+statements below are empirical, not from docs.
 
-1. **Programmatic message submission**: The spec assumes a `pi.sendUserMessage(text)`
-   or equivalent API exists. Existing extensions use `ctx.ui.setEditorText()` to put
-   text in the editor, not to submit messages programmatically. **Verify**: check pi's
-   `ExtensionAPI` type definition (from `@earendil-works/pi-coding-agent`) for
-   `sendUserMessage`, `submitMessage`, or similar. If it does not exist, the
-   alternative is `ctx.ui.setEditorText(text)` + a simulated Enter, or a different
-   API surface. This changes the entire prompt/steer/abort protocol.
+### Working model flag
 
-2. **`deliverAs` option for steer/followUp**: Referenced but not seen in any extension.
-   If it doesn't exist, steer semantics must use a different mechanism or be
-   dropped from v1.
+`pi --provider openai --model gpt-5` works for the probe.
+(`google/gemini-2.5-flash` returns 404 for new users.) The rc server reads the model
+from `ctx.model`, so this flag only affects what the probe session itself used.
 
-3. **Mid-stream steer injection**: No existing extension demonstrates injecting a
-   message while the agent is streaming. Even if `sendUserMessage` exists, it may
-   reject calls during an active turn. The probe must attempt sending while
-   streaming to confirm behavior.
+### `pi` (`ExtensionAPI`) surface — 25 keys
 
-4. **Programmatic abort**: No existing extension demonstrates cancelling the current
-   turn programmatically. Check for `ctx.abort()`, `pi.abort()`, or equivalent.
-   Without this, the Stop button is non-functional.
+`on, registerTool, registerCommand, registerShortcut, registerFlag,
+registerMessageRenderer, registerMarkdownTransformer, registerEntryRenderer,
+getFlag, sendMessage, sendUserMessage, appendEntry, setSessionName, getSessionName,
+setLabel, exec, getActiveTools, getAllTools, setActiveTools, getCommands, setModel,
+getThinkingLevel, setThinkingLevel, registerProvider, unregisterProvider, events`
 
-5. **Event names**: The spec lists specific event names (`message_start`,
-   `message_update`, etc.). Existing extensions use `pi.on("session_start", ...)`
-   and `pi.on("session_tree", ...)`. Verify the full set of subscribable events.
+### `ctx` (`ExtensionCommandContext`) surface — 25 keys
 
-6. **History API**: The spec references `sessionManager.buildContextEntries()`.
-   Existing extensions use `sessionManager.getBranch()` which returns `SessionEntry[]`
-   (with `type: "message" | "compaction"`, `message: AgentMessage`, etc.). The
-   history mapping must be built on the actual API, not the assumed one.
+`ui, mode, hasUI, cwd, sessionManager, modelRegistry, model, scopedModels,
+thinkingLevel, isIdle, isProjectTrusted, signal, abort, hasPendingMessages,
+shutdown, getContextUsage, compact, getSystemPrompt, getSystemPromptOptions,
+waitForIdle, newSession, fork, navigateTree, switchSession, reload`
 
-7. **WebSocket server dependency**: The spec says "stdlib only" with `node:ws`, but
-   `ws` is NOT a Node.js built-in. Either pi bundles it, or the server must use raw
-   `node:http` upgrade handling (significantly more complex). Check if `ws` or
-   another WS library is available in the pi extension runtime.
+### `sendUserMessage` (resolves unknowns #1, #2, #3)
 
-**Action**: Build a minimal probe extension (`pi-extensions/rc-probe/`) that imports
-the `ExtensionAPI` type, logs all available methods/properties on `pi` and `ctx`,
-subscribes to all discoverable events, and attempts: (a) `sendUserMessage` or
-equivalent, (b) mid-stream message injection (steer), (c) programmatic turn abort,
-(d) `require("ws")` / `import("ws")`. Run it, capture the output, then delete the
-probe and update this spec with findings before proceeding to Task 1.
+- **Idle**: `pi.sendUserMessage("...")` → resolves (no throw), starts a new turn.
+- **Mid-stream, no `deliverAs`**: **throws**
+  `Error: Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.`
+- **Mid-stream, `{deliverAs:"steer"}`**: resolves (no throw). The message is **queued
+  and delivered at the next turn boundary as a new user turn**; the `input` event for
+  it carries `source:"extension"` and `streamingBehavior:"steer"`. The TUI renders it
+  as `Steering: <text>`. Steer does **not** interrupt the in-flight generation — it
+  appends a follow-up turn (verified: a streaming "1..12" run finished 1..12, then the
+  steer became the next user turn).
+- `ctx.isIdle()` correctly reports `false` while a turn (incl. tool exec) is active,
+  `true` otherwise.
+- **Implication**: steer is "insert a queued instruction", **not** "cut off". To stop
+  mid-stream use `ctx.abort()` (below). Never call `sendUserMessage` with no
+  `deliverAs` while `!ctx.isIdle()` — it throws.
+
+### `ctx.abort()` (resolves unknown #4)
+
+Returns `undefined` (void), does not throw. Aborts the current turn: `message_end` /
+`turn_end` fire with the assistant message carrying `stopReason:"aborted"`,
+`errorMessage:"Operation aborted"`, `content:""`. Then `agent_end` + `agent_settled`
+fire and the agent is idle. This is the Stop-button mechanism.
+
+### Events (resolves unknown #5)
+
+`pi.on(eventName, handler)` accepted **all 35** documented event names (no throw on
+subscribe), including the session-*/model_select/thinking_level_select/queue_update
+family. The following **fired** in a clean TUI run (with payload key sets):
+
+| event | payload keys | notes |
+|---|---|---|
+| `session_start` | `type, reason` | `reason:"startup"` |
+| `resources_discover` | `type, cwd, reason` | fires at boot |
+| `input` | `type, text, images, source, streamingBehavior?` | `source` = `interactive` \| `extension`; steer adds `streamingBehavior:"steer"` |
+| `before_agent_start` | `type, prompt, images, systemPrompt, systemPromptOptions` | |
+| `agent_start` | `type` | once per agent run |
+| `turn_start` | `type, turnIndex, timestamp` | per LLM turn |
+| `context` | `type, messages` | per turn |
+| `before_provider_headers` | `type, headers` | |
+| `before_provider_request` | `type, payload` | |
+| `after_provider_response` | `type, status, headers` | |
+| `message_start` | `type, message` | message role starts |
+| `message_update` | `type, message, assistantMessageEvent` | per token delta; `assistantMessageEvent` = `{type:"text_delta" \| "thinking_delta" \| "toolcall_delta", delta, contentIndex}` |
+| `message_end` | `type, message` | message role ends |
+| `tool_execution_start` | `type, toolCallId, toolName, args` | |
+| `tool_call` | `type, toolName, toolCallId, input` | |
+| `tool_execution_update` | `type, toolCallId, toolName, args, partialResult` | `partialResult:{content}` |
+| `tool_result` | `type, toolName, toolCallId, input, content, details, isError, usage` | |
+| `tool_execution_end` | `type, toolCallId, toolName, result, isError` | `result:{content}` |
+| `turn_end` | `type, turnIndex, message, toolResults` | `message` = full assistant msg; `toolResults` = `toolResult` msgs |
+| `agent_end` | `type, messages` | low-level run end |
+| `agent_settled` | `type` | fully idle (no retries/queued) |
+| `ui_prompt_start` / `ui_prompt_end` | `type, reason, kind` | |
+| `session_shutdown` | `type, reason` | `reason:"quit"` on `/quit` |
+
+**Did NOT fire** (subscribable, but no trigger in a plain interactive run — they fire
+under other conditions): `session_info_changed`, `session_tree`,
+`session_before_switch`, `session_before_fork`, `session_before_compact`,
+`session_compact`, `session_compact_failed`, `project_trust`, `model_select`,
+`thinking_level_select`, and **`queue_update`**.
+
+> **Correction to the draft**: `queue_update` is an **RPC-mode** event (see
+> `docs/rpc.md`, `json.md`) and **never fires as a TUI/extension event**. The rc
+> extension must **not** rely on it. Use `agent_start` → streaming and
+> `agent_settled` → idle for `isStreaming` inference (see B2), which both fire.
+
+### History API (resolves unknown #6)
+
+`ctx.sessionManager.getBranch()` returns `SessionEntry[]` **for the live branch**
+(root → current leaf). Verified: it returns a **mix** of entry types, not just
+messages — the probe branch contained `model_change`, `thinking_level_change` and
+`message` entries. **The history mapper must filter to the relevant types**
+(`message`, `compaction`, …) and **skip** `model_change` / `thinking_level_change`.
+`sessionManager` keys include `sessionId, sessionFile, entryCount, filePath,
+getBranch, getEntries, getContext, getLeafId, getLeafEntry, getSessionId,
+getSessionName, getLabel, getHeader, getCompactionEntry` (full list logged by the probe).
+
+> **Correction to the draft**: the protocol `sessionId` is `sessionManager.getSessionId()` —
+> the **Session UUID, stable for the session lifetime**. `getLeafId()` is the
+> **leaf-entry position** and advances as messages are appended; it is **NOT** a session id
+> (using it as `sessionId` broke harness group 10 and would break Swift rebind detection).
+
+`getContextUsage()` returns **`{tokens: number, contextWindow: number, percent: number}`**
+(verified: `{"tokens":7,"contextWindow":400000,"percent":0.00175}`).
+
+> **Correction to the draft**: the `contextUsage` shape is **not** `{used, total}` —
+> it is `{tokens, contextWindow, percent}` (see A3).
+
+### Session entry shapes (ground truth from on-disk JSONL)
+
+`user`:
+```json
+{"role":"user","content":[{"type":"text","text":"Reply with exactly: PROBE-A"}],"timestamp":1788608590861}
+```
+
+`assistant` — `content` is an array that can contain any of these block types (in
+order of appearance):
+- `{"type":"thinking","thinking":string,"thinkingSignature":string}`
+- `{"type":"text","text":string,"textSignature":string}`
+- `{"type":"toolCall","id":string,"name":string,"arguments":object}`
+
+Top-level keys: `role, content, api, provider, model,
+usage{input,output,cacheRead,cacheWrite,reasoning,totalTokens,cost}, stopReason,
+timestamp, responseId, rawStopReason`. Captured example (`stopReason:"toolUse"`):
+
+```json
+{"role":"assistant","content":[
+  {"type":"thinking","thinking":"","thinkingSignature":"{...encrypted...}"},
+  {"type":"toolCall","id":"call_7b3XsDu1SBT8fYcFTeqSSIF1|fc_082e...","name":"bash","arguments":{"command":"echo PROBE_TOOL_OK"}}],
+ "api":"openai-responses","provider":"openai","model":"gpt-5",
+ "usage":{"input":2784,"output":234,"cacheRead":0,"cacheWrite":0,"reasoning":192,"totalTokens":3018,"cost":{"input":0.00348,"output":0.00234,"cacheRead":0,"cacheWrite":0,"total":0.00582}},
+ "stopReason":"toolUse","timestamp":1788608593001,"responseId":"resp_082e7070..."}
+```
+
+`toolResult`:
+```json
+{"role":"toolResult","toolCallId":"call_7b3XsDu1SBT8fYcFTeqSSIF1|fc_082e...","toolName":"bash","content":[{"type":"text","text":"PROBE_TOOL_OK\n"}],"isError":false,"timestamp":1788608604646}
+```
+
+`compaction` (real on-disk entry; 22 samples all use the `firstKeptEntryId` format —
+the doc's newer `retainedTail` variant was **not** observed):
+```json
+{"type":"compaction","id":"03f8472c","parentId":"4103ddbb","timestamp":"2026-09-02T06:51:18.420Z",
+ "summary":"No prior history.\n\n---\n\n**Turn Context (split turn):** ...",
+ "firstKeptEntryId":"43b12667","tokensBefore":111767,
+ "details":{"readFiles":["/abs/path/a.ts"],"modifiedFiles":["/abs/path/b.ts"]},
+ "usage":{"input":49522,"output":2428,"cacheRead":0,"cacheWrite":0,"reasoning":813,"totalTokens":51950,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},
+ "fromHook":false}
+```
+
+The `assistant` `thinking` block's `thinkingSignature` and the `text` block's
+`textSignature` are **opaque encrypted strings** (base64-encoded JSON carrying an
+`id` of the form `msg_...`). The rc extension must **copy them through verbatim**
+(see A4); do not parse or re-derive them.
+
+### WebSocket dependency (resolves unknown #7)
+
+`require("ws")` → **fails** (`MODULE_NOT_FOUND`). `import("ws")` → **fails**
+(`MODULE_NOT_FOUND`). The pi extension runtime does **not** bundle `ws`. The draft's
+"stdlib only" assumption is **wrong**: `ws` is not a Node built-in and is
+unavailable. Task 1 must either (a) use raw `node:http` + a minimal in-process
+WebSocket frame codec (RFC 6455) with zero dependencies, or (b) vendor `ws`.
+**Recommended**: (a) raw `node:http` upgrade + minimal codec, to honor the
+stdlib-only constraint.
 
 ## Part A — pi extension `rc`
 
@@ -83,7 +210,7 @@ Location: `pi-extensions/rc/` in this repo; symlink `~/.pi/agent/extensions/rc` 
     - If server is off → start it:
       - Get Tailscale IPv4 (`tailscale ip -4` — take first line, trim whitespace),
         bind `node:http` + WS upgrade on `ws://<ip>:47800` (plain WebSocket, no TLS).
-      - Generate fresh 6-hex code (random, in-memory only — not persisted).
+      - Generate fresh 6-digit decimal code (random, in-memory only — not persisted). Digits only so it is trivial to enter on a phone keypad.
       - Print in TUI: `ctx.ui.notify` + footer status
         (`rc: ws://mac.ts.net:47800 code A1B2C3`).
       - If port already in use (EADDRINUSE) → notify "port 47800 busy — another pi
@@ -92,16 +219,19 @@ Location: `pi-extensions/rc/` in this repo; symlink `~/.pi/agent/extensions/rc` 
       - Close server, clear status, cancel pending questions (resolve with
         "cancelled"), notify "rc stopped".
   - Message handlers (on authenticated client messages):
-    - `prompt`: call pi's message submission API (discovered by probe) when not
-      streaming. Return `not_idle` error if streaming.
-    - `steer`: call pi's steer/mid-turn injection API when streaming. If not
-      streaming, treat as `prompt`.
-    - `abort`: call pi's turn-abort API. No-op if not streaming.
-    - Exact API calls depend on probe findings (Critical unknowns 1-4).
+    - `prompt`: call `pi.sendUserMessage(text)` (verified) when not streaming
+      (`ctx.isIdle()` true). Return `not_idle` error if streaming.
+    - `steer`: call `pi.sendUserMessage(text, {deliverAs:"steer"})` (verified)
+      while streaming — queues a follow-up turn. If not streaming, treat as
+      `prompt` (`sendUserMessage(text)` with no deliverAs).
+    - `abort`: call `ctx.abort()` (verified). No-op if not streaming.
+    - Verified API calls — see "Verified API surface".
   - Event forwarding (registered in factory, active only while server is on):
-    Subscribe via `pi.on(eventName, handler)` for all available agent lifecycle
-    events. Known working events: `session_start`, `session_tree`. Full event list
-    to be confirmed by probe (see Critical unknowns). Broadcast as
+    Subscribe via `pi.on(eventName, handler)` for the verified lifecycle events
+    (see "Verified API surface": `agent_start`, `turn_start`, `message_start`,
+    `message_update`, `message_end`, `tool_execution_start`/`_update`/`_end`,
+    `tool_call`, `tool_result`, `turn_end`, `agent_end`, `agent_settled`,
+    `session_start`, `before_agent_start`, `input`). Broadcast as
     `{type:"event", name, ...payload}`.
   - Session rebind: `session_start` re-points forwarding at the new session (snapshot
     + history re-send to all connected clients, since `ctx.sessionManager` changes
@@ -160,7 +290,7 @@ Client → server:
 
 | type | fields | effect |
 |------|--------|--------|
-| `hello` | `code`, `version` | Validate 6-hex code. Rate-limit: 5 failures per IP in 60 s → `error {code:"rate_limited"}` + close. OK → `hello_ok` + `state` + `history` (+ pending `question`). Bad → `error {code:"bad_code"}` + close |
+| `hello` | `code`, `version` | Validate 6-digit code (exact match). Rate-limit: 5 failures per IP in 60 s → `error {code:"rate_limited"}` + close. OK → `hello_ok` + `state` + `history` (+ pending `question`). Bad → `error {code:"bad_code"}` + close |
 | `prompt` | `text` | Submit user message when idle. Error `not_idle` if streaming |
 | `steer` | `text` | Submit message during streaming (steer equivalent). If not streaming, treated as `prompt` (no error) |
 | `abort` | — | Current turn abort (Esc equivalent). No-op if not streaming |
@@ -203,15 +333,22 @@ type SubQuestion = {
 };
 ```
 
-**`contextUsage` shape** (when available):
-`{used: number, total: number}` — token counts. UI renders as percentage bar.
-May be null immediately after compaction. When null, context bar is hidden.
+**`contextUsage` shape** (verified, Task 0):
+`{tokens: number, contextWindow: number, percent: number}` — e.g.
+`{"tokens":7,"contextWindow":400000,"percent":0.00175}`. UI renders `percent`
+as the bar. (The draft's `{used, total}` was wrong.) May be null immediately after
+compaction. When null, context bar is hidden.
 
 ### A4. History format
 
-Built from `ctx.sessionManager.getBranch()` which returns `SessionEntry[]`:
+Built from `ctx.sessionManager.getBranch()` which returns `SessionEntry[]`
+**for the live branch** (root → current leaf). Verified in the probe: it is a
+**mix** of entry types — besides `message` and `compaction` it contains
+`model_change` and `thinking_level_change` entries. **Filter to** `message` /
+`compaction` (other content-bearing types) and **skip** `model_change` /
+`thinking_level_change`:
 - `{type: "message", message: AgentMessage}` — user, assistant, toolCall, toolResult
-- `{type: "compaction", summary: string, ...}` — compacted region
+- `{type: "compaction", summary, firstKeptEntryId, tokensBefore, details, ...}` — compacted region
 
 Mapping to the `history.messages` array:
 
@@ -236,9 +373,12 @@ exceed 200 entries before compaction.
 **Streaming buffer**: The server maintains a `currentTurnBuffer: ContentBlock[]`
 that accumulates content from the in-progress assistant turn:
 - `message_start` → reset buffer, begin accumulating
-- `message_update` → append text/thinking blocks
+- `message_update` → append using `event.assistantMessageEvent` =
+  `{type:"text_delta"|"thinking_delta"|"toolcall_delta", delta, contentIndex}`;
+  append `delta` to the text/thinking block at `contentIndex`
 - `tool_execution_start` → append toolUse block
-- `tool_execution_update` → update the last toolUse's `output` field (streaming tool output, e.g. bash stdout)
+- `tool_execution_update` → update the last toolUse's `output` field from
+  `event.partialResult.content` (streaming tool output, e.g. bash stdout)
 - `turn_end` → reset buffer (turn complete, content is now in `getBranch()`)
 
 The buffer represents a single assistant message in progress. Multi-message turns
@@ -322,6 +462,17 @@ The `ask` function is exposed by the rc singleton on `globalThis[Symbol.for("pi-
 No event bus needed — the question extensions access the rc singleton directly via
 `globalThis[Symbol.for("pi-rc")]`.
 
+> **Correction to the draft (Task 2, implemented):** the implementation deviates
+> from the sketch above in three ways. (1) The question `id` is generated
+> server-side in `rc.ask()` (`crypto.randomBytes(4).toString("hex")`); the
+> caller does not pass one (`uuidv7` is not imported). (2) There is no
+> `showRemoteWaitUI` / Esc escape hatch: while a remote ask is pending, the TUI
+> shows the in-flight tool call; a local answer cannot preempt it (v1 limitation,
+> acceptable per the `executionMode: "sequential"` note below). (3) `ask()`
+> resolves `null` (tool reports "cancelled") when the server stops or `/rc`
+> toggles off; if no clients are connected at ask time, the extension falls
+> through to the normal TUI path.
+
 ### A6. Heartbeat
 
 Client sends `ping` every 30 seconds. Server responds with `pong`. If the server
@@ -337,6 +488,12 @@ Per-IP tracking of failed `hello` attempts:
   now + 60 seconds. Send `error {code:"rate_limited"}` + close.
 - On successful `hello`: reset that IP's counter.
 - Entries expire after 5 minutes of inactivity (cleanup on connection).
+
+> **Correction to the draft (Task 1b-2):** the rate-limit state lives in the
+> singleton and survives `/rc` stop/start cycles within one pi process; a lockout
+> is only cleared by time (60 s), a successful hello, or process exit. The test
+> harness therefore runs its rate-limit tests last (group 11) so a lockout cannot
+> poison earlier tests in the same run.
 
 ## Part B — Swift app "Code" feature
 
@@ -426,10 +583,13 @@ mirroring existing feature layout). Tests in `openclient-llm-test/Features/Code/
 - Pending question → modal overlay (see B3 question modal details). X button on
   modal sends `abort` to pi, cancelling the agent's current turn.
 - **`isStreaming` inference**: Client infers streaming state from events since
-  `state` is only pushed on connect/reconnect. `message_start` → set
-  `isStreaming = true`. `turn_end` → set `isStreaming = false`. These toggle the
-  input bar mode and Stop button visibility. If event names differ from assumed
-  names after probe, update this mapping.
+  `state` is only pushed on connect/reconnect. Verified event names (Task 0):
+  `agent_start` → set `isStreaming = true`. `agent_settled` → set
+  `isStreaming = false`. These toggle the input bar mode and Stop button
+  visibility. Do **not** use `message_start`/`turn_end` (they fire per LLM turn and
+  would flicker during multi-turn tool runs) and do **not** rely on
+  `queue_update` (RPC-only; never fires in TUI mode). The server computes
+  `state.isStreaming` from `ctx.isIdle()` (verified working).
 - **Session rebind**: When a `state` message arrives with a different `sessionId`
   than the current one (pi executed `/new`, `/resume`, `/fork`):
   1. Clear transcript, rebuild from the accompanying `history` message
@@ -468,7 +628,7 @@ Switches on `CodeViewModel.state`:
 - **First time**: Centered branded card — terminal icon (SF Symbol
   `chevron.left.forwardslash.chevron.right`) in a `.glassEffect(.regular, in:
   .circle)`, title "Connect to pi", three fields: host (text, placeholder
-  `mac.ts.net`), port (numeric, default `47800`), code (6-char hex, monospace,
+  `mac.ts.net`), port (numeric, default `47800`), code (6 digits, monospace,
   uppercase, auto-advance). Connect button below. On successful connect, host/port
   saved to `CodeSettings`.
 - **Repeat** (host/port already saved): Shows only the code field (large, centered,
@@ -493,8 +653,8 @@ Switches on `CodeViewModel.state`:
 - **Transcript**: `LazyVStack` with message items, same scroll behavior as Chat
   (`ScrollTriggerModifier`). Auto-scroll on new events; user scroll up disables
   auto-scroll + shows floating "jump to bottom" button. **Note**: the rendering
-  below assumes specific event payload shapes (Critical unknowns #5). If the probe
-  reveals different shapes, this section must be revised. Message types:
+  below uses the verified event payload shapes (see "Verified API surface",
+  Task 0). Message types:
   - **User messages**: right-aligned glass bubbles (accent-tinted), same as Chat
   - **Assistant text**: left-aligned with sparkles icon, streaming markdown with
     blinking cursor, same as Chat's `MessageBubbleView` pattern
@@ -648,7 +808,11 @@ Per `testing.instructions.md` / AGENTS.md conventions:
 
 ## Part C — Testing plan
 
-### C1. Extension probe (before Task 1)
+### C1. Extension probe (before Task 1) — DONE
+
+Completed 2026-09-05: probe extension was built, run against a live pi v0.85.0
+session, and deleted. Findings with evidence are in "Verified API surface
+(Task 0 probe, 2026-09-05)" above. Original instructions, for the record:
 
 Build `pi-extensions/rc-probe/index.ts`:
 - Log all enumerable properties/methods of `pi` (the `ExtensionAPI` object)
@@ -675,7 +839,41 @@ Build `pi-extensions/rc-probe/index.ts`:
 
 ### C2. Extension test script (`pi-extensions/rc/test-client.mjs`)
 
-Automated Node.js script with assertions and exit codes (not manual "check" steps):
+Automated Node.js script with assertions and exit codes (not manual "check" steps).
+
+**Harness design (verified 2026-09-05 against pi v0.85.0 RPC mode):**
+
+- pi is spawned in **RPC mode** (`pi --mode rpc --provider openrouter --model
+  qwen/qwen3.8-27b --approve`), cwd = `pi-extensions/rc/test-project/` (temp
+  copy or in-place; AGENTS.md there forces the `question`/`questionnaire`
+  tools for test 5).
+  Extension discovery uses the real symlinks (no `-e` flag) so the shipped
+  configuration is what gets tested.
+- JSONL over stdin/stdout: commands are `{"id":..., "type":...}` lines; events
+  stream on stdout as JSON lines. Readiness = response to an initial
+  `get_session_stats` command. Extension commands dispatch via
+  `{"type":"prompt","message":"/rc"}` (response `{success:true}` only — the
+  handler return value is NOT surfaced).
+- **Test seams** (env-gated, diagnostic-only, never active in production use):
+  - `PI_RC_BIND` — bind address override. Default resolution: `tailscale` on
+    PATH, then the CLI bundled in the macOS app
+    (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`), then fail with a
+    clear message (never `0.0.0.0`). Harness uses `127.0.0.1`.
+  - `PI_RC_AUTH_FILE` — path to a status file the extension rewrites on every
+    state change: `{"status":"running","host","port","code","ts"}` or
+    `{"status":"stopped","reason","detail","ts"}`. Written ONLY when this env
+    is set — there is no default path, production never creates an rc status
+    file. Harness reads it to obtain the pairing code and to observe
+    toggle/port-busy outcomes (in TUI mode the same facts are shown via
+    `ctx.ui.notify`).
+  - `PI_RC_DEBUG` / `PI_RC_DEBUG_FILE` — append every lifecycle event and wire
+    frame (recv/send, hello results, ask lifecycle, stale closes, start
+    failures) to `~/.pi/agent/rc-debug.log` (or the `_FILE` path). Off by
+    default; pure diagnostics, no behavior change.
+- WS client = Node 24 built-in global `WebSocket` (no dependencies).
+- LLM-dependent tests use `openrouter/qwen/qwen3.8-27b` (cheap, verified
+  working 2026-09-05). Model round-trips are the slow part — allow 60 s
+  timeouts per LLM-dependent assertion.
 
 ```
 Test suite:
@@ -736,8 +934,38 @@ Run order:
 1. `CodeMessageMapperTests` — pure mapping, no async
 2. `CodeServerClientTests` — framing and protocol with mock transport
 3. `CodeViewModelTests` — full state machine with `MockCodeServerClient`
-4. Full iOS test suite (regression)
-5. Build both schemes (iOS + macOS)
+4. `CodeEndToEndTests` — see C3.1
+5. Full iOS test suite (regression)
+6. Build both schemes (iOS + macOS)
+
+### C3.1. Swift end-to-end tests (automated, no app run)
+
+`CodeEndToEndTests` (`openclient-llm-test/Features/Code/`) exercises the real
+`CodeServerClient` (URLSession transport, no mocks) against a real pi process
+running the real rc extension — the full cross-language stack, driven from
+XCTest so no app has to be launched:
+
+- Each test spawns `pi --mode rpc --approve --no-session` in a temp copy of
+  `pi-extensions/rc/test-project`, toggles `/rc` over RPC, and reads the
+  pairing code from the `PI_RC_AUTH_FILE` status file (the code is random per
+  toggle, so it is read, not hardcoded). The test then connects with the real
+  client and asserts on decoded `CodeEvent`s.
+- The LLM is a local deterministic stand-in: simulator test processes have
+  blocked egress and no API keys, so each test also runs `MockModelServer`, a
+  minimal OpenAI-compatible chat-completions server on 127.0.0.1 whose canned
+  replies are keyed on the test-project prompt markers (PONG-E2E, ASK,
+  ASKFORM, LONG). pi is pointed at it with `--provider openai
+  --model <mock> --base-url http://127.0.0.1:<port>`. The tests are therefore
+  hermetic: no network, no API key, no flaky model output.
+- pi binary resolution: `PI_RC_E2E_PI_BIN` env override → candidate paths
+  (homebrew, nvm, `~/.npm/_npx/*/node_modules/.bin/pi`) → `zsh -lc` lookup →
+  `XCTSkip` if not found (keeps the standard suite green where pi is absent).
+- Scenarios: connect → `helloOk`/`state`/`history` (decoded shapes);
+  prompt → `agent_start`…`agent_settled` events + history contains the prompt;
+  `ASK` → decoded `question` (options carry `value`) → answer →
+  `questionResolved(by: "client")`; `ASKFORM` → decoded `questionnaire` →
+  `answerQuestionnaire` → resolved; prompt-while-streaming →
+  `.notIdle` error → abort settles; ping/pong keep-alive.
 
 ### C4. End-to-end testing (manual, Task 4)
 
@@ -797,7 +1025,8 @@ completed task (linter and formatter run on commit hook); never push to remote.
 - Tailscale IPv4 lookup: `tailscale ip -4` must be on PATH in the pi process env;
   may return multiple IPs — take first line, trim. Fail with a clear message if
   not available (safety decision, no fallback to `0.0.0.0`).
-- 6-hex code = 24 bits: acceptable as a tailnet pairing code with rate-limiting.
+- 6-digit decimal code = 20 bits: acceptable as a tailnet pairing code with
+  rate-limiting (5 attempts per IP per 60 s). Digits-only for easy phone entry.
   Generated fresh per `/rc` toggle-on (ephemeral). Document that tailnet membership
   is the real boundary.
 - **Background notifications** (v1 limitation): Local notifications via

@@ -5,6 +5,7 @@
  * Multiple questions: tab bar navigation between questions
  */
 
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
 	Editor,
@@ -81,6 +82,82 @@ function errorResult(
 	};
 }
 
+// Remote-control access (see pi-extensions/rc). The structural type keeps the
+// two extensions decoupled: rc is looked up on globalThis and checked, never imported.
+interface RcRemote {
+	isServing(): boolean;
+	hasConnectedClients(): boolean;
+	ask(opts: { kind: "questionnaire"; params: unknown }): Promise<Answer[] | null>;
+}
+
+const RC_KEY = Symbol.for("pi-rc");
+
+function rcRemote(): RcRemote | undefined {
+	const rc = (globalThis as unknown as Record<symbol, unknown>)[RC_KEY];
+	return rc && typeof (rc as RcRemote).ask === "function" ? (rc as RcRemote) : undefined;
+}
+
+// Parent-relay access (see extensions/subagent). When running inside a pi
+// subagent process (PI_SUBAGENT_RELAY=1), the questionnaire is written to
+// stdout as a JSON line and the answers are read back from stdin as a JSON
+// line, so the parent session can relay it through its own UI.
+interface RelayResponse {
+	type: string;
+	id?: string;
+	answer?: unknown;
+	cancelled?: boolean;
+}
+
+let relayStdinAttached = false;
+let relayStdinBuffer = "";
+const relayPending = new Map<string, (resp: RelayResponse | null) => void>();
+
+function attachRelayStdin() {
+	if (relayStdinAttached || !process.stdin.readable) return;
+	relayStdinAttached = true;
+	process.stdin.setEncoding("utf8");
+	process.stdin.on("data", (chunk: string) => {
+		relayStdinBuffer += chunk;
+		const lines = relayStdinBuffer.split("\n");
+		relayStdinBuffer = lines.pop() ?? "";
+		for (const line of lines) {
+			if (!line.trim()) continue;
+			let resp: RelayResponse;
+			try {
+				resp = JSON.parse(line) as RelayResponse;
+			} catch {
+				continue;
+			}
+			if (resp.type !== "pi_subagent_question_response" || typeof resp.id !== "string") continue;
+			const resolve = relayPending.get(resp.id);
+			if (resolve) {
+				relayPending.delete(resp.id);
+				resolve(resp);
+			}
+		}
+	});
+	process.stdin.on("close", () => {
+		for (const resolve of Array.from(relayPending.values())) resolve(null);
+		relayPending.clear();
+	});
+}
+
+function relayAsk(req: Record<string, unknown>): Promise<RelayResponse | null> {
+	const id = randomUUID();
+	process.stdout.write(JSON.stringify({ type: "pi_subagent_question", id, ...req }) + "\n");
+	return new Promise((resolve) => {
+		relayPending.set(id, resolve);
+		attachRelayStdin();
+		process.stdin.once("close", () => {
+			const pending = relayPending.get(id);
+			if (pending) {
+				relayPending.delete(id);
+				pending(null);
+			}
+		});
+	});
+}
+
 export default function questionnaire(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "questionnaire",
@@ -90,7 +167,66 @@ export default function questionnaire(pi: ExtensionAPI) {
 		parameters: QuestionnaireParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const rc = rcRemote();
+			if (rc && rc.isServing() && rc.hasConnectedClients()) {
+				const questions: Question[] = params.questions.map((q, i) => ({
+					...q,
+					label: q.label || `Q${i + 1}`,
+					allowOther: q.allowOther !== false,
+				}));
+				const answers = await rc.ask({ kind: "questionnaire", params: { questions } });
+				if (!answers) {
+					return errorResult("User cancelled the questionnaire", questions);
+				}
+				const answerLines = answers.map((a) => {
+					const qLabel = questions.find((q) => q.id === a.id)?.label || a.id;
+					if (a.wasCustom) {
+						return `${qLabel}: user wrote: ${a.label}`;
+					}
+					return `${qLabel}: user selected: ${a.index}. ${a.label}`;
+				});
+				return {
+					content: [{ type: "text", text: answerLines.join("\n") }],
+					details: { questions, answers, cancelled: false },
+				};
+			}
+
 			if (ctx.mode !== "tui") {
+				if (process.env.PI_SUBAGENT_RELAY === "1") {
+					const questions: Question[] = params.questions.map((q, i) => ({
+						...q,
+						label: q.label || `Q${i + 1}`,
+						allowOther: q.allowOther !== false,
+					}));
+					const resp = await relayAsk({
+						kind: "questionnaire",
+						questions: questions.map((q) => ({
+							id: q.id,
+							label: q.label,
+							prompt: q.prompt,
+							options: q.options.map((o) => ({ label: o.label, value: o.value, description: o.description })),
+							allowOther: q.allowOther,
+						})),
+					});
+					if (!resp || resp.cancelled || typeof resp.answer !== "object" || resp.answer === null) {
+						return errorResult("Error: questionnaire relay was cancelled or closed", questions);
+					}
+					const answerMap = resp.answer as Record<string, string>;
+					const answers: Answer[] = questions
+						.filter((q) => typeof answerMap[q.id] === "string")
+						.map((q) => ({ id: q.id, value: answerMap[q.id], label: answerMap[q.id], wasCustom: false }));
+					if (answers.length === 0) {
+						return errorResult("Error: questionnaire relay returned no answers", questions);
+					}
+					const answerLines = answers.map((a) => {
+						const qLabel = questions.find((q) => q.id === a.id)?.label || a.id;
+						return `${qLabel}: user selected: ${a.label}`;
+					});
+					return {
+						content: [{ type: "text", text: answerLines.join("\n") }],
+						details: { questions, answers, cancelled: false },
+					};
+				}
 				return errorResult("Error: UI not available (running in non-interactive mode)");
 			}
 			if (params.questions.length === 0) {

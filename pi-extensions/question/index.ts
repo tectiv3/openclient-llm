@@ -4,6 +4,7 @@
  * Escape in editor returns to options, Escape in options cancels
  */
 
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
 	Editor,
@@ -30,6 +31,82 @@ interface QuestionDetails {
 	wasCustom?: boolean;
 }
 
+// Remote-control access (see pi-extensions/rc). The structural type keeps the
+// two extensions decoupled: rc is looked up on globalThis and checked, never imported.
+interface RcRemote {
+	isServing(): boolean;
+	hasConnectedClients(): boolean;
+	ask(opts: { kind: "question"; params: unknown }): Promise<{ value: string; wasCustom: boolean; index?: number } | null>;
+}
+
+const RC_KEY = Symbol.for("pi-rc");
+
+function rcRemote(): RcRemote | undefined {
+	const rc = (globalThis as unknown as Record<symbol, unknown>)[RC_KEY];
+	return rc && typeof (rc as RcRemote).ask === "function" ? (rc as RcRemote) : undefined;
+}
+
+// Parent-relay access (see extensions/subagent). When running inside a pi
+// subagent process (PI_SUBAGENT_RELAY=1), the question prompt is written to
+// stdout as a JSON line and the answer is read back from stdin as a JSON line,
+// so the parent session can relay it through its own UI.
+interface RelayResponse {
+	type: string;
+	id?: string;
+	answer?: unknown;
+	cancelled?: boolean;
+}
+
+let relayStdinAttached = false;
+let relayStdinBuffer = "";
+const relayPending = new Map<string, (resp: RelayResponse | null) => void>();
+
+function attachRelayStdin() {
+	if (relayStdinAttached || !process.stdin.readable) return;
+	relayStdinAttached = true;
+	process.stdin.setEncoding("utf8");
+	process.stdin.on("data", (chunk: string) => {
+		relayStdinBuffer += chunk;
+		const lines = relayStdinBuffer.split("\n");
+		relayStdinBuffer = lines.pop() ?? "";
+		for (const line of lines) {
+			if (!line.trim()) continue;
+			let resp: RelayResponse;
+			try {
+				resp = JSON.parse(line) as RelayResponse;
+			} catch {
+				continue;
+			}
+			if (resp.type !== "pi_subagent_question_response" || typeof resp.id !== "string") continue;
+			const resolve = relayPending.get(resp.id);
+			if (resolve) {
+				relayPending.delete(resp.id);
+				resolve(resp);
+			}
+		}
+	});
+	process.stdin.on("close", () => {
+		for (const resolve of Array.from(relayPending.values())) resolve(null);
+		relayPending.clear();
+	});
+}
+
+function relayAsk(req: Record<string, unknown>): Promise<RelayResponse | null> {
+	const id = randomUUID();
+	process.stdout.write(JSON.stringify({ type: "pi_subagent_question", id, ...req }) + "\n");
+	return new Promise((resolve) => {
+		relayPending.set(id, resolve);
+		attachRelayStdin();
+		process.stdin.once("close", () => {
+			const pending = relayPending.get(id);
+			if (pending) {
+				relayPending.delete(id);
+				pending(null);
+			}
+		});
+	});
+}
+
 // Options with labels and optional descriptions
 const OptionSchema = Type.Object({
 	label: Type.String({ description: "Display label for the option" }),
@@ -50,7 +127,55 @@ export default function question(pi: ExtensionAPI) {
 		executionMode: "sequential",
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const rc = rcRemote();
+			if (rc && rc.isServing() && rc.hasConnectedClients()) {
+				const answer = await rc.ask({
+					kind: "question",
+					params: {
+						question: params.question,
+						options: params.options.map((o) => ({ label: o.label, value: o.label, description: o.description })),
+						allowOther: true,
+					},
+				});
+				const simpleOptions = params.options.map((o) => o.label);
+				if (!answer) {
+					return {
+						content: [{ type: "text", text: "User cancelled the selection" }],
+						details: { question: params.question, options: simpleOptions, answer: null } as QuestionDetails,
+					};
+				}
+				if (answer.wasCustom) {
+					return {
+						content: [{ type: "text", text: `User wrote: ${answer.value}` }],
+						details: { question: params.question, options: simpleOptions, answer: answer.value, wasCustom: true } as QuestionDetails,
+					};
+				}
+				return {
+					content: [{ type: "text", text: `User selected: ${answer.index ?? "?"}. ${answer.value}` }],
+					details: { question: params.question, options: simpleOptions, answer: answer.value, wasCustom: false } as QuestionDetails,
+				};
+			}
+
 			if (ctx.mode !== "tui") {
+				if (process.env.PI_SUBAGENT_RELAY === "1") {
+					const resp = await relayAsk({
+						kind: "question",
+						question: params.question,
+						options: params.options.map((o) => ({ label: o.label, description: o.description })),
+					});
+					const simpleOptions = params.options.map((o) => o.label);
+					const answer = resp ? (resp.answer as string | null) : null;
+					if (!resp || resp.cancelled || answer === null || answer === undefined) {
+						return {
+							content: [{ type: "text", text: "Error: question relay was cancelled or closed" }],
+							details: { question: params.question, options: simpleOptions, answer: null } as QuestionDetails,
+						};
+					}
+					return {
+						content: [{ type: "text", text: `User selected: ${answer}` }],
+						details: { question: params.question, options: simpleOptions, answer, wasCustom: false } as QuestionDetails,
+					};
+				}
 				return {
 					content: [{ type: "text", text: "Error: UI not available (running in non-interactive mode)" }],
 					details: {

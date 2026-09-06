@@ -53,7 +53,7 @@ struct ChatInputBarView: View {
                 }
 
                 if let usage = loadedState.contextUsage {
-                    ChatContextUsageView(usage: usage)
+                    ContextUsageView(usage: usage)
                         .popoverTip(
                             usage.percentage >= 50 && !loadedState.isStreaming
                                 ? AppTips.contextUsage

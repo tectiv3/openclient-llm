@@ -12,26 +12,27 @@ struct HomeView: View {
     // MARK: - Properties
 
     @State private var viewModel = HomeViewModel()
+    @State private var codeViewModel = CodeViewModel()
     @State private var selectedConversation: Conversation?
     @State private var isPrivateChatActive: Bool = false
 
-#if os(macOS)
-    @State private var sidebarDestination: SidebarDestination = .chats
-#endif
+    #if os(macOS)
+        @State private var sidebarDestination: SidebarDestination = .chats
+    #endif
 
-#if os(iOS)
-    @State private var selectedTab: AppTab = .chats
-#endif
+    #if os(iOS)
+        @State private var selectedTab: AppTab = .chats
+    #endif
 
     // MARK: - View
 
     var body: some View {
         Group {
-#if os(macOS)
-            macOSLayout
-#else
-            iOSLayout
-#endif
+            #if os(macOS)
+                macOSLayout
+            #else
+                iOSLayout
+            #endif
         }
         .onContinueUserActivity(SpotlightConstants.activityType) { activity in
             guard let idString = activity.userInfo?[SpotlightConstants.activityIdentifierKey] as? String,
@@ -43,25 +44,25 @@ struct HomeView: View {
         }
         .onChange(of: viewModel.isPrivateChatRequested) { _, isRequested in
             guard isRequested else { return }
-#if os(iOS)
-            selectedTab = .chats
-#elseif os(macOS)
-            sidebarDestination = .chats
-#endif
+            #if os(iOS)
+                selectedTab = .chats
+            #elseif os(macOS)
+                sidebarDestination = .chats
+            #endif
             isPrivateChatActive = true
             viewModel.send(.privateChatRequestConsumed)
         }
         .onChange(of: viewModel.pendingConversation) { _, conversation in
             guard let conversation else { return }
-#if os(iOS)
-            selectedTab = .chats
-#elseif os(macOS)
-            sidebarDestination = .chats
-#endif
+            #if os(iOS)
+                selectedTab = .chats
+            #elseif os(macOS)
+                sidebarDestination = .chats
+            #endif
             selectedConversation = conversation
             viewModel.send(.pendingConversationConsumed)
         }
-#if os(iOS)
+        #if os(iOS)
         .task {
             guard let action = viewModel.pendingShortcutAction else { return }
             try? await Task.sleep(for: .milliseconds(300))
@@ -82,7 +83,7 @@ struct HomeView: View {
             guard isPending else { return }
             viewModel.send(.shareItemReceived)
         }
-#endif
+        #endif
         .task {
             guard viewModel.pendingURLSchemeAction != nil else { return }
             try? await Task.sleep(for: .milliseconds(300))
@@ -98,140 +99,65 @@ struct HomeView: View {
 // MARK: - Private
 
 private extension HomeView {
-#if os(iOS)
-    var iOSLayout: some View {
-        TabView(selection: $selectedTab) {
-            Tab(value: AppTab.chats) {
-                chatsTab
-            } label: {
-                Label {
-                    Text(String(localized: "Chats"))
-                } icon: {
-                    Image(systemName: "bubble.left.and.bubble.right")
-                        .symbolEffect(.bounce, value: selectedTab)
+    #if os(iOS)
+        var iOSLayout: some View {
+            TabView(selection: $selectedTab) {
+                Tab(value: AppTab.chats) {
+                    chatsTab
+                } label: {
+                    Label {
+                        Text(String(localized: "Chats"))
+                    } icon: {
+                        Image(systemName: "bubble.left.and.bubble.right")
+                            .symbolEffect(.bounce, value: selectedTab)
+                    }
+                }
+                Tab(value: AppTab.code) {
+                    CodeView(viewModel: codeViewModel) {
+                        selectedTab = .chats
+                    }
+                } label: {
+                    Label {
+                        Text(String(localized: "Code"))
+                    } icon: {
+                        Image(systemName: "chevron.left.forwardslash.chevron.right")
+                            .symbolEffect(.bounce, value: selectedTab)
+                    }
+                }
+                Tab(value: AppTab.models) {
+                    ModelsView()
+                } label: {
+                    Label {
+                        Text(String(localized: "Models"))
+                    } icon: {
+                        Image(systemName: "brain.head.profile")
+                            .symbolEffect(.bounce, value: selectedTab)
+                    }
+                }
+                Tab(value: AppTab.settings) {
+                    SettingsView()
+                } label: {
+                    Label {
+                        Text(String(localized: "Settings"))
+                    } icon: {
+                        Image(systemName: "gearshape")
+                            .symbolEffect(.rotate, value: selectedTab)
+                    }
+                }
+                Tab(value: AppTab.search, role: .search) {
+                    SearchConversationsView()
+                } label: {
+                    Label(String(localized: "Search"), systemImage: "magnifyingglass")
                 }
             }
-            Tab(value: AppTab.models) {
-                ModelsView()
-            } label: {
-                Label {
-                    Text(String(localized: "Models"))
-                } icon: {
-                    Image(systemName: "brain.head.profile")
-                        .symbolEffect(.bounce, value: selectedTab)
-                }
-            }
-            Tab(value: AppTab.settings) {
-                SettingsView()
-            } label: {
-                Label {
-                    Text(String(localized: "Settings"))
-                } icon: {
-                    Image(systemName: "gearshape")
-                        .symbolEffect(.rotate, value: selectedTab)
-                }
-            }
-            Tab(value: AppTab.search, role: .search) {
-                SearchConversationsView()
-            } label: {
-                Label(String(localized: "Search"), systemImage: "magnifyingglass")
-            }
+            .tabViewStyle(.sidebarAdaptable)
         }
-        .tabViewStyle(.sidebarAdaptable)
-    }
 
-    var chatsTab: some View {
-        iPhoneChatsLayout
-    }
-
-    var iPhoneChatsLayout: some View {
-        NavigationStack {
-            ConversationListView(activeConversationId: selectedConversation?.id) { conversation in
-                selectedConversation = conversation
-            } onPrivateChatSelected: {
-                isPrivateChatActive = true
-            }
-            .navigationDestination(item: $selectedConversation) { conversation in
-                ChatView(
-                    conversation: conversation,
-                    shareItem: viewModel.pendingShareItem,
-                    urlSchemeText: viewModel.pendingURLSchemeText,
-                    onForkCreated: { fork in
-                        selectedConversation = fork
-                    },
-                    onShareItemProcessed: { viewModel.send(.shareItemConsumed) },
-                    onURLSchemeTextProcessed: { viewModel.send(.urlSchemeTextConsumed) }
-                )
-            }
-            .navigationDestination(isPresented: $isPrivateChatActive) {
-                ChatView(isPrivateChat: true)
-            }
+        var chatsTab: some View {
+            iPhoneChatsLayout
         }
-    }
 
-    // MARK: - AppTab
-
-    enum AppTab: Hashable {
-        case chats
-        case models
-        case settings
-        case search
-    }
-
-    func handleShortcutAction(_ action: ShortcutAction) {
-        switch action {
-        case .newChat:
-            viewModel.send(.newChatShortcutTriggered)
-        case .newPrivateChat:
-            viewModel.send(.newPrivateChatShortcutTriggered)
-        case .search:
-            selectedTab = .search
-        }
-    }
-#endif
-
-#if os(macOS)
-    enum SidebarDestination: Hashable {
-        case chats
-        case models
-        case settings
-    }
-
-    var macOSLayout: some View {
-        NavigationSplitView {
-            sidebar
-        } detail: {
-            detailContent
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .onChange(of: sidebarDestination) { _, _ in
-            selectedConversation = nil
-        }
-    }
-
-    var sidebar: some View {
-        List(selection: $sidebarDestination) {
-            Section {
-                Label(String(localized: "Chats"), systemImage: "bubble.left.and.bubble.right")
-                    .tag(SidebarDestination.chats)
-            }
-
-            Section {
-                Label(String(localized: "Models"), systemImage: "brain.head.profile")
-                    .tag(SidebarDestination.models)
-
-                Label(String(localized: "Settings"), systemImage: "gearshape")
-                    .tag(SidebarDestination.settings)
-            }
-        }
-        .navigationTitle(String(localized: "OpenClient"))
-        .navigationSplitViewColumnWidth(180)
-    }
-
-    @ViewBuilder
-    var detailContent: some View {
-        switch sidebarDestination {
-        case .chats:
+        var iPhoneChatsLayout: some View {
             NavigationStack {
                 ConversationListView(activeConversationId: selectedConversation?.id) { conversation in
                     selectedConversation = conversation
@@ -254,13 +180,109 @@ private extension HomeView {
                     ChatView(isPrivateChat: true)
                 }
             }
-        case .models:
-            ModelsView()
-        case .settings:
-            SettingsView()
         }
-    }
-#endif
+
+        // MARK: - AppTab
+
+        enum AppTab: Hashable {
+            case chats
+            case code
+            case models
+            case settings
+            case search
+        }
+
+        func handleShortcutAction(_ action: ShortcutAction) {
+            switch action {
+            case .newChat:
+                viewModel.send(.newChatShortcutTriggered)
+            case .newPrivateChat:
+                viewModel.send(.newPrivateChatShortcutTriggered)
+            case .search:
+                selectedTab = .search
+            }
+        }
+    #endif
+
+    #if os(macOS)
+        enum SidebarDestination: Hashable {
+            case chats
+            case code
+            case models
+            case settings
+        }
+
+        var macOSLayout: some View {
+            NavigationSplitView {
+                sidebar
+            } detail: {
+                detailContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .onChange(of: sidebarDestination) { _, _ in
+                selectedConversation = nil
+            }
+        }
+
+        var sidebar: some View {
+            List(selection: $sidebarDestination) {
+                Section {
+                    Label(String(localized: "Chats"), systemImage: "bubble.left.and.bubble.right")
+                        .tag(SidebarDestination.chats)
+                }
+
+                Section {
+                    Label(String(localized: "Code"), systemImage: "chevron.left.forwardslash.chevron.right")
+                        .tag(SidebarDestination.code)
+
+                    Label(String(localized: "Models"), systemImage: "brain.head.profile")
+                        .tag(SidebarDestination.models)
+
+                    Label(String(localized: "Settings"), systemImage: "gearshape")
+                        .tag(SidebarDestination.settings)
+                }
+            }
+            .navigationTitle(String(localized: "OpenClient"))
+            .navigationSplitViewColumnWidth(180)
+        }
+
+        @ViewBuilder
+        var detailContent: some View {
+            switch sidebarDestination {
+            case .chats:
+                NavigationStack {
+                    ConversationListView(activeConversationId: selectedConversation?.id) { conversation in
+                        selectedConversation = conversation
+                    } onPrivateChatSelected: {
+                        isPrivateChatActive = true
+                    }
+                    .navigationDestination(item: $selectedConversation) { conversation in
+                        ChatView(
+                            conversation: conversation,
+                            shareItem: viewModel.pendingShareItem,
+                            urlSchemeText: viewModel.pendingURLSchemeText,
+                            onForkCreated: { fork in
+                                selectedConversation = fork
+                            },
+                            onShareItemProcessed: { viewModel.send(.shareItemConsumed) },
+                            onURLSchemeTextProcessed: { viewModel.send(.urlSchemeTextConsumed) }
+                        )
+                    }
+                    .navigationDestination(isPresented: $isPrivateChatActive) {
+                        ChatView(isPrivateChat: true)
+                    }
+                }
+            case .code:
+                CodeView(viewModel: codeViewModel) {
+                    sidebarDestination = .chats
+                }
+            case .models:
+                ModelsView()
+            case .settings:
+                SettingsView()
+            }
+        }
+    #endif
 }
 
 // MARK: - Hashable
