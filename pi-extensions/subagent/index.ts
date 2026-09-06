@@ -12,26 +12,28 @@
  * Uses JSON mode to capture structured output from subagents.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { Message } from "@mariozechner/pi-ai";
-import { StringEnum } from "@mariozechner/pi-ai";
+import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { Message } from "@earendil-works/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
 import {
+	CONFIG_DIR_NAME,
 	type ExtensionAPI,
-	type ExtensionContext,
+	getAgentDir,
 	getMarkdownTheme,
 	withFileMutationQueue,
-} from "@mariozechner/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
-import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.js";
+} from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
+const PER_TASK_OUTPUT_CAP = 50 * 1024;
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -177,6 +179,28 @@ function getFinalOutput(messages: Message[]): string {
 	return "";
 }
 
+function isFailedResult(result: SingleResult): boolean {
+	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+}
+
+function getResultOutput(result: SingleResult): string {
+	if (isFailedResult(result)) {
+		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
+	}
+	return getFinalOutput(result.messages) || "(no output)";
+}
+
+function truncateParallelOutput(output: string): string {
+	const byteLength = Buffer.byteLength(output, "utf8");
+	if (byteLength <= PER_TASK_OUTPUT_CAP) return output;
+
+	let truncated = output.slice(0, PER_TASK_OUTPUT_CAP);
+	while (Buffer.byteLength(truncated, "utf8") > PER_TASK_OUTPUT_CAP) {
+		truncated = truncated.slice(0, -1);
+	}
+	return `${truncated}\n\n[Output truncated: ${byteLength - Buffer.byteLength(truncated, "utf8")} bytes omitted. Full output preserved in tool details.]`;
+}
+
 type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
 
 function getDisplayItems(messages: Message[]): DisplayItem[] {
@@ -222,72 +246,6 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 	return { dir: tmpDir, filePath };
 }
 
-interface SubagentRelayQuestion {
-	id: string;
-	kind: "question" | "questionnaire";
-	question?: string;
-	options?: Array<{ label: string; description?: string }>;
-	questions?: Array<{ id: string; prompt: string; options: Array<{ label: string; description?: string }> }>;
-}
-
-// Relay a child's question prompt to this session's UI and write the answer
-// back over the child's stdin (protocol: pi_subagent_question / _response).
-async function relaySubagentQuestion(
-	proc: ChildProcess,
-	ctx: ExtensionContext,
-	req: SubagentRelayQuestion,
-): Promise<void> {
-	if (!proc.stdin.writable) {
-		return;
-	}
-
-	let answer: string | Record<string, string> | null = null;
-	let cancelled = false;
-
-	if (!ctx.hasUI) {
-		cancelled = true;
-	} else if (req.kind === "question" && req.question) {
-		const options = (req.options ?? []).map((o) => o.description ? `${o.label} — ${o.description}` : o.label);
-		if (options.length === 0) {
-			cancelled = true;
-		} else {
-			const choice = await ctx.ui.select(req.question, options);
-			if (choice === undefined) {
-				cancelled = true;
-			} else {
-				answer = choice;
-			}
-		}
-	} else if (req.kind === "questionnaire" && Array.isArray(req.questions) && req.questions.length > 0) {
-		const answers: Record<string, string> = {};
-		for (const q of req.questions) {
-			if (typeof q?.id !== "string" || !Array.isArray(q.options)) continue;
-			const options = q.options.map((o) => o.description ? `${o.label} — ${o.description}` : o.label);
-			options.push("Other…");
-			const choice = await ctx.ui.select(`[${q.id}] ${q.prompt}`, options);
-			if (choice === undefined) {
-				cancelled = true;
-				break;
-			}
-			if (choice === "Other…") {
-				const custom = await ctx.ui.input(`[${q.id}] Type your answer:`);
-				if (custom === undefined) {
-					cancelled = true;
-					break;
-				}
-				answers[q.id] = custom.trim() || "(no response)";
-			} else {
-				answers[q.id] = choice;
-			}
-		}
-		if (!cancelled) answer = answers;
-	}
-
-	proc.stdin.write(
-		JSON.stringify({ type: "pi_subagent_question_response", id: req.id, answer, cancelled }) + "\n",
-	);
-}
-
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	const currentScript = process.argv[1];
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
@@ -306,8 +264,14 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
+interface DispatchDefaults {
+	model?: string;
+	thinkingLevel?: ThinkingLevel;
+}
+
 async function runSingleAgent(
 	defaultCwd: string,
+	dispatchDefaults: DispatchDefaults,
 	agents: AgentConfig[],
 	agentName: string,
 	task: string,
@@ -316,7 +280,6 @@ async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
-	activeModel: string | undefined,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -335,10 +298,12 @@ async function runSingleAgent(
 	}
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
-	// Frontmatter model wins; otherwise inherit the main agent's active model
-	// so subagents track /model changes without any hardcoded default.
-	const effectiveModel = agent.model ?? activeModel;
-	if (effectiveModel) args.push("--model", effectiveModel);
+	const inheritsDispatchConfig = !agent.model;
+	const model = agent.model ?? dispatchDefaults.model;
+	if (model) args.push("--model", model);
+	if (inheritsDispatchConfig && dispatchDefaults.thinkingLevel) {
+		args.push("--thinking", dispatchDefaults.thinkingLevel);
+	}
 	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
 
 	let tmpPromptDir: string | null = null;
@@ -352,7 +317,7 @@ async function runSingleAgent(
 		messages: [],
 		stderr: "",
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-		model: effectiveModel,
+		model,
 		step,
 	};
 
@@ -381,9 +346,6 @@ async function runSingleAgent(
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: cwd ?? defaultCwd,
 				shell: false,
-				// stdin must NOT be a kept-open pipe: pi blocks in readPipedStdin()
-				// at startup for non-RPC modes until EOF. The relay rework uses a
-				// Unix socket instead (docs/plans/subagent-question-relay.md).
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 			let buffer = "";
@@ -422,10 +384,6 @@ async function runSingleAgent(
 				if (event.type === "tool_result_end" && event.message) {
 					currentResult.messages.push(event.message as Message);
 					emitUpdate();
-				}
-
-				if (event.type === "pi_subagent_question" && typeof event.id === "string") {
-					void relaySubagentQuestion(proc, ctx, event as SubagentRelayQuestion);
 				}
 			};
 
@@ -517,17 +475,20 @@ export default function (pi: ExtensionAPI) {
 		description: [
 			"Delegate tasks to specialized subagents with isolated context.",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
-			'Default agent scope is "user" (from ~/.pi/agent/agents).',
-			'To enable project-local agents in .pi/agents, set agentScope: "both" (or "project").',
+			`Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
+			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
 		].join(" "),
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const agentScope: AgentScope = params.agentScope ?? "user";
+			const dispatchDefaults: DispatchDefaults = {
+				model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+				thinkingLevel: ctx.thinkingLevel,
+			};
 			const discovery = discoverAgents(ctx.cwd, agentScope);
 			const agents = discovery.agents;
 			const confirmProjectAgents = params.confirmProjectAgents ?? true;
-			const activeModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 
 			const hasChain = (params.chain?.length ?? 0) > 0;
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -556,7 +517,12 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
+			if (
+				(agentScope === "project" || agentScope === "both") &&
+				confirmProjectAgents &&
+				ctx.hasUI &&
+				!ctx.isProjectTrusted()
+			) {
 				const requestedAgentNames = new Set<string>();
 				if (params.chain) for (const step of params.chain) requestedAgentNames.add(step.agent);
 				if (params.tasks) for (const t of params.tasks) requestedAgentNames.add(t.agent);
@@ -606,6 +572,7 @@ export default function (pi: ExtensionAPI) {
 
 					const result = await runSingleAgent(
 						ctx.cwd,
+						dispatchDefaults,
 						agents,
 						step.agent,
 						taskWithContext,
@@ -614,15 +581,12 @@ export default function (pi: ExtensionAPI) {
 						signal,
 						chainUpdate,
 						makeDetails("chain"),
-						activeModel,
 					);
 					results.push(result);
 
-					const isError =
-						result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+					const isError = isFailedResult(result);
 					if (isError) {
-						const errorMsg =
-							result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
+						const errorMsg = getResultOutput(result);
 						return {
 							content: [{ type: "text", text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}` }],
 							details: makeDetails("chain")(results),
@@ -681,6 +645,7 @@ export default function (pi: ExtensionAPI) {
 				const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
 					const result = await runSingleAgent(
 						ctx.cwd,
+						dispatchDefaults,
 						agents,
 						t.agent,
 						t.task,
@@ -695,24 +660,25 @@ export default function (pi: ExtensionAPI) {
 							}
 						},
 						makeDetails("parallel"),
-						activeModel,
 					);
 					allResults[index] = result;
 					emitParallelUpdate();
 					return result;
 				});
 
-				const successCount = results.filter((r) => r.exitCode === 0).length;
+				const successCount = results.filter((r) => !isFailedResult(r)).length;
 				const summaries = results.map((r) => {
-					const output = getFinalOutput(r.messages);
-					const preview = output.slice(0, 100) + (output.length > 100 ? "..." : "");
-					return `[${r.agent}] ${r.exitCode === 0 ? "completed" : "failed"}: ${preview || "(no output)"}`;
+					const output = truncateParallelOutput(getResultOutput(r));
+					const status = isFailedResult(r)
+						? `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`
+						: "completed";
+					return `### [${r.agent}] ${status}\n\n${output}`;
 				});
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n")}`,
+							text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n---\n\n")}`,
 						},
 					],
 					details: makeDetails("parallel")(results),
@@ -722,6 +688,7 @@ export default function (pi: ExtensionAPI) {
 			if (params.agent && params.task) {
 				const result = await runSingleAgent(
 					ctx.cwd,
+					dispatchDefaults,
 					agents,
 					params.agent,
 					params.task,
@@ -730,12 +697,10 @@ export default function (pi: ExtensionAPI) {
 					signal,
 					onUpdate,
 					makeDetails("single"),
-					activeModel,
 				);
-				const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+				const isError = isFailedResult(result);
 				if (isError) {
-					const errorMsg =
-						result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
+					const errorMsg = getResultOutput(result);
 					return {
 						content: [{ type: "text", text: `Agent ${result.stopReason || "failed"}: ${errorMsg}` }],
 						details: makeDetails("single")([result]),
@@ -826,7 +791,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (details.mode === "single" && details.results.length === 1) {
 				const r = details.results[0];
-				const isError = r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
+				const isError = isFailedResult(r);
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
@@ -979,8 +944,8 @@ export default function (pi: ExtensionAPI) {
 
 			if (details.mode === "parallel") {
 				const running = details.results.filter((r) => r.exitCode === -1).length;
-				const successCount = details.results.filter((r) => r.exitCode === 0).length;
-				const failCount = details.results.filter((r) => r.exitCode > 0).length;
+				const successCount = details.results.filter((r) => r.exitCode !== -1 && !isFailedResult(r)).length;
+				const failCount = details.results.filter((r) => r.exitCode !== -1 && isFailedResult(r)).length;
 				const isRunning = running > 0;
 				const icon = isRunning
 					? theme.fg("warning", "⏳")
@@ -1002,7 +967,7 @@ export default function (pi: ExtensionAPI) {
 					);
 
 					for (const r of details.results) {
-						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+						const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 						const displayItems = getDisplayItems(r.messages);
 						const finalOutput = getFinalOutput(r.messages);
 
@@ -1049,9 +1014,9 @@ export default function (pi: ExtensionAPI) {
 					const rIcon =
 						r.exitCode === -1
 							? theme.fg("warning", "⏳")
-							: r.exitCode === 0
-								? theme.fg("success", "✓")
-								: theme.fg("error", "✗");
+							: isFailedResult(r)
+								? theme.fg("error", "✗")
+								: theme.fg("success", "✓");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`;
 					if (displayItems.length === 0)
