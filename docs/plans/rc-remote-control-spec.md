@@ -855,8 +855,10 @@ Automated Node.js script with assertions and exit codes (not manual "check" step
   `{"type":"prompt","message":"/rc"}` (response `{success:true}` only — the
   handler return value is NOT surfaced).
 - **Test seams** (env-gated, diagnostic-only, never active in production use):
-  - `PI_RC_BIND` — bind address override (default: `tailscale ip -4`; this dev
-    machine has no tailscale CLI). Harness uses `127.0.0.1`.
+  - `PI_RC_BIND` — bind address override. Default resolution: `tailscale` on
+    PATH, then the CLI bundled in the macOS app
+    (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`), then fail with a
+    clear message (never `0.0.0.0`). Harness uses `127.0.0.1`.
   - `PI_RC_AUTH_FILE` — path to a status file the extension rewrites on every
     state change: `{"status":"running","host","port","code","ts"}` or
     `{"status":"stopped","reason","detail","ts"}`. Harness reads it to obtain

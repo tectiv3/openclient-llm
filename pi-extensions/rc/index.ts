@@ -898,16 +898,35 @@ function sessionName(state: RcSingleton): string | undefined {
     return managerName ?? undefined
 }
 
+const TAILSCALE_BINS = ['tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale']
+
+function tailscaleIp4(bin: string): string | null {
+    const output = execFileSync(bin, ['ip', '-4'], { encoding: 'utf8' })
+    return (
+        output
+            .split('\n')
+            .map(line => line.trim())
+            .find(Boolean) ?? null
+    )
+}
+
 function resolveBindHost(): string {
     const override = process.env.PI_RC_BIND?.trim()
     if (override) return override
-    const output = execFileSync('tailscale', ['ip', '-4'], { encoding: 'utf8' })
-    const host = output
-        .split('\n')
-        .map(line => line.trim())
-        .find(Boolean)
-    if (!host) throw new Error('tailscale ip -4 returned no IPv4 address')
-    return host
+    let lastError: unknown = null
+    for (const bin of TAILSCALE_BINS) {
+        try {
+            const host = tailscaleIp4(bin)
+            if (host) return host
+            lastError = new Error(`${bin} ip -4 returned no IPv4 address`)
+        } catch (error) {
+            lastError = error
+        }
+    }
+    const detail = lastError instanceof Error ? lastError.message : String(lastError)
+    throw new Error(
+        `could not determine tailnet IP: ${detail} (is Tailscale running? set PI_RC_BIND to override)`
+    )
 }
 
 function writeRunningAuth(host: string, port: number, code: string): void {

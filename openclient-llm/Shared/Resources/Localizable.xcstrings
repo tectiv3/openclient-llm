@@ -1950,6 +1950,9 @@
         }
       }
     },
+    "Answered from another device." : {
+
+    },
     "Any additional context for the assistant" : {
       "comment" : "A label for a text field where the user can add additional context for the assistant.",
       "localizations" : {
@@ -4678,6 +4681,9 @@
         }
       }
     },
+    "Collapsed" : {
+
+    },
     "Color" : {
       "comment" : "A label for the color of a tag.",
       "localizations" : {
@@ -4872,6 +4878,9 @@
           }
         }
       }
+    },
+    "Compaction summary" : {
+
     },
     "Completed" : {
       "extractionState" : "stale",
@@ -9721,6 +9730,9 @@
           }
         }
       }
+    },
+    "Expanded" : {
+
     },
     "Explain a complex topic simply" : {
       "localizations" : {
@@ -20952,6 +20964,9 @@
     "Question" : {
 
     },
+    "Question cancelled." : {
+
+    },
     "Questionnaire" : {
 
     },
@@ -21278,6 +21293,9 @@
           }
         }
       }
+    },
+    "Reconnected" : {
+
     },
     "Reconnecting" : {
 
@@ -22395,6 +22413,9 @@
           }
         }
       }
+    },
+    "Reveal more output" : {
+
     },
     "Review and improve my writing" : {
       "localizations" : {
@@ -24726,6 +24747,12 @@
           }
         }
       }
+    },
+    "Show less" : {
+
+    },
+    "Show more" : {
+
     },
     "Show Token Usage" : {
       "comment" : "A toggle that shows the number of tokens remaining in the current token.",
@@ -30961,6 +30988,9 @@
       }
     },
     "Toggle integrations for this conversation. Manage the list in Settings." : {
+
+    },
+    "Too many attempts — wait %llds" : {
 
     },
     "Too many attempts — wait 60s" : {
