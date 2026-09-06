@@ -943,6 +943,7 @@ function writeStoppedAuth(reason: string, detail?: string): void {
 
 function writeAuth(payload: JsonObject): void {
     const file = authFilePath()
+    if (!file) return
     const dir = dirname(file)
     if (dir !== '.' && !existsSync(dir)) mkdirSync(dir, { recursive: true })
     const tempFile = `${file}.${process.pid}.${Date.now()}.tmp`
@@ -980,8 +981,11 @@ function dbgLog(...parts: unknown[]): void {
     }
 }
 
-function authFilePath(): string {
-    return process.env.PI_RC_AUTH_FILE?.trim() || join(homedir(), '.pi', 'agent', 'rc-auth.json')
+// Test seam only: written solely when a harness sets PI_RC_AUTH_FILE.
+// Production never touches the filesystem for RC state (TUI shows it via notify).
+function authFilePath(): string | null {
+    const file = process.env.PI_RC_AUTH_FILE?.trim()
+    return file ? file : null
 }
 
 function writeQuitStoppedAuth(state: RcSingleton, detail?: string): void {

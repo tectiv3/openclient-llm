@@ -861,9 +861,11 @@ Automated Node.js script with assertions and exit codes (not manual "check" step
     clear message (never `0.0.0.0`). Harness uses `127.0.0.1`.
   - `PI_RC_AUTH_FILE` — path to a status file the extension rewrites on every
     state change: `{"status":"running","host","port","code","ts"}` or
-    `{"status":"stopped","reason","detail","ts"}`. Harness reads it to obtain
-    the pairing code and to observe toggle/port-busy outcomes (in TUI mode the
-    same facts are shown via `ctx.ui.notify`).
+    `{"status":"stopped","reason","detail","ts"}`. Written ONLY when this env
+    is set — there is no default path, production never creates an rc status
+    file. Harness reads it to obtain the pairing code and to observe
+    toggle/port-busy outcomes (in TUI mode the same facts are shown via
+    `ctx.ui.notify`).
   - `PI_RC_DEBUG` / `PI_RC_DEBUG_FILE` — append every lifecycle event and wire
     frame (recv/send, hello results, ask lifecycle, stale closes, start
     failures) to `~/.pi/agent/rc-debug.log` (or the `_FILE` path). Off by
@@ -945,7 +947,7 @@ XCTest so no app has to be launched:
 
 - Each test spawns `pi --mode rpc --approve --no-session` in a temp copy of
   `pi-extensions/rc/test-project`, toggles `/rc` over RPC, and reads the
-  pairing code from the `PI_RC_AUTH_FILE` auth file (the code is random per
+  pairing code from the `PI_RC_AUTH_FILE` status file (the code is random per
   toggle, so it is read, not hardcoded). The test then connects with the real
   client and asserts on decoded `CodeEvent`s.
 - The LLM is a local deterministic stand-in: simulator test processes have
