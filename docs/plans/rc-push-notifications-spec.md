@@ -18,7 +18,7 @@ APNs push covers the suspended case.
 | # | Decision | Chosen |
 |---|----------|--------|
 | 1 | Delivery path | APNs **direct from the pi rc server** (not a Casa/relay proxy). APNs is a public HTTPS/HTTP2 endpoint; the rc server needs only outbound egress, which it already has (LLM calls). Rejected: local notifications only (dead after the ~30 s background window — the case this feature targets); silent push (content-available) to wake the app (throttled by Apple for battery, unreliable); Casa proxy (extra hop, no benefit — Casa would only be for the app, not for pushing to the app) |
-| 2 | Trigger points | `agent_settled` → "Agent finished" (normal); `ask()` creating a remote question → "Agent has a question — answer needed" with `timeSensitive`. Push bodies are **fixed strings, chosen at send time by the server** — no LLM-generated or agent/user-controlled text in any push payload. Only when a token is registered **and the session is in an interactive mode (`tui`/`rpc`)** |
+| 2 | Trigger points | `agent_settled` → "Agent finished" (normal); `ask()` creating a remote question → "Agent has a question — answer needed" with `timeSensitive`. Push bodies are **fixed strings, chosen at send time by the server** — no LLM-generated or agent/user-controlled text in any push payload. Only when a token is registered, **the session is in an interactive mode (`tui`/`rpc`)**, **and `/rc` is enabled** (the finished push checks `isServing()`; question pushes get the same gate transitively via `askAvailable`). Pushes follow the `/rc` toggle — rc off means zero push traffic |
 | 3 | Server impl | Node stdlib only (constraint preserved): `node:http2` + `node:tls` for APNs HTTP/2 over TLS, `node:crypto` for a per-send ES256 JWT (5-min TTL) from a P-256 key parsed out of a `.p8` PEM file |
 | 4 | Config | Env vars on the pi machine (`PI_RC_APNS_*`) or `~/.pi/agent/rc-push.json` (written by the `/rc push-setup` command, chmod 600, holds team id + key id + key path + APNs host — never key contents; the singleton also maintains a runtime `token` field there); env overrides config file. Nothing committed. Push is **disabled** (no-op, single log line) unless key file + team id + key id are all set; all other RC features unaffected |
 | 5 | Protocol | Additive: one new client→server message `push_token`. **No new server→client messages** — pushes go via APNs, never over the WS |
@@ -113,7 +113,10 @@ the session is connected (covers token arrival/refresh mid-session).
   interactive mode — `tui`/`rpc`; subagent `json`/`print` children never
   push, see INV1 in `specs/pi-extensions-remote-ask.instructions.md`):
   - `agent_settled` (inside `trackEvent`, which already toggles
-    `isStreaming`) → push "Agent finished". **Firing frequency**: this fires
+    `isStreaming`) → push "Agent finished". **Gate**: skipped when `/rc` is
+    not enabled (`isServing()` false) — pushes follow the `/rc` toggle, the
+    same gate question pushes get via `askAvailable`. **Firing frequency**:
+    this fires
     on *every* settled turn — normal completion, aborts, every follow-up
     turn — and additionally the question tool's own turn settles again after
     the user answers, so a single ask/answer cycle can produce up to **3**

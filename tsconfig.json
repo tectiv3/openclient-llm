@@ -1,0 +1,8 @@
+{
+  "extends": "./pi-extensions/tsconfig.json",
+  "compilerOptions": {
+    "typeRoots": ["pi-extensions/node_modules/@types"]
+  },
+  "include": ["pi-extensions/**/*.ts"],
+  "exclude": ["pi-extensions/node_modules", "pi-extensions/rc/test-project"]
+}
