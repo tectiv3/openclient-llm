@@ -33,6 +33,8 @@ import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
+const STALL_TIMEOUT_MS = 120_000;
+const STALL_CHECK_INTERVAL_MS = 10_000;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 const SUBAGENTS_DIR_MODE = 0o700;
@@ -808,13 +810,18 @@ async function runSingleAgent(
 		};
 		writeSubagentMetaFile(metaPath, spawnMeta);
 
+		const tag = subagentId.slice(0, 8);
+		const debug = (msg: string) => console.error(`[subagent:${tag}] ${msg}`);
+
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
+			debug(`spawn: ${invocation.command} ${invocation.args.join(" ")}`);
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: cwd ?? defaultCwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
+			debug(`pid: ${proc.pid ?? "none"}`);
 			if (proc.pid !== undefined) {
 				try {
 					fs.writeFileSync(pidPath, `${proc.pid}\n`, { encoding: "utf-8", mode: 0o600 });
@@ -823,6 +830,30 @@ async function runSingleAgent(
 				}
 			}
 			let buffer = "";
+			let resolved = false;
+			let lastActivityTime = Date.now();
+			let eventCount = 0;
+			let lastEventType = "";
+
+			const safeResolve = (code: number, source: string) => {
+				if (resolved) {
+					debug(`safeResolve (${source}): already resolved, ignoring code=${code}`);
+					return;
+				}
+				resolved = true;
+				debug(`safeResolve (${source}): code=${code}, events=${eventCount}, last=${lastEventType}`);
+				clearInterval(stallWatchdog);
+				resolve(code);
+			};
+
+			const drainBuffer = () => {
+				try {
+					if (buffer.trim()) processLine(buffer);
+				} catch {
+					/* final-line parse must not prevent resolve */
+				}
+				buffer = "";
+			};
 
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
@@ -832,10 +863,15 @@ async function runSingleAgent(
 				} catch {
 					return;
 				}
+				lastActivityTime = Date.now();
+				eventCount++;
+				const type = event.type ?? "unknown";
+				lastEventType = type;
 
 				if (event.type === "message_end" && event.message) {
 					const msg = event.message as Message;
 					currentResult.messages.push(msg);
+					debug(`message_end: role=${msg.role} stopReason=${msg.stopReason ?? "-"}`);
 
 					if (msg.role === "assistant") {
 						currentResult.usage.turns++;
@@ -853,15 +889,17 @@ async function runSingleAgent(
 						if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
 					}
 					emitUpdate();
-				}
-
-				if (event.type === "tool_result_end" && event.message) {
+				} else if (event.type === "tool_result_end" && event.message) {
 					currentResult.messages.push(event.message as Message);
+					debug(`tool_result_end`);
 					emitUpdate();
+				} else if (type !== "unknown") {
+					debug(`event: ${type}`);
 				}
 			};
 
 			proc.stdout.on("data", (data) => {
+				lastActivityTime = Date.now();
 				buffer += data.toString();
 				const lines = buffer.split("\n");
 				buffer = lines.pop() || "";
@@ -869,22 +907,64 @@ async function runSingleAgent(
 			});
 
 			proc.stderr.on("data", (data) => {
+				lastActivityTime = Date.now();
 				currentResult.stderr += data.toString();
 			});
 
 			proc.on("close", (code, killSignal) => {
-				if (buffer.trim()) processLine(buffer);
-				// Signal kills report code === null; a killed child must not look successful.
-				resolve(killSignal ? 1 : (code ?? 0));
+				debug(`close: code=${code} signal=${killSignal ?? "-"}`);
+				drainBuffer();
+				safeResolve(killSignal ? 1 : (code ?? 0), "close");
 			});
 
-			proc.on("error", () => {
-				resolve(1);
+			// `close` waits for stdio streams to end, which hangs when a
+			// grandchild (e.g. a backgrounded bash tool) inherited the pipe.
+			// Fall back to resolving shortly after the process itself exits.
+			proc.on("exit", (code, killSignal) => {
+				debug(`exit: code=${code} signal=${killSignal ?? "-"}`);
+				const exitValue = killSignal ? 1 : (code ?? 0);
+				const fallback = setTimeout(() => {
+					debug("exit fallback: close did not fire in 3s, destroying streams");
+					proc.stdout?.destroy();
+					proc.stderr?.destroy();
+					drainBuffer();
+					safeResolve(exitValue, "exit-fallback");
+				}, 3000);
+				fallback.unref();
 			});
+
+			proc.on("error", (err) => {
+				debug(`error: ${err.message}`);
+				safeResolve(1, "error");
+			});
+
+			// Watchdog: kill the child if stdout+stderr go silent for too long.
+			// Legitimate long operations (bash tools) still produce stderr
+			// progress; true silence means the child is stuck.
+			const stallWatchdog = setInterval(() => {
+				const silentMs = Date.now() - lastActivityTime;
+				if (silentMs >= STALL_TIMEOUT_MS) {
+					debug(
+						`stall watchdog: no activity for ${Math.round(silentMs / 1000)}s, ` +
+							`events=${eventCount}, last=${lastEventType}, killing child`,
+					);
+					clearInterval(stallWatchdog);
+					proc.kill("SIGTERM");
+					setTimeout(() => {
+						try {
+							if (!proc.killed) proc.kill("SIGKILL");
+						} catch {
+							/* ignore */
+						}
+					}, 5000);
+				}
+			}, STALL_CHECK_INTERVAL_MS);
+			stallWatchdog.unref();
 
 			if (signal) {
 				const killProc = () => {
 					wasAborted = true;
+					debug("abort signal received, killing child");
 					proc.kill("SIGTERM");
 					setTimeout(() => {
 						if (!proc.killed) proc.kill("SIGKILL");
@@ -894,6 +974,7 @@ async function runSingleAgent(
 				else signal.addEventListener("abort", killProc, { once: true });
 			}
 		});
+		debug(`promise resolved: exitCode=${exitCode}`);
 
 		currentResult.exitCode = exitCode;
 		if (wasAborted) {
@@ -916,6 +997,7 @@ async function runSingleAgent(
 			});
 		}
 
+		debug(`returning: status=${status} stopReason=${currentResult.stopReason ?? "-"}`);
 		return currentResult;
 	} finally {
 		if (tmpPromptPath)
