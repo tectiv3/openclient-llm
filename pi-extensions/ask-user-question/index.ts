@@ -1,11 +1,10 @@
 /**
- * Questionnaire Tool - Unified tool for asking single or multiple questions
+ * Ask User Question Tool - Unified tool for asking single or multiple questions
  *
  * Single question: simple options list
  * Multiple questions: tab bar navigation between questions
  */
 
-import { randomUUID } from 'node:crypto'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import {
     Editor,
@@ -43,7 +42,7 @@ interface Answer {
     index?: number
 }
 
-interface QuestionnaireResult {
+interface AskUserQuestionResult {
     questions: Question[]
     answers: Answer[]
     cancelled: boolean
@@ -51,7 +50,9 @@ interface QuestionnaireResult {
 
 // Schema
 const QuestionOptionSchema = Type.Object({
-    value: Type.String({ description: 'The value returned when selected' }),
+    value: Type.Optional(
+        Type.String({ description: 'The value returned when selected (defaults to label)' })
+    ),
     label: Type.String({ description: 'Display label for the option' }),
     description: Type.Optional(
         Type.String({ description: 'Optional description shown below label' })
@@ -59,7 +60,11 @@ const QuestionOptionSchema = Type.Object({
 })
 
 const QuestionSchema = Type.Object({
-    id: Type.String({ description: 'Unique identifier for this question' }),
+    id: Type.Optional(
+        Type.String({
+            description: 'Unique identifier for this question (defaults to Q1, Q2, ...)',
+        })
+    ),
     label: Type.Optional(
         Type.String({
             description:
@@ -75,14 +80,17 @@ const QuestionSchema = Type.Object({
     ),
 })
 
-const QuestionnaireParams = Type.Object({
-    questions: Type.Array(QuestionSchema, { description: 'Questions to ask the user' }),
+const AskUserQuestionParams = Type.Object({
+    questions: Type.Array(QuestionSchema, {
+        description: 'Questions to ask the user',
+        minItems: 1,
+    }),
 })
 
 function errorResult(
     message: string,
     questions: Question[] = []
-): { content: { type: 'text'; text: string }[]; details: QuestionnaireResult } {
+): { content: { type: 'text'; text: string }[]; details: AskUserQuestionResult } {
     return {
         content: [{ type: 'text', text: message }],
         details: { questions, answers: [], cancelled: true },
@@ -98,7 +106,7 @@ interface RcRemote {
     // keeps the question push reachable for a locked phone with 0 clients.
     askAvailable(): boolean
     ask(opts: {
-        kind: 'questionnaire'
+        kind: 'ask_user_question'
         params: unknown
         signal?: AbortSignal
     }): Promise<Answer[] | null>
@@ -108,7 +116,19 @@ const RC_KEY = Symbol.for('pi-rc')
 
 function rcRemote(): RcRemote | undefined {
     const rc = (globalThis as unknown as Record<symbol, unknown>)[RC_KEY]
-    return rc && typeof (rc as RcRemote).ask === 'function' ? (rc as RcRemote) : undefined
+    if (!rc) return undefined
+    // Widened guard (both `ask` AND `askAvailable` must be functions): a stale
+    // pre-`askAvailable` singleton can survive /reload (the extension module is
+    // reloaded but the singleton object lives on in globalThis). Accepting it
+    // by `ask` alone would then call rc.askAvailable() on a plain undefined
+    // and THROW mid-tool-call; requiring both lets it fall through to the
+    // local TUI prompt instead.
+    if (
+        typeof (rc as RcRemote).ask !== 'function' ||
+        typeof (rc as RcRemote).askAvailable !== 'function'
+    )
+        return undefined
+    return rc as RcRemote
 }
 
 // Esc escape hatch for the remote ask: show a non-blocking wait panel while
@@ -124,7 +144,7 @@ async function askRemoteWithEscHatch(
     if (!rc) return null
     const controller = new AbortController()
     const askPromise = rc.ask({
-        kind: 'questionnaire',
+        kind: 'ask_user_question',
         params: { questions },
         signal: controller.signal,
     })
@@ -143,7 +163,7 @@ async function askRemoteWithEscHatch(
                 const bar = '─'.repeat(Math.max(1, width))
                 return [
                     theme.fg('accent', bar),
-                    ' ' + theme.fg('text', 'Questionnaire sent to remote client(s).'),
+                    ' ' + theme.fg('text', 'Question(s) sent to remote client(s).'),
                     ' ' + theme.fg('dim', 'Press Esc to answer locally.'),
                     theme.fg('accent', bar),
                 ]
@@ -160,88 +180,37 @@ async function askRemoteWithEscHatch(
     return await askPromise
 }
 
-// Parent-relay access (see extensions/subagent). When running inside a pi
-// subagent process (PI_SUBAGENT_RELAY=1), the questionnaire is written to
-// stdout as a JSON line and the answers are read back from stdin as a JSON
-// line, so the parent session can relay it through its own UI.
-interface RelayResponse {
-    type: string
-    id?: string
-    answer?: unknown
-    cancelled?: boolean
-}
-
-let relayStdinAttached = false
-let relayStdinBuffer = ''
-const relayPending = new Map<string, (resp: RelayResponse | null) => void>()
-
-function attachRelayStdin() {
-    if (relayStdinAttached || !process.stdin.readable) return
-    relayStdinAttached = true
-    process.stdin.setEncoding('utf8')
-    process.stdin.on('data', (chunk: string) => {
-        relayStdinBuffer += chunk
-        const lines = relayStdinBuffer.split('\n')
-        relayStdinBuffer = lines.pop() ?? ''
-        for (const line of lines) {
-            if (!line.trim()) continue
-            let resp: RelayResponse
-            try {
-                resp = JSON.parse(line) as RelayResponse
-            } catch {
-                continue
-            }
-            if (resp.type !== 'pi_subagent_question_response' || typeof resp.id !== 'string')
-                continue
-            const resolve = relayPending.get(resp.id)
-            if (resolve) {
-                relayPending.delete(resp.id)
-                resolve(resp)
-            }
-        }
-    })
-    process.stdin.on('close', () => {
-        for (const resolve of Array.from(relayPending.values())) resolve(null)
-        relayPending.clear()
-    })
-}
-
-function relayAsk(req: Record<string, unknown>): Promise<RelayResponse | null> {
-    const id = randomUUID()
-    process.stdout.write(JSON.stringify({ type: 'pi_subagent_question', id, ...req }) + '\n')
-    return new Promise(resolve => {
-        relayPending.set(id, resolve)
-        attachRelayStdin()
-        process.stdin.once('close', () => {
-            const pending = relayPending.get(id)
-            if (pending) {
-                relayPending.delete(id)
-                pending(null)
-            }
-        })
-    })
-}
-
-export default function questionnaire(pi: ExtensionAPI) {
+export default function askUserQuestion(pi: ExtensionAPI) {
     pi.registerTool({
-        name: 'questionnaire',
-        label: 'Questionnaire',
+        name: 'ask_user_question',
+        label: 'Ask User Question',
         description:
-            'Ask the user one or more questions. Use for clarifying requirements, getting preferences, or confirming decisions. For single questions, shows a simple option list. For multiple questions, shows a tab-based interface.',
-        parameters: QuestionnaireParams,
+            'Ask the user one or more questions with typed options. Single question shows a simple option list; multiple questions show a tab-based interface. Use when you need user input, preferences, or confirmation.',
+        executionMode: 'sequential',
+        parameters: AskUserQuestionParams,
 
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            // Normalize once up front (defaults for id/label/options.value/
+            // allowOther); every later consumer — remote params, TUI, details —
+            // uses this array.
+            const questions: Question[] = params.questions.map((q, i) => ({
+                id: q.id || `Q${i + 1}`,
+                label: q.label || `Q${i + 1}`,
+                prompt: q.prompt,
+                options: q.options.map(o => ({
+                    value: o.value || o.label,
+                    label: o.label,
+                    ...(o.description !== undefined ? { description: o.description } : {}),
+                })),
+                allowOther: q.allowOther !== false,
+            }))
+
             const rc = rcRemote()
             if (rc && rc.askAvailable()) {
-                const questions: Question[] = params.questions.map((q, i) => ({
-                    ...q,
-                    label: q.label || `Q${i + 1}`,
-                    allowOther: q.allowOther !== false,
-                }))
                 const answers =
                     ctx.mode === 'tui'
                         ? await askRemoteWithEscHatch(ctx, questions)
-                        : await rc.ask({ kind: 'questionnaire', params: { questions } })
+                        : await rc.ask({ kind: 'ask_user_question', params: { questions } })
                 if (answers !== null) {
                     const answerLines = answers.map(a => {
                         const qLabel = questions.find(q => q.id === a.id)?.label || a.id
@@ -257,95 +226,20 @@ export default function questionnaire(pi: ExtensionAPI) {
                 }
                 // TUI + null (Esc, toggle-off, all clients disconnected): fall through to
                 // the local TUI prompt below. Non-TUI has no local prompt; the ask is
-                // final there (RPC/JSON relay paths run below for the non-remote case).
+                // final there.
                 if (ctx.mode !== 'tui') {
-                    return errorResult('User cancelled the questionnaire', questions)
+                    return errorResult('User cancelled the question', questions)
                 }
             }
 
             if (ctx.mode !== 'tui') {
-                if (process.env.PI_SUBAGENT_RELAY === '1') {
-                    const questions: Question[] = params.questions.map((q, i) => ({
-                        ...q,
-                        label: q.label || `Q${i + 1}`,
-                        allowOther: q.allowOther !== false,
-                    }))
-                    const resp = await relayAsk({
-                        kind: 'questionnaire',
-                        questions: questions.map(q => ({
-                            id: q.id,
-                            label: q.label,
-                            prompt: q.prompt,
-                            options: q.options.map(o => ({
-                                label: o.label,
-                                value: o.value,
-                                description: o.description,
-                            })),
-                            allowOther: q.allowOther,
-                        })),
-                    })
-                    if (
-                        !resp ||
-                        resp.cancelled ||
-                        typeof resp.answer !== 'object' ||
-                        resp.answer === null
-                    ) {
-                        return errorResult(
-                            'Error: questionnaire relay was cancelled or closed',
-                            questions
-                        )
-                    }
-                    if (
-                        typeof resp.answer !== 'object' ||
-                        resp.answer === null ||
-                        Array.isArray(resp.answer)
-                    ) {
-                        return errorResult(
-                            'Error: questionnaire relay returned malformed answer',
-                            questions
-                        )
-                    }
-                    const answerMap = resp.answer as Record<string, unknown>
-                    const answers: Answer[] = questions
-                        .filter(q => typeof answerMap[q.id] === 'string')
-                        .map(q => ({
-                            id: q.id,
-                            value: answerMap[q.id] as string,
-                            label: answerMap[q.id] as string,
-                            wasCustom: false,
-                        }))
-                    if (answers.length === 0) {
-                        return errorResult(
-                            'Error: questionnaire relay returned no answers',
-                            questions
-                        )
-                    }
-                    const answerLines = answers.map(a => {
-                        const qLabel = questions.find(q => q.id === a.id)?.label || a.id
-                        return `${qLabel}: user selected: ${a.label}`
-                    })
-                    return {
-                        content: [{ type: 'text', text: answerLines.join('\n') }],
-                        details: { questions, answers, cancelled: false },
-                    }
-                }
                 return errorResult('Error: UI not available (running in non-interactive mode)')
             }
-            if (params.questions.length === 0) {
-                return errorResult('Error: No questions provided')
-            }
-
-            // Normalize questions with defaults
-            const questions: Question[] = params.questions.map((q, i) => ({
-                ...q,
-                label: q.label || `Q${i + 1}`,
-                allowOther: q.allowOther !== false,
-            }))
 
             const isMulti = questions.length > 1
             const totalTabs = questions.length + 1 // questions + Submit
 
-            const result = await ctx.ui.custom<QuestionnaireResult>(
+            const result = await ctx.ui.custom<AskUserQuestionResult>(
                 (tui, theme, _kb, done) => {
                     // State
                     let currentTab = 0
@@ -674,7 +568,7 @@ export default function questionnaire(pi: ExtensionAPI) {
 
             if (result.cancelled) {
                 return {
-                    content: [{ type: 'text', text: 'User cancelled the questionnaire' }],
+                    content: [{ type: 'text', text: 'User cancelled the question' }],
                     details: result,
                 }
             }
@@ -697,7 +591,7 @@ export default function questionnaire(pi: ExtensionAPI) {
             const qs = (args.questions as Question[]) || []
             const count = qs.length
             const labels = qs.map(q => q.label || q.id).join(', ')
-            let text = theme.fg('toolTitle', theme.bold('questionnaire '))
+            let text = theme.fg('toolTitle', theme.bold('ask_user_question '))
             text += theme.fg('muted', `${count} question${count !== 1 ? 's' : ''}`)
             if (labels) {
                 text += theme.fg('dim', ` (${labels})`)
@@ -706,7 +600,7 @@ export default function questionnaire(pi: ExtensionAPI) {
         },
 
         renderResult(result, _options, theme, _context) {
-            const details = result.details as QuestionnaireResult | undefined
+            const details = result.details as AskUserQuestionResult | undefined
             if (!details) {
                 const text = result.content[0]
                 return new Text(text?.type === 'text' ? text.text : '', 0, 0)

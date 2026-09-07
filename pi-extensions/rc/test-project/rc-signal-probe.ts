@@ -22,7 +22,7 @@ const RC_KEY = Symbol.for('pi-rc')
 
 type ProbeAsk = {
     ask(opts: {
-        kind: 'question' | 'questionnaire'
+        kind: 'ask_user_question'
         params: Record<string, unknown>
         signal?: AbortSignal
     }): Promise<unknown>
@@ -61,11 +61,11 @@ export default function rcSignalProbe(pi: ExtensionAPI): void {
             const controller = new AbortController()
             if (which === 'aborted') controller.abort()
             const askPromise = rc.ask({
-                kind: 'question',
+                kind: 'ask_user_question',
                 params: {
-                    question: 'rc signal probe',
-                    options: [{ label: 'yes', value: 'yes' }],
-                    allowOther: true,
+                    questions: [
+                        { id: 'q1', prompt: 'rc signal probe', options: [{ label: 'yes', value: 'yes' }] },
+                    ],
                 },
                 signal: controller.signal,
             })

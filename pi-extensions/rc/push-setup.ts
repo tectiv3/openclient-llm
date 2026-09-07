@@ -14,18 +14,24 @@ const DEFAULT_HOST_DISPLAY = 'api.sandbox.push.apple.com:443'
 import { dbgLog } from './debug'
 
 // Structural type for the rc singleton passed in by the /rc command handler.
-// Like the question extension's RcRemote, it is a shape check only (rc is
-// referenced via globalThis, never imported), but the shapes are deliberately
-// independent: push-setup also needs refreshStatus and its ask params differ.
+// Like the ask-user-question extension's RcRemote, it is a shape check only
+// (rc is referenced via globalThis, never imported), but the shapes are
+// deliberately independent: push-setup also needs refreshStatus and its ask
+// params differ.
 interface RcRemoteLike {
     isServing(): boolean
     hasConnectedClients(): boolean
     refreshStatus(): void
-    ask(opts: { kind: 'question'; params: unknown }): Promise<{
-        value: string
-        wasCustom: boolean
-        index?: number
-    } | null>
+    ask(opts: { kind: 'ask_user_question'; params: unknown }): Promise<
+        | {
+              id: string
+              value: string
+              label: string
+              wasCustom: boolean
+              index?: number
+          }[]
+        | null
+    >
 }
 
 const ID_PATTERN = /^[A-Za-z0-9]{10}$/
@@ -36,10 +42,11 @@ async function promptValue(
     title: string
 ): Promise<string | null> {
     if (state.isServing() && state.hasConnectedClients()) {
-        const answer = await state.ask({
-            kind: 'question',
-            params: { question: title, options: [], allowOther: true },
+        const answers = await state.ask({
+            kind: 'ask_user_question',
+            params: { questions: [{ id: 'q1', prompt: title, options: [] }] },
         })
+        const answer = answers?.[0]
         if (!answer) return null
         const value = answer.value.trim()
         return value.length > 0 ? value : null
@@ -186,17 +193,22 @@ async function promptConfirm(
     message: string
 ): Promise<boolean> {
     if (state.isServing() && state.hasConnectedClients()) {
-        const answer = await state.ask({
-            kind: 'question',
+        const answers = await state.ask({
+            kind: 'ask_user_question',
             params: {
-                question: message,
-                options: [
-                    { label: 'Yes, continue', value: 'yes' },
-                    { label: 'No, cancel', value: 'cancel' },
+                questions: [
+                    {
+                        id: 'q1',
+                        prompt: message,
+                        options: [
+                            { label: 'Yes, continue', value: 'yes' },
+                            { label: 'No, cancel', value: 'cancel' },
+                        ],
+                    },
                 ],
-                allowOther: true,
             },
         })
+        const answer = answers?.[0]
         if (!answer) return false
         const value = answer.wasCustom ? answer.value.trim().toLowerCase() : answer.value
         return value === 'yes' || value === 'yes, continue'

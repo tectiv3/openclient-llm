@@ -1,10 +1,8 @@
 rc/apns.ts(*): error TS2339: Property 'reason' does not exist on type 'KeyValidation'.
 rc/apns.ts(*): error TS2339: Property 'reason' does not exist on type 'KeyValidation'.
 rc/apns.ts(*): error TS2339: Property 'request' does not exist on type 'Http2Session'.
-rc/index.ts(*): error TS2322: Type '(opts: { kind: "question" | "questionnaire"; params: JsonObject; signal?: AbortSignal; }) => Promise<RemoteQuestionAnswer | RemoteQuestionnaireAnswer[]>' is not assignable to type '(opts: { kind: "question" | "questionnaire"; params: JsonObject; signal?: AbortSignal; }) => Promise<RemoteQuestionAnswer | RemoteQuestionnaireAnswer>'.
 rc/index.ts(*): error TS2322: Type 'unknown' is not assignable to type 'string'.
 rc/index.ts(*): error TS2339: Property 'authenticated' does not exist on type 'unknown'.
-rc/index.ts(*): error TS2345: Argument of type 'RcSingleton' is not assignable to parameter of type 'RcRemoteLike'.
 rc/index.ts(*): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
 rc/index.ts(*): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
 rc/index.ts(*): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.

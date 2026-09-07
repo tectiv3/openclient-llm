@@ -46,8 +46,7 @@ type ContentBlock =
           output?: string
       }
 
-type RemoteQuestionAnswer = { value: string; wasCustom: boolean; index?: number }
-type RemoteQuestionnaireAnswer = {
+type RemoteAnswer = {
     id: string
     value: string
     label: string
@@ -56,9 +55,9 @@ type RemoteQuestionnaireAnswer = {
 }
 type PendingAsk = {
     id: string
-    kind: 'question' | 'questionnaire'
+    kind: 'ask_user_question'
     message: JsonObject
-    resolve: (result: RemoteQuestionAnswer | RemoteQuestionnaireAnswer[] | null) => void
+    resolve: (result: RemoteAnswer[] | null) => void
 }
 
 type RateLimitEntry = {
@@ -118,10 +117,10 @@ type RcSingleton = {
     isServing(): boolean
     askAvailable(): boolean
     ask(opts: {
-        kind: 'question' | 'questionnaire'
+        kind: 'ask_user_question'
         params: JsonObject
         signal?: AbortSignal
-    }): Promise<RemoteQuestionAnswer | RemoteQuestionnaireAnswer | null>
+    }): Promise<RemoteAnswer[] | null>
 }
 
 function singleton(): RcSingleton {
@@ -233,8 +232,10 @@ function singleton(): RcSingleton {
             if (!this.askAvailable()) return null
             cancelPendingAsk(this)
             const id = randomBytes(4).toString('hex')
+            // Frame type is always 'question' for every ask: the old
+            // 'questionnaire' frame type disappeared with the two-kind protocol.
             const message: JsonObject = {
-                type: opts.kind,
+                type: 'question',
                 sessionId: sessionId(this),
                 id,
                 kind: opts.kind,
@@ -245,9 +246,7 @@ function singleton(): RcSingleton {
             dbgLog('ask created:', id, opts.kind)
             this.broadcast(message)
             fireQuestionPush(this)
-            const askPromise = new Promise<
-                RemoteQuestionAnswer | RemoteQuestionnaireAnswer[] | null
-            >(resolve => {
+            const askPromise = new Promise<RemoteAnswer[] | null>(resolve => {
                 pending.resolve = result => {
                     if (this.pendingAsk === pending) this.pendingAsk = null
                     resolve(result)
@@ -511,9 +510,6 @@ function handleClientMessage(state: RcSingleton, client: RcClient, message: unkn
         case 'answer':
             handleAnswer(state, client, message)
             break
-        case 'answer_questionnaire':
-            handleAnswerQuestionnaire(state, client, message)
-            break
         case 'push_token':
             handlePushToken(state, client, message)
             break
@@ -570,23 +566,38 @@ function handleHello(state: RcSingleton, client: RcClient, message: JsonObject):
 
 function handleAnswer(state: RcSingleton, client: RcClient, message: JsonObject): void {
     const pending = state.pendingAsk
-    if (!pending || pending.kind !== 'question' || pending.id !== message.id) {
+    if (!pending || pending.kind !== 'ask_user_question' || pending.id !== message.id) {
         writeJson(client, { type: 'error', code: 'unknown_question' })
         return
     }
-    const value = message.value
-    const wasCustom = message.wasCustom
-    const index = message.index
-    if (typeof value !== 'string' || typeof wasCustom !== 'boolean') {
+    const raw = message.answers
+    if (!Array.isArray(raw)) {
         writeJson(client, { type: 'error', code: 'invalid_message' })
         return
     }
-    pending.resolve({ value, wasCustom, ...(typeof index === 'number' ? { index } : {}) })
+    const answers: RemoteAnswer[] = []
+    for (const item of raw) {
+        if (!isRemoteAnswer(item)) {
+            writeJson(client, { type: 'error', code: 'invalid_message' })
+            return
+        }
+        answers.push(item)
+    }
+    pending.resolve(answers)
     dbgLog('ask resolved by client:', pending.id)
-    state.broadcast({ type: 'question_resolved', id: pending.id, by: 'client', value })
+    // For a single-question ask the resolution broadcast carries that answer's
+    // value — the Swift transcript rendering depends on it; multi-question
+    // asks omit it (the full answer set lives in the tool result).
+    const questionCount = pendingQuestionCount(pending)
+    state.broadcast({
+        type: 'question_resolved',
+        id: pending.id,
+        by: 'client',
+        ...(questionCount === 1 ? { value: answers[0].value } : {}),
+    })
 }
 
-function isRemoteQuestionnaireAnswer(value: unknown): value is RemoteQuestionnaireAnswer {
+function isRemoteAnswer(value: unknown): value is RemoteAnswer {
     if (!isObject(value)) return false
     const id = value.id
     const answerValue = value.value
@@ -602,32 +613,9 @@ function isRemoteQuestionnaireAnswer(value: unknown): value is RemoteQuestionnai
     )
 }
 
-function handleAnswerQuestionnaire(
-    state: RcSingleton,
-    client: RcClient,
-    message: JsonObject
-): void {
-    const pending = state.pendingAsk
-    if (!pending || pending.kind !== 'questionnaire' || pending.id !== message.id) {
-        writeJson(client, { type: 'error', code: 'unknown_question' })
-        return
-    }
-    const raw = message.answers
-    if (!Array.isArray(raw)) {
-        writeJson(client, { type: 'error', code: 'invalid_message' })
-        return
-    }
-    const answers: RemoteQuestionnaireAnswer[] = []
-    for (const item of raw) {
-        if (!isRemoteQuestionnaireAnswer(item)) {
-            writeJson(client, { type: 'error', code: 'invalid_message' })
-            return
-        }
-        answers.push(item)
-    }
-    pending.resolve(answers)
-    dbgLog('ask resolved by client:', pending.id)
-    state.broadcast({ type: 'question_resolved', id: pending.id, by: 'client' })
+function pendingQuestionCount(pending: PendingAsk): number {
+    const params = pending.message.params
+    return isObject(params) ? safeArray(params.questions).length : 0
 }
 
 // APNs device tokens are 64 hex chars. Anything else is ignored silently:
@@ -673,15 +661,13 @@ function fireFinishedPush(state: RcSingleton): void {
         .catch(error => dbgLog('apns finished push failed:', errorMessage(error)))
 }
 
-// The question's own text (question tool: params.question; questionnaire:
-// first sub-question's prompt) — the question push body per the 2026-09-07
+// The first question's prompt — the question push body per the 2026-09-07
 // decision. Returns undefined when no text can be extracted; questionBody
 // then falls back to the fixed string.
 function pendingAskText(pending: PendingAsk | null): string | undefined {
     if (!pending) return undefined
     const params = pending.message.params
     if (!isObject(params)) return undefined
-    if (typeof params.question === 'string') return params.question
     const first = safeArray(params.questions)[0]
     if (isObject(first) && typeof first.prompt === 'string') return first.prompt
     return undefined

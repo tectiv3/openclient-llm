@@ -190,6 +190,7 @@ declare module 'typebox' {
         description?: string
         default?: unknown
         minimum?: number
+        minItems?: number
     }
     interface TSchema {}
     export const Type: {
