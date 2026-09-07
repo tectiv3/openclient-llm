@@ -18,7 +18,7 @@ APNs push covers the suspended case.
 | # | Decision | Chosen |
 |---|----------|--------|
 | 1 | Delivery path | APNs **direct from the pi rc server** (not a Casa/relay proxy). APNs is a public HTTPS/HTTP2 endpoint; the rc server needs only outbound egress, which it already has (LLM calls). Rejected: local notifications only (dead after the ~30 s background window — the case this feature targets); silent push (content-available) to wake the app (throttled by Apple for battery, unreliable); Casa proxy (extra hop, no benefit — Casa would only be for the app, not for pushing to the app) |
-| 2 | Trigger points | `agent_settled` → "Agent finished" (normal); `ask()` creating a remote question → "Agent has a question — answer needed" with `timeSensitive`. Push bodies are **fixed strings, chosen at send time by the server** — no LLM-generated or agent/user-controlled text in any push payload. Only when a token is registered, **the session is in an interactive mode (`tui`/`rpc`)**, **and `/rc` is enabled** (the finished push checks `isServing()`; question pushes get the same gate transitively via `askAvailable`). Pushes follow the `/rc` toggle — rc off means zero push traffic |
+| 2 | Trigger points | `agent_settled` → "Agent finished" (normal); `ask()` creating a remote question → "Agent has a question — answer needed" with `timeSensitive`. Push bodies identify the session/task (user decision 2026-09-07, revising v1): finished pushes carry the session name → cwd basename → fixed fallback (pi-side metadata, never agent text); question pushes carry the question's own text — verbatim when ≤80 chars, LLM-shortened via OpenRouter (or hard-truncated, 100-char cap) when longer; see the Payload section for the documented invariant relaxation. Only when a token is registered, **the session is in an interactive mode (`tui`/`rpc`)**, **and `/rc` is enabled** (the finished push checks `isServing()`; question pushes get the same gate transitively via `askAvailable`). Pushes follow the `/rc` toggle — rc off means zero push traffic |
 | 3 | Server impl | Node stdlib only (constraint preserved): `node:http2` + `node:tls` for APNs HTTP/2 over TLS, `node:crypto` for a per-send ES256 JWT (5-min TTL) from a P-256 key parsed out of a `.p8` PEM file |
 | 4 | Config | Env vars on the pi machine (`PI_RC_APNS_*`) or `~/.pi/agent/rc-push.json` (written by the `/rc push-setup` command, chmod 600, holds team id + key id + key path + APNs host — never key contents; the singleton also maintains a runtime `token` field there); env overrides config file. Nothing committed. Push is **disabled** (no-op, single log line) unless key file + team id + key id are all set; all other RC features unaffected |
 | 5 | Protocol | Additive: one new client→server message `push_token`. **No new server→client messages** — pushes go via APNs, never over the WS |
@@ -117,8 +117,11 @@ the session is connected (covers token arrival/refresh mid-session).
     not enabled (`isServing()` false) — pushes follow the `/rc` toggle, the
     same gate question pushes get via `askAvailable`. **Firing frequency**:
     this fires
-    on *every* settled turn — normal completion, aborts, every follow-up
-    turn — and additionally the question tool's own turn settles again after
+    turn — normal completion and every follow-up turn, but NOT aborted
+    turns (the 2026-09-07 abort gate: `message_end`/`turn_end` carrying
+    `stopReason: "aborted"` suppresses the finished push — the user
+    cancelled, so "finished" would be a lie) — and additionally the
+    question tool's own turn settles again after
     the user answers, so a single ask/answer cycle can produce up to **3**
     settles. Hence the finished push uses the **constant**
     `apns-collapse-id: rc-finished`: APNs discards the in-flight duplicates
@@ -130,23 +133,59 @@ the session is connected (covers token arrival/refresh mid-session).
     the rc singleton's `askAvailable()` — serving AND (clients connected OR
     push sendable) — so this fires exactly when the remote modal would show
     or would be pushed to a locked phone.)
-- **Payload** (minimal, < 4 KB, no secrets, no paths, and — explicitly —
-  **no agent- or user-controlled text at all**; the bodies are fixed strings
-  compiled into the sender, so a compromised/verbose agent can never place
-  secret data on a lock screen):
+- **Payload** (minimal, < 4 KB, no secrets, no full paths). Bodies identify
+  the session/task (user decision 2026-09-07 — supersedes v1's "bodies are
+  fixed strings" rule; see the relaxation note below):
 
 ```json
 {
   "aps": {
-    "alert": { "title": "Agent finished", "body": "Agent finished" },
+    "alert": { "title": "Agent finished", "body": "<session name | cwd basename>" },
     "sound": "default",
     "thread-id": "<sessionId>"
   }
 }
 ```
 
-Question push: title "Agent has a question", body
-"Agent has a question — answer needed", plus `"timeSensitive": true` in `aps`.
+  - Finished push: title "Agent finished". Body = the session name
+    (`sessionManager.getSessionName()`), falling back to the cwd basename
+    (`sessionManager.getCwd()` — a single directory name, not a path),
+    falling back to the fixed string "Agent finished". Whitespace-collapsed,
+    capped at 80 chars (hard truncate + ellipsis). Server-side metadata
+    only — never agent output.
+  - Question push: title "Agent has a question". Body = the question's own
+    text (`params.question` for kind `question`, the first sub-question's
+    `prompt` for kind `questionnaire`), sanitized (control chars stripped,
+    whitespace runs collapsed to single spaces); ≤80 chars ships verbatim;
+    longer text is shortened via one OpenRouter chat completion, and on ANY
+    LLM failure or timeout the deterministic fallback hard-truncates the
+    original (100-char cap including a trailing ellipsis). Plus
+    `"timeSensitive": true` in `aps`. If the pending ask is answered,
+    cancelled, or superseded while the body resolves (LLM shortening can
+    take up to the timeout), the push is dropped — a "has a question" alert
+    for a dead question would be wrong.
+  - **Invariant relaxation (user decision 2026-09-07)**: v1's "no agent- or
+    user-controlled text in any push payload" is DELIBERATELY RELAXED for
+    question pushes only — a question push without the question text is
+    near-useless on a lock screen. Exposure is bounded: question text only
+    (never agent prose), capped at 100 chars, control-char-free,
+    whitespace-sanitized. Finished pushes keep the invariant: the session
+    name and cwd basename are pi-side metadata, not agent/user text.
+  - **Shortening LLM (question pushes only, only when text >80 chars)**:
+    Node stdlib only (global `fetch` + `AbortController`, Node 24). Model
+    `minimax/minimax-m3:free`, env override `PI_RC_TITLE_MODEL`. Base URL
+    default `https://openrouter.ai/api/v1`, env override
+    `PI_RC_OPENROUTER_URL` (test seam). Timeout default 3500 ms, env
+    override `PI_RC_TITLE_TIMEOUT_MS` (test seam). API key from
+    `OPENROUTER_API_KEY` (already present on the pi machine — no new
+    setup). Finished pushes never call OpenRouter; with the key absent or
+    the call failing, question pushes fall back to deterministic
+    truncation and behave identically otherwise — the dependency is
+    strictly optional.
+
+Question push: title "Agent has a question", body = the question text per
+the rules above (fixed fallback "Agent has a question — answer needed" when
+no text can be extracted), plus `"timeSensitive": true` in `aps`.
 There is **no `rc-session` (or any other) custom payload field in v1** — the
 earlier draft's deep-linking field is dropped as dead weight; it comes back,
 if at all, with v2 deep-linking. (`thread-id` is the server-generated session
@@ -157,8 +196,8 @@ is a deliberate narrowing of the parent spec's multi-client broadcast model:
 pushes are ambient alerts, not the question-answer channel, so one phone gets
 one push. The accepted trade-off (Decision 6): a tailnet client with the
 current code could replace the token and redirect pushes to its own device —
-harmless in practice because the payload is fixed text with no session
-content.
+harmless in practice because the payload carries only session identity and,
+for questions, capped sanitized question text (nothing beyond that to leak).
 
 ## /rc push-setup command
 
@@ -318,9 +357,15 @@ machine (env vars remain supported — see config precedence below).
      `apns-priority: 5`, `apns-timestamp`, `apns-collapse-id: rc-finished`,
      Bearer JWT with **valid ES256 signature** and claims
      `{iss: team, sub: keyId, aud: "apns", iat, exp}`, header
-     `{alg: "ES256", kid: keyId}`) and fixed-text payload shape.
+     `{alg: "ES256", kid: keyId}`) and payload shape: title "Agent
+     finished", body = the finished-identity chain (in the harness, the
+     basename of the child's cwd — the session is never named).
    - `ask()` → one request; `timeSensitive: true` +
-     `apns-collapse-id: rc-question`.
+     `apns-collapse-id: rc-question`; body = the question text: verbatim
+     when ≤80 chars (and the shortening LLM — pointed at a recording mock
+     via `PI_RC_OPENROUTER_URL` — is never called), the canned mock
+     completion when longer, and the deterministic 100-char truncation
+     when the LLM is unreachable (`PI_RC_TITLE_TIMEOUT_MS` small).
    - Connected client with **no** `push_token` → zero requests.
    - APNs env **unset** → zero requests, all other RC tests still pass.
    - **Invalid token** (`push_token` with a non-64-hex / malformed token) →
@@ -375,8 +420,11 @@ machine (env vars remain supported — see config precedence below).
   covers it.
 - **Privacy/battery**: the device token is a public routing identifier, sent
   only over the tailnet-bound, code-authenticated WS (plain WS, tailnet-only
-  bind per parent spec). No payload contains project paths, secrets, or
-  agent/user text. `apns-priority: 5` keeps both pushes battery-friendly;
+  bind per parent spec). No payload contains secrets or full project paths:
+  finished bodies carry the session name or cwd basename, and question bodies
+  carry the question's own text capped at 100 chars and whitespace-sanitized
+  (the documented 2026-09-07 relaxation) — never agent prose beyond the
+  question itself. `apns-priority: 5` keeps both pushes battery-friendly;
   `timeSensitive` overrides the low-priority hold for questions only.
 - **`timeSensitive` entitlement**: if the App ID / provisioning profile
   lacks it, Apple rejects the question push (`BadCollapseId`/`TimeSensitive`
@@ -406,8 +454,12 @@ machine (env vars remain supported — see config precedence below).
   harness group 12 (`ask_locked_phone_zero_clients_pushes_and_redelivers`,
   `ask_zero_clients_not_push_ready_falls_back_without_push`,
   `ask_zero_clients_token_without_creds_stays_local`). Diagnostic aid added
-  alongside: `/rc push-test` command and the footer's `last` APNs outcome
-  segment.
+  alongside: the footer's `last` APNs outcome segment and the read-only
+  `rc_inspect` tool (live singleton status: serving host/port/code, client
+  count, push readiness, last APNs outcome, pending question). The earlier
+  `/rc push-test` and `/rc show-token` subcommands were removed
+  (2026-09-07): the footer segment and `rc_inspect` cover the diagnostics
+  without special-cased push paths.
 
 ## Out of scope
 

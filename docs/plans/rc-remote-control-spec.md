@@ -218,6 +218,15 @@ Location: `pi-extensions/rc/` in this repo; symlink `~/.pi/agent/extensions/rc` 
     - If server is on → stop it:
       - Close server, clear status, cancel pending questions (resolve with
         "cancelled"), notify "rc stopped".
+  - `/rc` subcommands: `push-setup` (APNs setup flow — see
+    `docs/plans/rc-push-notifications-spec.md`) is the only one. Removed
+    2026-09-07: `push-test`, `show-token` — the footer's last-APNs-outcome
+    segment and the `rc_inspect` tool cover their diagnostics.
+  - `pi.registerTool("rc_inspect")` — read-only diagnostics reporting the
+    live singleton state: serving host/port/code, authenticated client
+    count, push readiness, last APNs outcome, pending question. For agents
+    checking RC status; rc-auth.json is a test-harness seam and must never
+    be read for live status.
   - Message handlers (on authenticated client messages):
     - `prompt`: call `pi.sendUserMessage(text)` (verified) when not streaming
       (`ctx.isIdle()` true). Return `not_idle` error if streaming.

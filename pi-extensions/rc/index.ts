@@ -4,19 +4,20 @@ import { dirname } from 'node:path'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { execFileSync } from 'node:child_process'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { Text } from '@earendil-works/pi-tui'
+import { Type } from 'typebox'
 import { dbgLog } from './debug'
 import { runPushSetup } from './push-setup'
+import { finishedBody, questionBody } from './title'
 import {
     FINISHED_COLLAPSE_ID,
     QUESTION_COLLAPSE_ID,
-    TEST_COLLAPSE_ID,
     finishedPayload,
     questionPayload,
     readStoredDeviceToken,
     resolveApnsConfig,
     saveDeviceToken,
     sendApnsPush,
-    testPayload,
     type PushOutcome,
 } from './apns'
 
@@ -100,6 +101,7 @@ type RcSingleton = {
     rateLimits: Map<string, RateLimitEntry>
     pushToken: string | null
     lastPush: string | null
+    lastStopReason: string | null
     isStreaming: boolean
     currentTurnBuffer: ContentBlock[]
     pendingAsk: PendingAsk | null
@@ -137,6 +139,7 @@ function singleton(): RcSingleton {
         rateLimits: new Map<string, RateLimitEntry>(),
         pushToken: readStoredDeviceToken(),
         lastPush: null,
+        lastStopReason: null,
         isStreaming: false,
         currentTurnBuffer: [],
         pendingAsk: null,
@@ -661,17 +664,47 @@ function fireFinishedPush(state: RcSingleton): void {
     if (!state.isServing()) return
     const token = state.pushToken
     if (!token) return
-    void sendApnsPush(token, FINISHED_COLLAPSE_ID, finishedPayload(sessionId(state)))
+    void sendApnsPush(
+        token,
+        FINISHED_COLLAPSE_ID,
+        finishedPayload(sessionId(state), finishedBody(state))
+    )
         .then(outcome => handlePushOutcome(state, outcome, 'finished', token))
         .catch(error => dbgLog('apns finished push failed:', errorMessage(error)))
+}
+
+// The question's own text (question tool: params.question; questionnaire:
+// first sub-question's prompt) — the question push body per the 2026-09-07
+// decision. Returns undefined when no text can be extracted; questionBody
+// then falls back to the fixed string.
+function pendingAskText(pending: PendingAsk | null): string | undefined {
+    if (!pending) return undefined
+    const params = pending.message.params
+    if (!isObject(params)) return undefined
+    if (typeof params.question === 'string') return params.question
+    const first = safeArray(params.questions)[0]
+    if (isObject(first) && typeof first.prompt === 'string') return first.prompt
+    return undefined
 }
 
 function fireQuestionPush(state: RcSingleton): void {
     if (!pushAllowed(state)) return
     const token = state.pushToken
     if (!token) return
-    void sendApnsPush(token, QUESTION_COLLAPSE_ID, questionPayload(sessionId(state)))
-        .then(outcome => handlePushOutcome(state, outcome, 'question', token))
+    // Capture the ask's identity BEFORE any await: if it is answered,
+    // cancelled, or superseded while the body resolves (LLM shortening can
+    // take up to the timeout), the push is dropped — a "has a question"
+    // alert for a dead question would be wrong.
+    const pending = state.pendingAsk
+    void questionBody(pendingAskText(pending))
+        .then(body => {
+            if (state.pendingAsk !== pending) return
+            return sendApnsPush(
+                token,
+                QUESTION_COLLAPSE_ID,
+                questionPayload(sessionId(state), body)
+            ).then(outcome => handlePushOutcome(state, outcome, 'question', token))
+        })
         .catch(error => dbgLog('apns question push failed:', errorMessage(error)))
 }
 
@@ -957,6 +990,12 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
     pi.on('turn_end', (event, ctx) => forward('turn_end', event, ctx))
     pi.on('message_start', (event, ctx) => forward('message_start', event, ctx))
     pi.on('message_update', (event, ctx) => forward('message_update', event, ctx))
+    // Not forwarded: message_end would widen the frozen wire protocol; it is
+    // tracked only for the abort gate (turn_end is already forwarded).
+    pi.on('message_end', (event, ctx) => {
+        state.bind(pi, ctx)
+        trackEvent(state, 'message_end', event)
+    })
     pi.on('tool_execution_start', (event, ctx) => forward('tool_execution_start', event, ctx))
     pi.on('tool_execution_update', (event, ctx) =>
         forward('tool_execution_update', event, ctx)
@@ -965,12 +1004,25 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
 }
 
 function trackEvent(state: RcSingleton, name: string, event: unknown): void {
-    if (name === 'agent_start') state.isStreaming = true
+    if (name === 'agent_start') {
+        state.isStreaming = true
+        state.lastStopReason = null
+    }
     if (name === 'agent_settled') {
         state.isStreaming = false
+        // Aborted runs settle too, but the user cancelled — no "finished" ping.
+        if (state.lastStopReason === 'aborted') return
         // Fires on every settled turn by design; the constant collapse id
         // dedupes at APNs, so the latest settle is the one delivered.
         fireFinishedPush(state)
+    }
+    if (
+        isObject(event) &&
+        isObject(event.message) &&
+        typeof event.message.stopReason === 'string'
+    ) {
+        if (name === 'turn_end' || name === 'message_end')
+            state.lastStopReason = event.message.stopReason
     }
     if (
         name === 'message_start' &&
@@ -1164,6 +1216,26 @@ function recordPushOutcome(state: RcSingleton, outcome: PushOutcome): void {
     refreshStatus(state)
 }
 
+function buildRcInspectReport(state: RcSingleton): string {
+    const mode = state.binding?.ctx?.mode ?? 'unbound'
+    const lines: string[] = [`rc status (live singleton, pid ${process.pid})`]
+    lines.push(`mode: ${mode}`)
+    if (state.server && state.host && state.code) {
+        const clients = connectedClientCount(state)
+        lines.push(`serving: ws://${state.host}:${state.port} code ${state.code}`)
+        lines.push(`clients: ${clients === 0 ? 'none' : String(clients)}`)
+    } else {
+        lines.push('serving: no')
+    }
+    lines.push(`push: ${pushStatusText(state)}`)
+    lines.push(`last apns: ${state.lastPush ?? 'none'}`)
+    lines.push(`pending question: ${state.pendingAsk ? 'yes' : 'no'}`)
+    lines.push(
+        'note: rc-auth.json is a test-harness seam (written only when PI_RC_AUTH_FILE is set) — never read it for live status'
+    )
+    return lines.join('\n')
+}
+
 function refreshStatus(state: RcSingleton): void {
     if (!state.server || !state.host || !state.code) return
     const clients = connectedClientCount(state)
@@ -1267,24 +1339,13 @@ export default function rc(pi: ExtensionAPI): void {
     state.refreshStatus = () => refreshStatus(state)
     registerEventHandlers(pi, state)
     pi.registerCommand('rc', {
-        description:
-            'Toggle remote-control WebSocket server (subcommands: push-setup, push-test, show-token)',
+        description: 'Toggle remote-control WebSocket server (subcommand: push-setup)',
         getArgumentCompletions: (argumentPrefix: string) => {
             const subs = [
                 {
                     value: 'push-setup',
                     label: 'push-setup',
                     description: 'Configure APNs push delivery for the rc app',
-                },
-                {
-                    value: 'push-test',
-                    label: 'push-test',
-                    description: 'Send a test push to the registered phone token',
-                },
-                {
-                    value: 'show-token',
-                    label: 'show-token',
-                    description: 'Print the registered APNs device token (for diagnosis)',
                 },
             ]
             return subs.filter(sub => sub.value.startsWith(argumentPrefix))
@@ -1297,45 +1358,35 @@ export default function rc(pi: ExtensionAPI): void {
                 await runPushSetup(state, ctx.ui, sessionId(state))
                 return
             }
-            if (args.trim() === 'push-test') {
-                dbgLog('command /rc push-test invoked')
-                const token = state.pushToken
-                if (!token) {
-                    ctx.ui.notify(
-                        'push-test: no device token registered — connect the phone once (it sends its token after hello_ok), then retry',
-                        'warning'
-                    )
-                    return
-                }
-                const outcome = await sendApnsPush(
-                    token,
-                    TEST_COLLAPSE_ID,
-                    testPayload(sessionId(state))
-                )
-                handlePushOutcome(state, outcome, 'test', token)
-                const severity =
-                    outcome.ok === 'sent' && outcome.status < 300 ? 'info' : 'warning'
-                ctx.ui.notify(`push-test: ${pushOutcomeText(outcome)}`, severity)
-                return
-            }
-            if (args.trim() === 'show-token') {
-                dbgLog('command /rc show-token invoked')
-                if (!state.pushToken) {
-                    ctx.ui.notify(
-                        'show-token: no device token registered — connect the phone once first',
-                        'warning'
-                    )
-                    return
-                }
-                ctx.ui.notify(`push token: ${state.pushToken}`, 'info')
-                return
-            }
             if (state.server) {
                 await state.stop('toggled_off', 'manual /rc toggle off')
                 ctx.ui.notify('rc stopped', 'info')
                 return
             }
             await state.start(ctx)
+        },
+    })
+    pi.registerTool({
+        name: 'rc_inspect',
+        label: 'RC Inspect',
+        description: [
+            'Live status of the rc remote-control singleton in this pi process: serving (host/port/code),',
+            'client count, push readiness, last APNs outcome, pending question. Read-only.',
+            'Do not read rc-auth.json for rc status — it is a test-harness seam.',
+        ].join(' '),
+        parameters: Type.Object({}),
+        async execute(_toolCallId, _params) {
+            return {
+                content: [{ type: 'text', text: buildRcInspectReport(state) }],
+                details: undefined,
+            }
+        },
+        renderCall(_args, theme) {
+            return new Text(theme.fg('toolTitle', theme.bold('rc_inspect ')), 0, 0)
+        },
+        renderResult(result, _options, _theme, _context) {
+            const text = result.content[0]
+            return new Text(text?.type === 'text' ? text.text : '(no output)', 0, 0)
         },
     })
 }

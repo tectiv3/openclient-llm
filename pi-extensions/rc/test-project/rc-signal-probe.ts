@@ -9,6 +9,13 @@
 // /rcsignal pend — ask() with a signal aborted MID-WAIT: must resolve null
 //   and broadcast question_resolved by:cancelled; an answer for that id sent
 //   afterwards must be rejected with unknown_question (harness asserts it).
+//
+// /rctitle off — point the push-title LLM (title.ts) at an unreachable
+//   127.0.0.1 port with a tiny timeout: the deterministic truncation
+//   fallback path. /rctitle url <url> — point it at the harness's mock
+//   OpenRouter server (also clears the timeout override, restoring the
+//   spawn default). title.ts reads these env vars per call, so flipping
+//   them here takes effect on the very next question push.
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
 const RC_KEY = Symbol.for('pi-rc')
@@ -22,6 +29,23 @@ type ProbeAsk = {
 }
 
 export default function rcSignalProbe(pi: ExtensionAPI): void {
+    pi.registerCommand('rctitle', {
+        description: 'Test-only: flip the push-title LLM env (used by test-client.mjs)',
+        handler: async (args, ctx) => {
+            const parts = args.trim().split(/\s+/)
+            if (parts[0] === 'off') {
+                process.env.PI_RC_OPENROUTER_URL = 'http://127.0.0.1:9'
+                process.env.PI_RC_TITLE_TIMEOUT_MS = '250'
+            } else if (parts[0] === 'url' && parts[1]) {
+                process.env.PI_RC_OPENROUTER_URL = parts[1]
+                delete process.env.PI_RC_TITLE_TIMEOUT_MS
+            } else {
+                ctx.ui.notify(`rctitle: unsupported args='${args.trim()}'`, 'warning')
+                return
+            }
+            ctx.ui.notify(`rctitle: ${parts[0]} ok`, 'info')
+        },
+    })
     pi.registerCommand('rcsignal', {
         description: 'Test-only: drive the rc ask() signal path (used by test-client.mjs)',
         handler: async (args, ctx) => {

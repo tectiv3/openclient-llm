@@ -192,8 +192,8 @@ session call does not propagate). Rationale: any drained process (now or future 
 call paths) must be able to exit even with a cached session; an in-flight send keeps the loop
 alive via the ref'd `SEND_TIMEOUT_MS` timer, so delivery is unaffected.
 
-**Acceptance:** TUI push flow unchanged (`/rc push-test` still delivers); a synthetic drained
-process holding a cached session exits immediately.
+**Acceptance:** TUI push flow unchanged (a naturally settled turn still delivers the finished
+push); a synthetic drained process holding a cached session exits immediately.
 
 ## Verification matrix
 

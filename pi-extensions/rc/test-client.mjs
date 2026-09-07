@@ -23,11 +23,12 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { cpSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import http from "node:http";
 import http2 from "node:http2";
 import crypto from "node:crypto";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // --- constants -----------------------------------------------------------------
@@ -59,6 +60,9 @@ const LOCKOUT_DEADLINE_MS = 90_000;
 // but never completes within this budget counts as a defect, not a quiet no-op.
 const APNS_PUSH_TIMEOUT_MS = 15_000;
 const APNS_BAD_TOKEN_63 = "a".repeat(63); // 63 chars: valid hex, wrong length
+// The dummy key the child's shortening LLM authenticates with (never the real
+// OPENROUTER_API_KEY — asserted by the long-question mock test).
+const OPENROUTER_DUMMY_KEY = "dummy-harness-key";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TEST_PROJECT_SRC = join(HERE, "test-project");
@@ -693,13 +697,19 @@ registerTest(11, "hello_five_bad_codes_triggers_rate_limit", async (ctx) => {
 //
 // The child's singleton pushToken persists across tests, so the tests are
 // registered in token-state order: (c) null, (d) invalid/ignored, (a) first
-// valid registration, (b) question push on the same token, (e) persists across
-// disconnect + replaced by a second registration, (f) dropped on 410, then
-// the zero-client ask-routing gate (askAvailable = serving AND (clients OR
-// push-sendable)): (h) not push-ready → local fallback with zero push
-// traffic, (i) locked-phone — the question push fires with 0 clients and the
-// pending question is redelivered on reconnect (push-enabled spawn only),
+// valid registration, (b) question push on the same token, (b-mock)/(b-unreachable)
+// question-body shortening via the mock OpenRouter / an unreachable LLM, (e)
+// persists across disconnect + replaced by a second registration, (f) dropped
+// on 410, then the zero-client ask-routing gate (askAvailable = serving AND
+// (clients OR push-sendable)): (h) not push-ready → local fallback with zero
+// push traffic, (i) locked-phone — the question push fires with 0 clients and
+// the pending question is redelivered on reconnect (push-enabled spawn only),
 // (j) token registered but creds missing → local fallback (--no-apns spawn).
+//
+// Push bodies (2026-09-07 decision): finished pushes identify the session
+// (name → cwd basename → fixed fallback), question pushes carry the question's
+// own text (verbatim ≤80 chars; LLM-shortened via the mock when longer, with
+// deterministic hard truncation when the LLM is unreachable).
 //
 // With --no-apns the child is spawned WITHOUT the PI_RC_APNS_* env; the
 // endpoint still runs as a traffic observer and every test asserts zero push
@@ -796,6 +806,44 @@ class FakeApns {
         if (this.status === 410) headers["apns-reason"] = this.reason ?? "Unregistered";
         stream.respond(headers);
         stream.end(this.status === 200 ? "Accepted" : JSON.stringify({ reason: headers["apns-reason"] }));
+      });
+    });
+    await new Promise((resolve, reject) => {
+      this.server.once("error", reject);
+      this.server.listen(0, "127.0.0.1", resolve);
+    });
+    this.port = this.server.address().port;
+  }
+
+  close() {
+    if (!this.server) return;
+    this.server.close();
+  }
+}
+
+// Mock OpenRouter /chat/completions endpoint for the push-title shortening
+// LLM (rc/title.ts): records every request and answers with a canned short
+// completion. The child is pointed here by default via PI_RC_OPENROUTER_URL,
+// which both prevents any egress to the real OpenRouter from a test run and
+// makes "the LLM was (not) called" directly observable.
+class MockOpenRouter {
+  constructor() {
+    this.requests = []; // every completed request: { path, auth, body }
+    this.content = "Proceed with tonight's production rollout?"; // canned completion
+    this.server = null;
+    this.port = null;
+  }
+
+  async start() {
+    this.server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", () => {
+        this.requests.push({ path: req.url, auth: req.headers.authorization, body });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: this.content } }] }));
       });
     });
     await new Promise((resolve, reject) => {
@@ -933,9 +981,17 @@ registerTest(12, "push_agent_settled_sends_one_valid_request", async (ctx) => {
     checkApnsCommonHeaders(apns, req, "finished push");
     checkApnsJwt(apns, req, "finished push");
     const body = JSON.parse(req.body);
+    // Finished body = the finished-identity chain (session name → cwd
+    // basename). The harness never names the session, so the expected body is
+    // basename(tmpRoot) — the child is spawned with cwd = tmpRoot — unless a
+    // sessionName arrived in the connect state (self-checks the chain either
+    // way). Never agent text.
+    const expectedBody =
+      (typeof ctx.lastState.sessionName === "string" && ctx.lastState.sessionName.trim() !== "" && ctx.lastState.sessionName) ||
+      basename(ctx.tmpRoot);
     check(
-      body.aps?.alert?.title === "Agent finished" && body.aps?.alert?.body === "Agent finished",
-      `finished push must carry the fixed alert, got ${JSON.stringify(body.aps?.alert)}`,
+      body.aps?.alert?.title === "Agent finished" && body.aps?.alert?.body === expectedBody,
+      `finished push must identify the session (expected body ${JSON.stringify(expectedBody)}), got ${JSON.stringify(body.aps?.alert)}`,
     );
     check(body.aps?.sound === "default", `finished push must carry sound default`);
     check(body.aps?.["thread-id"] === sessionId, `thread-id must be the session id, got ${body.aps?.["thread-id"]}`);
@@ -947,14 +1003,17 @@ registerTest(12, "push_agent_settled_sends_one_valid_request", async (ctx) => {
 
 // (b) A remote question (ask() via the question extension, triggered the same
 // way as group 5's ASK flow) must produce one request with the question
-// collapse id, timeSensitive, and fixed strings. Token A from test (a) is
-// still registered (singleton-persistent).
+// collapse id, timeSensitive, and the question's own text as the body (short
+// text ships verbatim — the shortening LLM must never be called for it).
+// Token A from test (a) is still registered (singleton-persistent).
 // (--no-apns: the question still fires and is answerable; zero requests.)
 registerTest(12, "push_question_triggers_time_sensitive_request", async (ctx) => {
   const apns = ctx.apns;
+  const mockLlm = ctx.mockLlm;
   const hs = await connectAndVerifyConnectTime(ctx);
   try {
     const before = apns.requests.length;
+    const mockBefore = mockLlm.requests.length;
     hs.ws.send(JSON.stringify({ type: "prompt", text: "ASK" }));
     const q = await waitForMessage(hs.next, (m) => m?.type === "question", 60_000, "question (LLM round trip)");
     check(q.kind === "question", `expected kind question, got ${JSON.stringify(q.kind)}`);
@@ -979,17 +1038,159 @@ registerTest(12, "push_question_triggers_time_sensitive_request", async (ctx) =>
       const body = JSON.parse(req.body);
       check(body.aps?.timeSensitive === true, `question push must set aps.timeSensitive`);
       check(
-        body.aps?.alert?.title === "Agent has a question" && body.aps?.alert?.body === "Agent has a question — answer needed",
-        `question push must carry the fixed alert, got ${JSON.stringify(body.aps?.alert)}`,
+        body.aps?.alert?.title === "Agent has a question" && body.aps?.alert?.body === q.params?.question,
+        `short question push must carry the question text verbatim, got ${JSON.stringify(body.aps?.alert)}`,
       );
       check(body.aps?.sound === "default", `question push must carry sound default`);
     }
+    // ≤80-char question text ships verbatim: the shortening LLM (pointed at
+    // the recording mock by the spawn env) must never be called for it.
+    check(
+      mockLlm.requests.length === mockBefore,
+      `short question must not call the shortening LLM, got ${mockLlm.requests.length - mockBefore} calls`,
+    );
     // Answer it so the agent settles and later tests start idle.
     hs.ws.send(JSON.stringify({ type: "answer", id: q.id, value: "red", wasCustom: false, index: 1 }));
     const resolved = await waitForMessage(hs.next, (m) => m?.type === "question_resolved" && m.id === q.id, 10_000, "question_resolved");
     check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
     await waitForEventByName(hs.next, "agent_settled", 60_000);
   } finally {
+    hs.close();
+  }
+});
+
+// (b-mock) Long question (>80 chars) with a healthy shortening LLM: the body
+// is the canned shortened completion, and exactly one /chat/completions call
+// reaches the mock with the expected request shape (model, messages,
+// max_tokens, Bearer dummy key). The expected truncation is computed from the
+// question text as received on the wire, so model paraphrasing cannot make
+// this flaky.
+registerTest(12, "push_long_question_body_llm_shortened", async (ctx) => {
+  const apns = ctx.apns;
+  const mockLlm = ctx.mockLlm;
+  await drainPushQuiet(apns); // the previous test's settle push may still be in flight
+  const hs = await connectAndVerifyConnectTime(ctx);
+  try {
+    const before = apns.requests.length;
+    const mockBefore = mockLlm.requests.length;
+    hs.ws.send(JSON.stringify({ type: "prompt", text: "ASKLONG" }));
+    const q = await waitForMessage(hs.next, (m) => m?.type === "question", 60_000, "long question (LLM round trip)");
+    check(q.kind === "question", `expected kind question, got ${JSON.stringify(q.kind)}`);
+    const questionText = String(q.params?.question ?? "");
+    check(questionText.length > 100, `ASKLONG question must exceed 100 chars, got ${questionText.length}`);
+    if (ctx.pushEnabled) {
+      await withTimeout(
+        waitUntil(() => apns.requests.length > before, APNS_PUSH_TIMEOUT_MS, "long-question push request"),
+        APNS_PUSH_TIMEOUT_MS + 5_000,
+        "long-question push request (deadline)",
+      );
+    }
+    await sleep(1_000); // quiet window: at most one question push
+    const requests = apns.requests.slice(before).filter((r) => r.headers["apns-collapse-id"] === "rc-question");
+    if (!ctx.pushEnabled) {
+      check(requests.length === 0, `push disabled, expected zero question requests, got ${requests.length}`);
+    } else {
+      check(requests.length === 1, `expected exactly one question APNs request, got ${requests.length}`);
+      const body = JSON.parse(requests[0].body);
+      check(body.aps?.alert?.title === "Agent has a question", `question push title, got ${JSON.stringify(body.aps?.alert)}`);
+      check(
+        body.aps?.alert?.body === mockLlm.content,
+        `long question push must carry the LLM-shortened body, got ${JSON.stringify(body.aps?.alert)}`,
+      );
+      check(body.aps?.timeSensitive === true, `question push must set aps.timeSensitive`);
+    }
+    // The shortening LLM: called exactly once (in both spawn modes — the
+    // token is registered either way), with the sanitized question text.
+    check(
+      mockLlm.requests.length === mockBefore + 1,
+      `expected exactly one shortening LLM call, got ${mockLlm.requests.length - mockBefore}`,
+    );
+    const [llm] = mockLlm.requests.slice(mockBefore);
+    check(llm.path === "/chat/completions", `shortening LLM path must be /chat/completions, got ${llm.path}`);
+    check(
+      llm.auth === `Bearer ${OPENROUTER_DUMMY_KEY}`,
+      `the child must use the dummy OPENROUTER_API_KEY, got ${JSON.stringify(llm.auth)}`,
+    );
+    const llmBody = JSON.parse(llm.body);
+    check(llmBody.model === "minimax/minimax-m3:free", `shortening model, got ${JSON.stringify(llmBody.model)}`);
+    check(llmBody.max_tokens === 40, `max_tokens must be 40, got ${JSON.stringify(llmBody.max_tokens)}`);
+    check(
+      Array.isArray(llmBody.messages) &&
+        llmBody.messages.length === 2 &&
+        llmBody.messages[0]?.role === "system" &&
+        llmBody.messages[1]?.role === "user" &&
+        llmBody.messages[1]?.content === questionText.replace(/\s+/g, " ").trim(),
+      `LLM user message must be the sanitized question text, got ${JSON.stringify(llmBody.messages?.[1]?.content)}`,
+    );
+    // Answer it so the agent settles and later tests start idle.
+    hs.ws.send(JSON.stringify({ type: "answer", id: q.id, value: "yes", wasCustom: false, index: 0 }));
+    const resolved = await waitForMessage(hs.next, (m) => m?.type === "question_resolved" && m.id === q.id, 10_000, "question_resolved");
+    check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
+    await waitForEventByName(hs.next, "agent_settled", 60_000);
+  } finally {
+    hs.close();
+  }
+});
+
+// (b-unreachable) Long question with the shortening LLM unreachable (probe
+// flips PI_RC_OPENROUTER_URL to a dead 127.0.0.1 port with a tiny timeout):
+// the body must fall back to deterministic hard truncation of the question
+// text (100-char cap incl. the ellipsis, single spaces).
+registerTest(12, "push_long_question_body_llm_failure_truncates", async (ctx) => {
+  const apns = ctx.apns;
+  const mockLlm = ctx.mockLlm;
+  await drainPushQuiet(apns); // the previous test's settle push may still be in flight
+  const hs = await connectAndVerifyConnectTime(ctx);
+  let flipped = false;
+  try {
+    await withTimeout(
+      ctx.client.sendCommand({ type: "prompt", message: "/rctitle off" }),
+      10_000,
+      "pi /rctitle off timed out",
+    );
+    flipped = true;
+    const mockBefore = mockLlm.requests.length;
+    const before = apns.requests.length;
+    hs.ws.send(JSON.stringify({ type: "prompt", text: "ASKLONG" }));
+    const q = await waitForMessage(hs.next, (m) => m?.type === "question", 60_000, "long question (LLM round trip)");
+    check(q.kind === "question", `expected kind question, got ${JSON.stringify(q.kind)}`);
+    const clean = String(q.params?.question ?? "").replace(/\s+/g, " ").trim();
+    check(clean.length > 100, `ASKLONG question must exceed 100 chars, got ${clean.length}`);
+    const expected = clean.length <= 100 ? clean : `${clean.slice(0, 99)}…`;
+    if (ctx.pushEnabled) {
+      await withTimeout(
+        waitUntil(() => apns.requests.length > before, APNS_PUSH_TIMEOUT_MS, "truncated push request"),
+        APNS_PUSH_TIMEOUT_MS + 5_000,
+        "truncated push request (deadline)",
+      );
+    }
+    await sleep(1_000); // quiet window: at most one question push
+    const requests = apns.requests.slice(before).filter((r) => r.headers["apns-collapse-id"] === "rc-question");
+    if (!ctx.pushEnabled) {
+      check(requests.length === 0, `push disabled, expected zero question requests, got ${requests.length}`);
+    } else {
+      check(requests.length === 1, `expected exactly one question APNs request, got ${requests.length}`);
+      const body = JSON.parse(requests[0].body);
+      check(
+        body.aps?.alert?.title === "Agent has a question" && body.aps?.alert?.body === expected,
+        `unreachable LLM must fall back to hard truncation (expected ${JSON.stringify(expected)}), got ${JSON.stringify(body.aps?.alert)}`,
+      );
+      check(!/ {2,}/.test(body.aps?.alert?.body ?? ""), `truncated body must have single spaces only, got ${JSON.stringify(body.aps?.alert?.body)}`);
+    }
+    // The dead LLM was never reached (no mock traffic either: the probe
+    // repointed the URL away from it).
+    check(mockLlm.requests.length === mockBefore, `unreachable LLM test must make no mock calls, got ${mockLlm.requests.length - mockBefore}`);
+    // Answer it so the agent settles and later tests start idle.
+    hs.ws.send(JSON.stringify({ type: "answer", id: q.id, value: "yes", wasCustom: false, index: 0 }));
+    const resolved = await waitForMessage(hs.next, (m) => m?.type === "question_resolved" && m.id === q.id, 10_000, "question_resolved");
+    check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
+    await waitForEventByName(hs.next, "agent_settled", 60_000);
+  } finally {
+    // Restore the spawn-default (mock) URL so later question pushes keep the
+    // no-real-egress guarantee. Best-effort: never mask a test failure.
+    if (flipped) {
+      ctx.client.sendCommand({ type: "prompt", message: `/rctitle url http://127.0.0.1:${ctx.mockLlm.port}` }).catch(() => {});
+    }
     hs.close();
   }
 });
@@ -1007,12 +1208,11 @@ registerTest(12, "push_token_persists_across_reconnect_and_second_registration_r
   try {
     await drainPushQuiet(apns); // the previous test's settle push may still be in flight
     const before = apns.requests.length;
-    // Settle via the group-4 pattern (prompt LONG -> abort): no full LLM
-    // generation, so both settle triggers fit the 60 s per-test budget.
-    b.ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
-    await waitForEventByName(b.next, "message_update", 15_000);
-    b.ws.send(JSON.stringify({ type: "abort" }));
-    await waitForEventByName(b.next, "agent_settled", 20_000);
+    // Natural settle (2026-09-07 abort gate): aborted turns no longer fire
+    // the finished push, so token-persistence pushes must come from a real
+    // settle (fast model — test (a) already budgets one LLM round trip).
+    b.ws.send(JSON.stringify({ type: "prompt", text: "Reply with exactly: PING-E1" }));
+    await waitForEventByName(b.next, "agent_settled", 60_000);
     if (ctx.pushEnabled) {
       await withTimeout(
         waitUntil(() => apns.requests.length > before, APNS_PUSH_TIMEOUT_MS, "post-reconnect push request"),
@@ -1035,10 +1235,8 @@ registerTest(12, "push_token_persists_across_reconnect_and_second_registration_r
     b.ws.send(JSON.stringify({ type: "push_token", token: APNS_TOKEN_B }));
     await sleep(500); // register before the next settle trigger
     const before2 = apns.requests.length;
-    b.ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
-    await waitForEventByName(b.next, "message_update", 15_000);
-    b.ws.send(JSON.stringify({ type: "abort" }));
-    await waitForEventByName(b.next, "agent_settled", 20_000);
+    b.ws.send(JSON.stringify({ type: "prompt", text: "Reply with exactly: PING-E2" }));
+    await waitForEventByName(b.next, "agent_settled", 60_000);
     if (ctx.pushEnabled) {
       await withTimeout(
         waitUntil(() => apns.requests.length > before2, APNS_PUSH_TIMEOUT_MS, "post-replace push request"),
@@ -1070,15 +1268,13 @@ registerTest(12, "push_410_drops_token_and_rc_still_serves", async (ctx) => {
   apns.reason = "Unregistered";
   const hs = await connectAndVerifyConnectTime(ctx);
   try {
-    // Settles come from the group-4 pattern (prompt LONG -> abort): the turn
-    // settles without a full LLM generation, so both triggers fit the 60 s
-    // per-test budget.
+    // Natural settles (2026-09-07 abort gate): aborted turns no longer fire
+    // the finished push, so the 410 drop and its aftermath must be observed
+    // on real settles (fast model round trips, budgeted like test (a)).
     // Trigger 1: a settle while the endpoint answers 410: the token is dropped.
     const before = apns.requests.length;
-    hs.ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
-    await waitForEventByName(hs.next, "message_update", 15_000);
-    hs.ws.send(JSON.stringify({ type: "abort" }));
-    await waitForEventByName(hs.next, "agent_settled", 20_000);
+    hs.ws.send(JSON.stringify({ type: "prompt", text: "Reply with exactly: PING-F1" }));
+    await waitForEventByName(hs.next, "agent_settled", 60_000);
     if (ctx.pushEnabled) {
       await withTimeout(
         waitUntil(() => apns.requests.length > before, APNS_PUSH_TIMEOUT_MS, "410 push request"),
@@ -1090,10 +1286,10 @@ registerTest(12, "push_410_drops_token_and_rc_still_serves", async (ctx) => {
       // The token is now dropped: a subsequent trigger must produce NO request.
       await sleep(1_000); // let the outcome handler run (token drop is async)
       const before2 = apns.requests.length;
-      hs.ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
-      await waitForEventByName(hs.next, "message_update", 15_000);
-      hs.ws.send(JSON.stringify({ type: "abort" }));
-      await waitForEventByName(hs.next, "agent_settled", 20_000);
+      // A natural settle must produce NO request now that the token is dropped
+      // (natural, so the zero proves the drop — not the abort gate).
+      hs.ws.send(JSON.stringify({ type: "prompt", text: "Reply with exactly: PING-F2" }));
+      await waitForEventByName(hs.next, "agent_settled", 60_000);
       await sleep(1_500); // quiet window: no push expected (token dropped)
       check(
         apns.requests.length === before2,
@@ -1246,10 +1442,11 @@ registerTest(12, "ask_zero_clients_not_push_ready_falls_back_without_push", asyn
       dropper = await connectAndVerifyConnectTime(ctx);
       dropper.ws.send(JSON.stringify({ type: "push_token", token: APNS_TOKEN_A }));
       await sleep(500); // register before the settle
-      dropper.ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
-      await waitForEventByName(dropper.next, "message_update", 15_000);
-      dropper.ws.send(JSON.stringify({ type: "abort" }));
-      await waitForEventByName(dropper.next, "agent_settled", 20_000);
+      // Natural settle: the 2026-09-07 abort gate skips aborted turns' pushes,
+      // and this settle's push IS the point — it takes the 410 that drops
+      // the token.
+      dropper.ws.send(JSON.stringify({ type: "prompt", text: "Reply with exactly: PING-H1" }));
+      await waitForEventByName(dropper.next, "agent_settled", 60_000);
       await withTimeout(
         waitUntil(() => apns.requests.length > before, APNS_PUSH_TIMEOUT_MS, "410 drop push"),
         APNS_PUSH_TIMEOUT_MS + 5_000,
@@ -1674,6 +1871,7 @@ async function main() {
   let client = null;
 
   const apns = new FakeApns(tmpRoot);
+  const mockLlm = new MockOpenRouter();
 
   const cleanup = async () => {
     if (client) {
@@ -1681,6 +1879,7 @@ async function main() {
     }
     apns.server?.closeAllConnections?.();
     apns.close();
+    mockLlm.close();
     if (!opts.keepTmp) {
       rmSync(tmpRoot, { recursive: true, force: true });
     }
@@ -1699,7 +1898,10 @@ async function main() {
     // tmpRoot, listening on an OS-assigned 127.0.0.1 port BEFORE the spawn so
     // the port can go into the child's env. Up in BOTH modes: with --no-apns it
     // is a pure traffic observer (the push-disabled case must show zero hits).
+    // The mock OpenRouter (title-shortening LLM) runs in both modes for the
+    // same reason: no real egress, observable call counts.
     await apns.start();
+    await mockLlm.start();
   } catch (err) {
     console.error(`setup failed: ${err.message}`);
     await cleanup();
@@ -1715,6 +1917,13 @@ async function main() {
     PI_RC_BIND: RC_HOST,
     PI_RC_AUTH_FILE: authFile,
     PI_RC_APNS_CONFIG: join(tmpRoot, "rc-push.json"),
+    // The push-title shortening LLM (rc/title.ts) must never reach the real
+    // OpenRouter account from a test run: the key is a dummy and the URL
+    // defaults to the harness's recording mock. The unreachable-LLM case is
+    // flipped inside the child via /rctitle (probe extension); title.ts reads
+    // these vars per call.
+    OPENROUTER_API_KEY: OPENROUTER_DUMMY_KEY,
+    PI_RC_OPENROUTER_URL: `http://127.0.0.1:${mockLlm.port}`,
   };
   if (!opts.noApns) {
     // The harness owns the child environment: point the extension at the fake
@@ -1759,6 +1968,7 @@ async function main() {
     host: RC_HOST,
     fast: opts.fast || RC_FAST,
     apns,
+    mockLlm,
     pushEnabled: !opts.noApns,
     pushLockoutSince: null, // set when group 11 completes; group 12 waits it out
     async toggleRcOn() {

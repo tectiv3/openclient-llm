@@ -13,6 +13,9 @@ You are running inside an automated test harness. Follow these rules exactly.
 - If the user message is exactly ASK:
   Call the question tool with question "Pick a color?" and options red, green, blue
   (labels only, no descriptions). After the tool returns, reply with exactly: OK
+- If the user message is exactly ASKLONG:
+  Call the question tool with question exactly "The migration window opens tonight at 2am — should we proceed with rolling out the remaining schema changes to the production cluster while traffic is at its lowest?"
+  and options yes, no (labels only, no descriptions). After the tool returns, reply with exactly: OK
 - If the user message is exactly ASKFORM:
   Call the questionnaire tool with exactly two sub-questions:
   1. id q1, label Color, prompt "Pick a color?", options red, green

@@ -20,7 +20,6 @@ const SEND_TIMEOUT_MS = 15_000
 
 export const FINISHED_COLLAPSE_ID = 'rc-finished'
 export const QUESTION_COLLAPSE_ID = 'rc-question'
-export const TEST_COLLAPSE_ID = 'rc-test'
 
 type JsonObject = Record<string, unknown>
 
@@ -332,23 +331,23 @@ export function closeApns(): void {
     }
 }
 
-export function finishedPayload(sessionId: string): JsonObject {
+export function finishedPayload(sessionId: string, body = 'Agent finished'): JsonObject {
     return {
         aps: {
-            alert: { title: 'Agent finished', body: 'Agent finished' },
+            alert: { title: 'Agent finished', body },
             sound: 'default',
             'thread-id': sessionId,
         },
     }
 }
 
-export function questionPayload(sessionId: string): JsonObject {
+export function questionPayload(
+    sessionId: string,
+    body = 'Agent has a question — answer needed'
+): JsonObject {
     return {
         aps: {
-            alert: {
-                title: 'Agent has a question',
-                body: 'Agent has a question — answer needed',
-            },
+            alert: { title: 'Agent has a question', body },
             sound: 'default',
             'thread-id': sessionId,
             timeSensitive: true,
@@ -356,19 +355,12 @@ export function questionPayload(sessionId: string): JsonObject {
     }
 }
 
-export function testPayload(sessionId: string): JsonObject {
-    return {
-        aps: {
-            alert: { title: 'RC push test', body: 'RC push test' },
-            sound: 'default',
-            'thread-id': sessionId,
-        },
-    }
-}
-
-// Payloads are fixed server-side strings only — never agent or user text —
-// so a verbose or compromised agent cannot place session content on a
-// lock screen.
+// Bodies are built by title.ts: session identity (name/cwd basename, never
+// agent text) for finished/test pushes, and the question's own capped,
+// sanitized text for question pushes — the documented 2026-09-07 relaxation.
+// Everything else in the payload is fixed server-side strings, so a verbose
+// or compromised agent cannot place arbitrary session content on a lock
+// screen beyond that capped question text.
 export async function sendApnsPush(
     token: string,
     collapseId: string,
