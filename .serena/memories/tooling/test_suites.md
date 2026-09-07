@@ -50,7 +50,7 @@ xcodebuild test -project openclient-llm.xcodeproj -scheme openclient-llm \
 - Also needs port 47800 free.
 
 ## Quick sanity
-- `node -e "import('./pi-extensions/rc/index.ts').then(() => console.log('ok'))"` — module parse check (pi loads TS directly via jiti; no compile step).
+- Static check: `cd pi-extensions && npx tsc --noEmit` (the pre-commit hook runs this vs `.tsc-baseline`). A plain `node -e` dynamic-import parse check does NOT work from the repo context for files with value imports of pi runtime packages (`@earendil-works/pi-tui`, `typebox` — unresolvable: no parent `node_modules` has them, and the pnpm store `links/` dirs are pruned to `node_modules` only); it only works for type-only-import files. For a real load check, boot a pi process that loads the extensions: the harness child (group 0 fails on any extension load error) or a fresh pi session.
 - Verify no orphans after runs: `pgrep -fl "mode rpc"` empty; temp dirs gone.
 
 ## Full regression (after shared-code changes)
