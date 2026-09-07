@@ -7,33 +7,31 @@
 
 import SwiftUI
 
-/// Question/questionnaire form content shared by the macOS sheet
-/// (`CodeQuestionModal`) and the iOS centered card (`CodeQuestionCardView`).
+/// Question form content shared by the macOS sheet (`CodeQuestionModal`) and
+/// the iOS centered card (`CodeQuestionCardView`). One rendering path for the
+/// unified ask: a single question renders a simple option list, multiple
+/// questions render the tabbed form with a submit button.
 struct CodeQuestionContent: View {
     // MARK: - Properties
 
     let question: CodeViewModel.PendingQuestion
-    let onAnswer: (String, String, Bool, Int?) -> Void
-    let onAnswerQuestionnaire: (
-        String, [CodeQuestionnaireAnswer]
-    ) -> Void
+    let onAnswer: (String, [CodeAnswer]) -> Void
 
     // MARK: - View
 
     var body: some View {
-        switch question.kind {
-        case let .question(params):
+        let questions = question.params.questions
+        if questions.count == 1, let first = questions.first {
             SingleQuestionView(
                 questionId: question.id,
-                params: params,
+                sub: first,
                 onAnswer: onAnswer
             )
-
-        case let .questionnaire(params):
+        } else {
             QuestionnaireView(
                 questionId: question.id,
-                params: params,
-                onAnswerQuestionnaire: onAnswerQuestionnaire
+                questions: questions,
+                onAnswer: onAnswer
             )
         }
     }
@@ -43,8 +41,8 @@ struct CodeQuestionContent: View {
 
 private struct SingleQuestionView: View {
     let questionId: String
-    let params: CodeQuestionParams
-    let onAnswer: (String, String, Bool, Int?) -> Void
+    let sub: CodeSubQuestion
+    let onAnswer: (String, [CodeAnswer]) -> Void
 
     @State private var customText = ""
     @State private var isCustomExpanded = false
@@ -53,24 +51,24 @@ private struct SingleQuestionView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text(params.question)
+                Text(sub.prompt)
                     .font(.headline)
                     .padding(.top, 8)
 
                 VStack(spacing: 0) {
                     ForEach(
-                        Array(params.options.enumerated()),
+                        Array(sub.options.enumerated()),
                         id: \.offset
                     ) { index, option in
                         optionRow(option, index: index)
 
-                        if index < params.options.count - 1 {
+                        if index < sub.options.count - 1 {
                             Divider()
                                 .padding(.leading, 16)
                         }
                     }
 
-                    if params.allowOther != false {
+                    if sub.resolvedAllowOther {
                         Divider()
                             .padding(.leading, 16)
                         customInputRow
@@ -92,9 +90,15 @@ private struct SingleQuestionView: View {
         Button {
             onAnswer(
                 questionId,
-                option.value,
-                false,
-                index
+                [
+                    CodeAnswer(
+                        id: sub.id,
+                        value: option.resolvedValue,
+                        label: option.label,
+                        wasCustom: false,
+                        index: index + 1
+                    ),
+                ]
             )
         } label: {
             HStack {
@@ -110,9 +114,15 @@ private struct SingleQuestionView: View {
                     }
                 }
                 Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                // The first option is the preselected default.
+                if index == 0 {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.appAccent)
+                } else {
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -181,18 +191,27 @@ private struct SingleQuestionView: View {
             in: .whitespacesAndNewlines
         )
         guard !text.isEmpty else { return }
-        onAnswer(questionId, text, true, nil)
+        onAnswer(
+            questionId,
+            [
+                CodeAnswer(
+                    id: sub.id,
+                    value: text,
+                    label: text,
+                    wasCustom: true,
+                    index: nil
+                ),
+            ]
+        )
     }
 }
 
-// MARK: - Questionnaire
+// MARK: - Questionnaire (multiple questions)
 
 private struct QuestionnaireView: View {
     let questionId: String
-    let params: CodeQuestionnaireParams
-    let onAnswerQuestionnaire: (
-        String, [CodeQuestionnaireAnswer]
-    ) -> Void
+    let questions: [CodeSubQuestion]
+    let onAnswer: (String, [CodeAnswer]) -> Void
 
     @State private var currentPage = 0
     @State private var answers: [String: String] = [:]
@@ -204,21 +223,21 @@ private struct QuestionnaireView: View {
 
             TabView(selection: $currentPage) {
                 ForEach(
-                    Array(params.questions.enumerated()),
+                    Array(questions.enumerated()),
                     id: \.offset
                 ) { index, question in
-                    questionPage(question, index: index)
+                    questionPage(question)
                         .tag(index)
                 }
             }
             #if os(iOS)
             .tabViewStyle(.page(indexDisplayMode:
-                params.questions.count >= 7
+                questions.count >= 7
                     ? .never
                     : .automatic))
             #endif
 
-            if currentPage == params.questions.count - 1 {
+            if currentPage == questions.count - 1 {
                 submitButton
             }
         }
@@ -241,7 +260,7 @@ private struct QuestionnaireView: View {
 
             Spacer()
 
-            Text(String(localized: "\(currentPage + 1) of \(params.questions.count)"))
+            Text(String(localized: "\(currentPage + 1) of \(questions.count)"))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
@@ -250,29 +269,26 @@ private struct QuestionnaireView: View {
             Button {
                 withAnimation {
                     currentPage = min(
-                        params.questions.count - 1,
+                        questions.count - 1,
                         currentPage + 1
                     )
                 }
             } label: {
                 Image(systemName: "chevron.right")
                     .foregroundStyle(
-                        currentPage < params.questions.count - 1
+                        currentPage < questions.count - 1
                             ? .primary
                             : .tertiary
                     )
             }
-            .disabled(currentPage >= params.questions.count - 1)
+            .disabled(currentPage >= questions.count - 1)
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 8)
     }
 
-    func questionPage(
-        _ question: CodeSubQuestion,
-        index _: Int
-    ) -> some View {
+    func questionPage(_ question: CodeSubQuestion) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text(question.prompt)
@@ -288,7 +304,7 @@ private struct QuestionnaireView: View {
                             option,
                             questionId: question.id,
                             isSelected: answers[question.id]
-                                == option.value
+                                == option.resolvedValue
                         )
 
                         if optIndex < question.options.count - 1 {
@@ -302,7 +318,7 @@ private struct QuestionnaireView: View {
                     in: .rect(cornerRadius: 16)
                 )
 
-                if question.allowOther != false {
+                if question.resolvedAllowOther {
                     HStack(spacing: 8) {
                         TextField(
                             String(localized: "Type something..."),
@@ -350,7 +366,7 @@ private struct QuestionnaireView: View {
         isSelected: Bool
     ) -> some View {
         Button {
-            answers[questionId] = option.value
+            answers[questionId] = option.resolvedValue
         } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
@@ -383,23 +399,25 @@ private struct QuestionnaireView: View {
 
     var submitButton: some View {
         Button {
-            let questionnaireAnswers = params.questions.compactMap {
-                question -> CodeQuestionnaireAnswer? in
+            let submitted = questions.compactMap {
+                question -> CodeAnswer? in
                 guard let selected = answers[question.id]
                 else { return nil }
                 let index = question.options.firstIndex {
-                    $0.value == selected
+                    $0.resolvedValue == selected
                 }
-                let label = index.map { question.options[$0].label } ?? selected
-                return CodeQuestionnaireAnswer(
+                let label = index.map {
+                    question.options[$0].label
+                } ?? selected
+                return CodeAnswer(
                     id: question.id,
                     value: selected,
                     label: label,
                     wasCustom: index == nil,
-                    index: index
+                    index: index.map { $0 + 1 }
                 )
             }
-            onAnswerQuestionnaire(questionId, questionnaireAnswers)
+            onAnswer(questionId, submitted)
         } label: {
             Text(String(localized: "Submit"))
                 .frame(maxWidth: 200)
@@ -411,30 +429,36 @@ private struct QuestionnaireView: View {
     }
 
     var allQuestionsAnswered: Bool {
-        params.questions.allSatisfy { answers[$0.id] != nil }
+        questions.allSatisfy { answers[$0.id] != nil }
     }
 }
 
-#Preview {
+#Preview("Single Question") {
     CodeQuestionContent(
         question: .init(
             id: "q1",
-            kind: .question(CodeQuestionParams(
-                question: "Which authentication method?",
-                options: [
-                    CodeQuestionOption(
-                        label: "OAuth 2.0",
-                        description: "Standard OAuth flow"
-                    ),
-                    CodeQuestionOption(
-                        label: "API Key",
-                        description: "Simple API key auth"
+            params: CodeQuestionParams(
+                questions: [
+                    CodeSubQuestion(
+                        id: "Q1",
+                        label: "Q1",
+                        prompt: "Which authentication method?",
+                        options: [
+                            CodeQuestionOption(
+                                label: "OAuth 2.0",
+                                description: "Standard OAuth flow"
+                            ),
+                            CodeQuestionOption(
+                                label: "API Key",
+                                description: "Simple API key auth"
+                            ),
+                        ],
+                        allowOther: nil
                     ),
                 ]
-            ))
+            )
         ),
-        onAnswer: { _, _, _, _ in },
-        onAnswerQuestionnaire: { _, _ in }
+        onAnswer: { _, _ in }
     )
     .frame(height: 300)
 }

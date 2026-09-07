@@ -14,12 +14,11 @@ import Foundation
 // MARK: - Question Handling
 
 extension CodeViewModel {
-    func handleAnswer(
-        id: String,
-        value: String,
-        wasCustom: Bool,
-        index: Int?
-    ) {
+    /// Answers a pending ask (single- or multi-question). Sends the unified
+    /// `answer` frame, dismisses the modal, and appends a transcript entry:
+    /// a single-question ask shows its value, a multi-question ask shows the
+    /// joined labels.
+    func handleAnswer(id: String, answers: [CodeAnswer]) {
         let questionText: String
         if let session = currentSession {
             questionText = questionTextForId(id, in: session)
@@ -27,51 +26,27 @@ extension CodeViewModel {
             questionText = ""
         }
 
-        let message = CodeClientMessage.answer(
-            id: id,
-            value: value,
-            wasCustom: wasCustom,
-            index: index
-        )
+        let message = CodeClientMessage.answer(id: id, answers: answers)
         sendOrQueueAnswer(message)
         dismissQuestion(id: id)
 
         guard var session = currentSession else { return }
-        session.items.append(.resolvedQuestion(
-            id: UUID(),
-            questionText: questionText,
-            answerText: value,
-            wasCustom: wasCustom
-        ))
-        updateSession(session)
-    }
-
-    func handleAnswerQuestionnaire(
-        id: String,
-        answers: [CodeQuestionnaireAnswer]
-    ) {
-        let questionText: String
-        if let session = currentSession {
-            questionText = questionTextForId(id, in: session)
+        if answers.count == 1, let first = answers.first {
+            session.items.append(.resolvedQuestion(
+                id: UUID(),
+                questionText: questionText,
+                answerText: first.value,
+                wasCustom: first.wasCustom
+            ))
         } else {
-            questionText = ""
+            let summary = answers.map(\.label).joined(separator: ", ")
+            session.items.append(.resolvedQuestion(
+                id: UUID(),
+                questionText: questionText,
+                answerText: summary,
+                wasCustom: false
+            ))
         }
-
-        let message = CodeClientMessage.answerQuestionnaire(
-            id: id,
-            answers: answers
-        )
-        sendOrQueueAnswer(message)
-        dismissQuestion(id: id)
-
-        guard var session = currentSession else { return }
-        let summary = answers.map(\.label).joined(separator: ", ")
-        session.items.append(.resolvedQuestion(
-            id: UUID(),
-            questionText: questionText,
-            answerText: summary,
-            wasCustom: false
-        ))
         updateSession(session)
     }
 
@@ -81,22 +56,7 @@ extension CodeViewModel {
 
         session.pendingQuestion = PendingQuestion(
             id: question.id,
-            kind: .question(question.params)
-        )
-        updateSession(session)
-        notifyIfBackgrounded()
-    }
-
-    func handleQuestionnaireReceived(
-        _ questionnaire: CodeQuestionnaire
-    ) {
-        guard var session = currentSession else { return }
-        guard questionnaire.sessionId == session.sessionId
-        else { return }
-
-        session.pendingQuestion = PendingQuestion(
-            id: questionnaire.id,
-            kind: .questionnaire(questionnaire.params)
+            params: question.params
         )
         updateSession(session)
         notifyIfBackgrounded()
@@ -190,12 +150,8 @@ private extension CodeViewModel {
         if let pending = session.pendingQuestion,
            pending.id == id
         {
-            switch pending.kind {
-            case let .question(params):
-                return params.question
-            case .questionnaire:
-                return String(localized: "Questionnaire")
-            }
+            // The first question's prompt — mirrors the question push body.
+            return pending.params.questions.first?.prompt ?? ""
         }
         return ""
     }

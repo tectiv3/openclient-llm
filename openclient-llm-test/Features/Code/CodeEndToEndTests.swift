@@ -5,8 +5,8 @@
 //  Created by tectiv3 on 05/09/2026.
 //
 
-import XCTest
 @testable import openclient_llm
+import XCTest
 
 /// End-to-end tests for the Code feature (spec C3.1): the real
 /// `CodeServerClient` (URLSession WebSocket transport, no mocks) talks to a
@@ -45,8 +45,8 @@ final class CodeEndToEndTests: XCTestCase {
         // deterministic mock served on the loopback; the child pi is
         // pointed at it through the mirrored models.json.
         let endpoint = try await startE2EServer()
-        self.mockModel = endpoint.mock
-        self.server = endpoint.server
+        mockModel = endpoint.mock
+        server = endpoint.server
         host = endpoint.endpoint.host
         port = endpoint.endpoint.port
         code = endpoint.endpoint.code
@@ -67,7 +67,7 @@ final class CodeEndToEndTests: XCTestCase {
     // MARK: - Helpers
 
     private static let agentSettled: (CodeEvent) -> Bool = { event in
-        if case .event(let stream) = event {
+        if case let .event(stream) = event {
             return stream.name == "agent_settled"
         }
         return false
@@ -84,8 +84,8 @@ final class CodeEndToEndTests: XCTestCase {
             host: host, port: port, code: code,
             pingInterval: pingInterval, pongTimeout: pongTimeout
         )
-        self.client = pair.client
-        self.collector = pair.collector
+        client = pair.client
+        collector = pair.collector
         return (pair.client, pair.collector)
     }
 
@@ -98,10 +98,12 @@ final class CodeEndToEndTests: XCTestCase {
 
         // When / Then — the handshake: helloOk, then state, then history,
         // in that order.
-        guard case .helloOk(let version) = await awaitEvent(
+        guard case let .helloOk(version) = await awaitEvent(
             collector, labeled: "helloOk", timeout: 15,
             matching: {
-                if case .helloOk(let ver) = $0 { return ver == 1 }
+                if case let .helloOk(ver) = $0 {
+                    return ver == 1
+                }
                 return false
             }
         ) else {
@@ -109,10 +111,12 @@ final class CodeEndToEndTests: XCTestCase {
         }
         XCTAssertEqual(version, 1, "protocol version should be 1")
 
-        guard case .state(let session) = await awaitEvent(
+        guard case let .state(session) = await awaitEvent(
             collector, labeled: "state", timeout: 15,
             matching: {
-                if case .state = $0 { return true }
+                if case .state = $0 {
+                    return true
+                }
                 return false
             }
         ) else {
@@ -123,7 +127,9 @@ final class CodeEndToEndTests: XCTestCase {
         guard case .history = await awaitEvent(
             collector, labeled: "history", timeout: 15,
             matching: {
-                if case .history = $0 { return true }
+                if case .history = $0 {
+                    return true
+                }
                 return false
             }
         ) else {
@@ -155,7 +161,7 @@ final class CodeEndToEndTests: XCTestCase {
         _ = await awaitEvent(
             collector, labeled: "agent_start", timeout: 45,
             matching: {
-                if case .event(let stream) = $0 {
+                if case let .event(stream) = $0 {
                     return stream.name == "agent_start"
                 }
                 return false
@@ -170,12 +176,12 @@ final class CodeEndToEndTests: XCTestCase {
         // predicate filters on the prompt text because the handshake already
         // delivered an (empty) history earlier.
         await client.send(.getHistory(cursor: nil))
-        guard case .history(let history) = await awaitEvent(
+        guard case let .history(history) = await awaitEvent(
             collector, labeled: "history after prompt", timeout: 15,
             matching: {
-                if case .history(let hist) = $0 {
+                if case let .history(hist) = $0 {
                     return hist.messages.contains {
-                        if case .user(let text) = $0 {
+                        if case let .user(text) = $0 {
                             return text.contains("PONG-E2E")
                         }
                         return false
@@ -188,7 +194,7 @@ final class CodeEndToEndTests: XCTestCase {
         }
         XCTAssertTrue(
             history.messages.contains {
-                if case .user(let text) = $0 {
+                if case let .user(text) = $0 {
                     return text.contains("PONG-E2E")
                 }
                 return false
@@ -203,21 +209,29 @@ final class CodeEndToEndTests: XCTestCase {
 
         // When
         await client.send(.prompt(text: "ASK"))
-        guard case .question(let question) = await awaitEvent(
+        guard case let .question(question) = await awaitEvent(
             collector, labeled: "question", timeout: 45,
             matching: {
-                if case .question = $0 { return true }
+                if case .question = $0 {
+                    return true
+                }
                 return false
             }
         ) else {
             return XCTFail("question had wrong shape")
         }
-        XCTAssertEqual(question.kind, "question", "kind should be 'question'")
-        XCTAssertTrue(
-            question.params.question.lowercased().contains("color"),
-            "question should mention color, got: \(question.params.question)"
+        XCTAssertEqual(
+            question.kind, "ask_user_question",
+            "kind should be 'ask_user_question'"
         )
-        let options = question.params.options
+        guard let sub = question.params.questions.first else {
+            return XCTFail("an ask carries at least one question")
+        }
+        XCTAssertTrue(
+            sub.prompt.lowercased().contains("color"),
+            "question should mention color, got: \(sub.prompt)"
+        )
+        let options = sub.options
         XCTAssertGreaterThanOrEqual(options.count, 3, "at least 3 options")
         XCTAssertTrue(options.allSatisfy { !$0.label.isEmpty }, "options carry labels")
 
@@ -229,15 +243,21 @@ final class CodeEndToEndTests: XCTestCase {
         await client.send(
             .answer(
                 id: question.id,
-                value: options[2].value,
-                wasCustom: false,
-                index: thirdIndex + 1
+                answers: [
+                    CodeAnswer(
+                        id: sub.id,
+                        value: options[2].resolvedValue,
+                        label: options[2].label,
+                        wasCustom: false,
+                        index: thirdIndex + 1
+                    ),
+                ]
             )
         )
-        guard case .questionResolved(let resolved) = await awaitEvent(
+        guard case let .questionResolved(resolved) = await awaitEvent(
             collector, labeled: "question_resolved", timeout: 10,
             matching: {
-                if case .questionResolved(let res) = $0 {
+                if case let .questionResolved(res) = $0 {
                     return res.id == question.id
                 }
                 return false
@@ -260,10 +280,12 @@ final class CodeEndToEndTests: XCTestCase {
 
         // When
         await client.send(.prompt(text: "ASKFORM"))
-        guard case .questionnaire(let form) = await awaitEvent(
-            collector, labeled: "questionnaire", timeout: 45,
+        guard case let .question(form) = await awaitEvent(
+            collector, labeled: "question (questionnaire)", timeout: 45,
             matching: {
-                if case .questionnaire = $0 { return true }
+                if case .question = $0 {
+                    return true
+                }
                 return false
             }
         ) else {
@@ -271,23 +293,23 @@ final class CodeEndToEndTests: XCTestCase {
         }
         let subQuestions = form.params.questions
         XCTAssertEqual(subQuestions.count, 2, "form should carry two sub-questions")
-        let answers = subQuestions.compactMap { sub -> CodeQuestionnaireAnswer? in
+        let answers = subQuestions.compactMap { sub -> CodeAnswer? in
             guard let option = sub.options.first else { return nil }
-            return CodeQuestionnaireAnswer(
+            return CodeAnswer(
                 id: sub.id,
-                value: option.value,
+                value: option.resolvedValue,
                 label: option.label,
                 wasCustom: false,
                 index: 1
             )
         }
-        await client.send(.answerQuestionnaire(id: form.id, answers: answers))
+        await client.send(.answer(id: form.id, answers: answers))
 
         // Then
-        guard case .questionResolved(let resolved) = await awaitEvent(
+        guard case let .questionResolved(resolved) = await awaitEvent(
             collector, labeled: "questionnaire_resolved", timeout: 10,
             matching: {
-                if case .questionResolved(let res) = $0 {
+                if case let .questionResolved(res) = $0 {
                     return res.id == form.id
                 }
                 return false
@@ -313,7 +335,7 @@ final class CodeEndToEndTests: XCTestCase {
         _ = await awaitEvent(
             collector, labeled: "streaming start", timeout: 45,
             matching: {
-                if case .event(let stream) = $0 {
+                if case let .event(stream) = $0 {
                     return stream.name == "message_update"
                         || stream.name == "message_start"
                 }
@@ -321,10 +343,12 @@ final class CodeEndToEndTests: XCTestCase {
             }
         )
         await client.send(.prompt(text: "rejected"))
-        guard case .error(let serverError) = await awaitEvent(
+        guard case let .error(serverError) = await awaitEvent(
             collector, labeled: "not_idle error", timeout: 5,
             matching: {
-                if case .error(let err) = $0 { return err.code == "not_idle" }
+                if case let .error(err) = $0 {
+                    return err.code == "not_idle"
+                }
                 return false
             }
         ) else {
@@ -367,7 +391,9 @@ final class CodeEndToEndTests: XCTestCase {
         _ = await awaitEvent(
             collector, labeled: "state after ping window", timeout: 10,
             matching: {
-                if case .state = $0 { return true }
+                if case .state = $0 {
+                    return true
+                }
                 return false
             }
         )

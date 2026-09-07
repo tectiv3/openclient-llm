@@ -115,15 +115,28 @@ final class CodeServerClientTests: XCTestCase {
         let task = try XCTUnwrap(transport.lastTask)
 
         // When
-        await sut.send(.answer(id: "q1", value: "yes", wasCustom: false, index: 0))
+        await sut.send(
+            .answer(
+                id: "q1",
+                answers: [
+                    CodeAnswer(
+                        id: "Q1", value: "yes", label: "Yes",
+                        wasCustom: false, index: 1
+                    ),
+                ]
+            )
+        )
 
         // Then
         let frame = try? Self.decodeFrame(try XCTUnwrap(task.lastSentFrame))
         XCTAssertEqual(frame?["type"] as? String, "answer")
         XCTAssertEqual(frame?["id"] as? String, "q1")
-        XCTAssertEqual(frame?["value"] as? String, "yes")
-        XCTAssertEqual(frame?["wasCustom"] as? Bool, false)
-        XCTAssertEqual(frame?["index"] as? Int, 0)
+        let rows = frame?["answers"] as? [[String: Any]] ?? []
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?["id"] as? String, "Q1")
+        XCTAssertEqual(rows.first?["value"] as? String, "yes")
+        XCTAssertEqual(rows.first?["wasCustom"] as? Bool, false)
+        XCTAssertEqual(rows.first?["index"] as? Int, 1)
     }
 
     func test_send_answerWithoutIndex_omitsIndexKey() async throws {
@@ -135,18 +148,29 @@ final class CodeServerClientTests: XCTestCase {
         let task = try XCTUnwrap(transport.lastTask)
 
         // When
-        await sut.send(.answer(
-            id: "q1", value: "custom text", wasCustom: true, index: nil
-        ))
+        await sut.send(
+            .answer(
+                id: "q1",
+                answers: [
+                    CodeAnswer(
+                        id: "Q1", value: "custom text",
+                        label: "custom text", wasCustom: true, index: nil
+                    ),
+                ]
+            )
+        )
 
-        // Then
+        // Then — the unified frame omits a nil index on the row.
         let frame = try? Self.decodeFrame(try XCTUnwrap(task.lastSentFrame))
         XCTAssertEqual(frame?["type"] as? String, "answer")
-        XCTAssertNil(frame?["index"])
-        XCTAssertEqual(frame?["wasCustom"] as? Bool, true)
+        XCTAssertEqual(frame?["id"] as? String, "q1")
+        let row = (frame?["answers"] as? [[String: Any]])?.first ?? [:]
+        XCTAssertEqual(row["value"] as? String, "custom text")
+        XCTAssertEqual(row["wasCustom"] as? Bool, true)
+        XCTAssertNil(row["index"])
     }
 
-    func test_send_answerQuestionnaire_encodesAnswersArray() async throws {
+    func test_send_answer_encodesMultiQuestionAnswersArray() async throws {
         // Given
         let stream = sut.connect(host: "h", port: 1, code: "c")
         // Keep the stream alive for the duration of the test;
@@ -154,20 +178,20 @@ final class CodeServerClientTests: XCTestCase {
         defer { _ = stream }
         let task = try XCTUnwrap(transport.lastTask)
         let answers = [
-            CodeQuestionnaireAnswer(
-                id: "q1", value: "a", label: "A", wasCustom: false, index: 0
+            CodeAnswer(
+                id: "q1", value: "a", label: "A", wasCustom: false, index: 1
             ),
-            CodeQuestionnaireAnswer(
+            CodeAnswer(
                 id: "q2", value: "b", label: "B", wasCustom: true, index: nil
             ),
         ]
 
         // When
-        await sut.send(.answerQuestionnaire(id: "survey", answers: answers))
+        await sut.send(.answer(id: "survey", answers: answers))
 
         // Then
         let frame = try? Self.decodeFrame(try XCTUnwrap(task.lastSentFrame))
-        XCTAssertEqual(frame?["type"] as? String, "answer_questionnaire")
+        XCTAssertEqual(frame?["type"] as? String, "answer")
         XCTAssertEqual(frame?["id"] as? String, "survey")
         let rows = frame?["answers"] as? [[String: Any]] ?? []
         XCTAssertEqual(rows.count, 2)

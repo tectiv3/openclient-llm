@@ -106,16 +106,8 @@ struct CodeSessionView: View {
         .sheet(item: pendingQuestion) { question in
             CodeQuestionModal(
                 question: question,
-                onAnswer: { id, value, wasCustom, index in
-                    viewModel.send(.answer(
-                        id: id, value: value,
-                        wasCustom: wasCustom, index: index
-                    ))
-                },
-                onAnswerQuestionnaire: { id, answers in
-                    viewModel.send(.answerQuestionnaire(
-                        id: id, answers: answers
-                    ))
+                onAnswer: { id, answers in
+                    viewModel.send(.answer(id: id, answers: answers))
                 },
                 onDismiss: {
                     viewModel.send(.abort)
@@ -172,16 +164,8 @@ private extension CodeSessionView {
                     .ignoresSafeArea()
                 CodeQuestionCardView(
                     question: question,
-                    onAnswer: { id, value, wasCustom, index in
-                        viewModel.send(.answer(
-                            id: id, value: value,
-                            wasCustom: wasCustom, index: index
-                        ))
-                    },
-                    onAnswerQuestionnaire: { id, answers in
-                        viewModel.send(.answerQuestionnaire(
-                            id: id, answers: answers
-                        ))
+                    onAnswer: { id, answers in
+                        viewModel.send(.answer(id: id, answers: answers))
                     },
                     onDismiss: {
                         viewModel.send(.abort)

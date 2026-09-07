@@ -62,13 +62,13 @@ final class CodeNotificationTests: XCTestCase {
         XCTAssertEqual(mockNotifications.sendQuestionCount, 1)
     }
 
-    func test_questionnaire_backgrounded_firesQuestionNotificationExactlyOnce() async throws {
+    func test_multiQuestion_backgrounded_firesQuestionNotificationExactlyOnce() async throws {
         // Given
         try await connectAndEstablish()
         sut.isBackgrounded = { true }
 
         // When
-        mockClient.emit(.questionnaire(Self.questionnaire(id: "s1a")))
+        mockClient.emit(.question(Self.multiQuestion(id: "s1a")))
         try await waitUntil {
             self.currentSession()?.pendingQuestion != nil
         }
@@ -223,29 +223,45 @@ final class CodeNotificationTests: XCTestCase {
         CodeQuestion(
             sessionId: sessionId,
             id: id,
-            kind: "question",
+            kind: "ask_user_question",
             params: CodeQuestionParams(
-                question: "Pick one",
-                options: [
-                    CodeQuestionOption(label: "Yes", value: "yes"),
+                questions: [
+                    CodeSubQuestion(
+                        id: "Q1",
+                        label: nil,
+                        prompt: "Pick one",
+                        options: [
+                            CodeQuestionOption(label: "Yes", value: "yes"),
+                        ],
+                        allowOther: nil
+                    ),
                 ]
             )
         )
     }
 
-    private static func questionnaire(id: String) -> CodeQuestionnaire {
-        CodeQuestionnaire(
+    private static func multiQuestion(id: String) -> CodeQuestion {
+        CodeQuestion(
             sessionId: "s1",
             id: id,
-            kind: "questionnaire",
-            params: CodeQuestionnaireParams(
+            kind: "ask_user_question",
+            params: CodeQuestionParams(
                 questions: [
                     CodeSubQuestion(
                         id: "q1",
                         label: nil,
-                        prompt: "Pick one",
+                        prompt: "Which environment?",
                         options: [
                             CodeQuestionOption(label: "A", value: "a"),
+                        ],
+                        allowOther: nil
+                    ),
+                    CodeSubQuestion(
+                        id: "q2",
+                        label: nil,
+                        prompt: "Which size?",
+                        options: [
+                            CodeQuestionOption(label: "B", value: "b"),
                         ],
                         allowOther: nil
                     ),

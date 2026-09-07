@@ -82,8 +82,7 @@ enum CodeClientMessage: Sendable {
     case prompt(text: String)
     case steer(text: String)
     case abort
-    case answer(id: String, value: String, wasCustom: Bool, index: Int?)
-    case answerQuestionnaire(id: String, answers: [CodeQuestionnaireAnswer])
+    case answer(id: String, answers: [CodeAnswer])
     case getState
     case getHistory(cursor: String?)
     case ping
@@ -544,17 +543,8 @@ private extension CodeServerClient {
         case .abort:
             dict["type"] = .string("abort")
 
-        case let .answer(id, value, wasCustom, index):
+        case let .answer(id, answers):
             dict["type"] = .string("answer")
-            dict["id"] = .string(id)
-            dict["value"] = .string(value)
-            dict["wasCustom"] = .bool(wasCustom)
-            if let index {
-                dict["index"] = .int(index)
-            }
-
-        case let .answerQuestionnaire(id, answers):
-            dict["type"] = .string("answer_questionnaire")
             dict["id"] = .string(id)
             if let data = try? encoder.encode(answers),
                let arr = try? decoder.decode(

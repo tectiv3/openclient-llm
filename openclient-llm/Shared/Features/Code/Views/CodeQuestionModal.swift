@@ -13,10 +13,7 @@ struct CodeQuestionModal: View {
     // MARK: - Properties
 
     let question: CodeViewModel.PendingQuestion
-    let onAnswer: (String, String, Bool, Int?) -> Void
-    let onAnswerQuestionnaire: (
-        String, [CodeQuestionnaireAnswer]
-    ) -> Void
+    let onAnswer: (String, [CodeAnswer]) -> Void
     let onDismiss: () -> Void
 
     // MARK: - View
@@ -25,8 +22,7 @@ struct CodeQuestionModal: View {
         NavigationStack {
             CodeQuestionContent(
                 question: question,
-                onAnswer: onAnswer,
-                onAnswerQuestionnaire: onAnswerQuestionnaire
+                onAnswer: onAnswer
             )
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -42,10 +38,10 @@ struct CodeQuestionModal: View {
                 }
             }
             .navigationTitle(title)
-#if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-#endif
-            .accessibilityAddTraits(.isModal)
+            #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+            #endif
+                .accessibilityAddTraits(.isModal)
         }
     }
 }
@@ -54,12 +50,9 @@ struct CodeQuestionModal: View {
 
 private extension CodeQuestionModal {
     var title: String {
-        switch question.kind {
-        case .question:
-            return String(localized: "Question")
-        case .questionnaire:
-            return String(localized: "Questionnaire")
-        }
+        question.params.questions.count > 1
+            ? String(localized: "Questionnaire")
+            : String(localized: "Question")
     }
 }
 
@@ -67,22 +60,28 @@ private extension CodeQuestionModal {
     CodeQuestionModal(
         question: .init(
             id: "q1",
-            kind: .question(CodeQuestionParams(
-                question: "Which authentication method?",
-                options: [
-                    CodeQuestionOption(
-                        label: "OAuth 2.0",
-                        description: "Standard OAuth flow"
-                    ),
-                    CodeQuestionOption(
-                        label: "API Key",
-                        description: "Simple API key auth"
+            params: CodeQuestionParams(
+                questions: [
+                    CodeSubQuestion(
+                        id: "Q1",
+                        label: nil,
+                        prompt: "Which authentication method?",
+                        options: [
+                            CodeQuestionOption(
+                                label: "OAuth 2.0",
+                                description: "Standard OAuth flow"
+                            ),
+                            CodeQuestionOption(
+                                label: "API Key",
+                                description: "Simple API key auth"
+                            ),
+                        ],
+                        allowOther: nil
                     ),
                 ]
-            ))
+            )
         ),
-        onAnswer: { _, _, _, _ in },
-        onAnswerQuestionnaire: { _, _ in },
+        onAnswer: { _, _ in },
         onDismiss: {}
     )
 }

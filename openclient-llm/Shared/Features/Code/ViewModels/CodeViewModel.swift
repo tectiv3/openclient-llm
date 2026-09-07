@@ -25,11 +25,7 @@ final class CodeViewModel {
         case sendSteer(text: String)
         case retryPrompt(id: UUID)
         case abort
-        case answer(id: String, value: String, wasCustom: Bool, index: Int?)
-        case answerQuestionnaire(
-            id: String,
-            answers: [CodeQuestionnaireAnswer]
-        )
+        case answer(id: String, answers: [CodeAnswer])
         case refreshState
         case appDidEnterBackground
         case appWillEnterForeground
@@ -69,12 +65,7 @@ final class CodeViewModel {
 
     struct PendingQuestion: Equatable, Identifiable {
         let id: String
-        let kind: PendingQuestionKind
-    }
-
-    enum PendingQuestionKind: Equatable {
-        case question(CodeQuestionParams)
-        case questionnaire(CodeQuestionnaireParams)
+        let params: CodeQuestionParams
     }
 
     /// Last-used connect credentials, retained in-memory because the pairing
@@ -205,13 +196,8 @@ final class CodeViewModel {
             handleRetryPrompt(id: id)
         case .abort:
             handleAbort()
-        case let .answer(id, value, wasCustom, index):
-            handleAnswer(
-                id: id, value: value,
-                wasCustom: wasCustom, index: index
-            )
-        case let .answerQuestionnaire(id, answers):
-            handleAnswerQuestionnaire(id: id, answers: answers)
+        case let .answer(id, answers):
+            handleAnswer(id: id, answers: answers)
         case .retry:
             handleRetry()
         case .refreshState:
@@ -366,9 +352,6 @@ extension CodeViewModel {
 
         case let .question(question):
             handleQuestionReceived(question)
-
-        case let .questionnaire(questionnaire):
-            handleQuestionnaireReceived(questionnaire)
 
         case let .questionResolved(resolved):
             handleQuestionResolved(resolved)

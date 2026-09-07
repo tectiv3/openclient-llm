@@ -23,7 +23,9 @@ struct CodeModelInfo: Equatable, Sendable, Codable {
     let provider: String
     let id: String
 
-    var name: String { id }
+    var name: String {
+        id
+    }
 }
 
 struct CodeContextUsage: Equatable, Sendable, Codable {
@@ -90,13 +92,13 @@ extension CodeContentBlock: Codable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .text(let text):
+        case let .text(text):
             try container.encode("text", forKey: .type)
             try container.encode(text, forKey: .text)
-        case .thinking(let text):
+        case let .thinking(text):
             try container.encode("thinking", forKey: .type)
             try container.encode(text, forKey: .text)
-        case .toolUse(let toolCallId, let toolName, let args, let output):
+        case let .toolUse(toolCallId, toolName, args, output):
             try container.encode("toolUse", forKey: .type)
             try container.encode(toolCallId, forKey: .toolCallId)
             try container.encode(toolName, forKey: .toolName)
@@ -166,19 +168,19 @@ extension CodeHistoryMessage: Codable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .user(let text):
+        case let .user(text):
             try container.encode("user", forKey: .role)
             try container.encode(text, forKey: .text)
-        case .assistant(let content):
+        case let .assistant(content):
             try container.encode("assistant", forKey: .role)
             try container.encode(content, forKey: .content)
-        case .toolResult(let toolName, let toolCallId, let output, let isError):
+        case let .toolResult(toolName, toolCallId, output, isError):
             try container.encode("toolResult", forKey: .role)
             try container.encode(toolName, forKey: .toolName)
             try container.encode(toolCallId, forKey: .toolCallId)
             try container.encode(output, forKey: .output)
             try container.encode(isError, forKey: .isError)
-        case .compaction(let summary):
+        case let .compaction(summary):
             try container.encode("compaction", forKey: .role)
             try container.encode(summary, forKey: .summary)
         case .unknown:
@@ -196,46 +198,28 @@ struct CodeQuestion: Equatable, Sendable, Codable {
     let params: CodeQuestionParams
 }
 
+/// Unified pending-ask params. One shape for 1..N questions: the server
+/// always wraps questions in an array, so a "single" question is just a
+/// one-element array.
 struct CodeQuestionParams: Equatable, Sendable, Codable {
-    let question: String
-    let description: String?
-    let options: [CodeQuestionOption]
-    let allowOther: Bool?
-
-    init(
-        question: String,
-        description: String? = nil,
-        options: [CodeQuestionOption],
-        allowOther: Bool? = nil
-    ) {
-        self.question = question
-        self.description = description
-        self.options = options
-        self.allowOther = allowOther
-    }
+    let questions: [CodeSubQuestion]
 }
 
 struct CodeQuestionOption: Equatable, Sendable, Codable {
     let label: String
-    let value: String
+    let value: String?
     let description: String?
 
     init(label: String, value: String? = nil, description: String? = nil) {
         self.label = label
-        self.value = value ?? label
+        self.value = value
         self.description = description
     }
-}
 
-struct CodeQuestionnaire: Equatable, Sendable, Codable {
-    let sessionId: String
-    let id: String
-    let kind: String
-    let params: CodeQuestionnaireParams
-}
-
-struct CodeQuestionnaireParams: Equatable, Sendable, Codable {
-    let questions: [CodeSubQuestion]
+    /// Wire default: when the server omits `value`, it equals `label`.
+    var resolvedValue: String {
+        value ?? label
+    }
 }
 
 struct CodeSubQuestion: Equatable, Sendable, Codable, Identifiable {
@@ -244,6 +228,16 @@ struct CodeSubQuestion: Equatable, Sendable, Codable, Identifiable {
     let prompt: String
     let options: [CodeQuestionOption]
     let allowOther: Bool?
+
+    /// Wire default: when the server omits `label`, fall back to `id`.
+    var resolvedLabel: String {
+        label ?? id
+    }
+
+    /// Wire default: when the server omits `allowOther`, it is `true`.
+    var resolvedAllowOther: Bool {
+        allowOther ?? true
+    }
 }
 
 struct CodeQuestionResolved: Equatable, Sendable, Codable {
@@ -291,7 +285,7 @@ struct CodeStreamEvent: Equatable, Sendable, Codable {
             keyedBy: DynamicCodingKey.self
         )
         var remaining: [String: AnyCodableValue] = [:]
-        let reserved: Set<String> = ["type", "sessionId", "name"]
+        let reserved: Set = ["type", "sessionId", "name"]
         for key in allKeys.allKeys where !reserved.contains(key.stringValue) {
             remaining[key.stringValue] = try allKeys.decode(
                 AnyCodableValue.self, forKey: key
@@ -311,9 +305,11 @@ struct CodeStreamEvent: Equatable, Sendable, Codable {
     }
 }
 
-// MARK: - Questionnaire Answer
+// MARK: - Answer
 
-struct CodeQuestionnaireAnswer: Sendable, Codable {
+/// One sub-question's answer inside a unified `answer` frame. A single-
+/// question ask carries exactly one of these.
+struct CodeAnswer: Sendable, Codable {
     let id: String
     let value: String
     let label: String
@@ -360,13 +356,13 @@ extension AnyCodableValue: Codable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         switch self {
-        case .string(let value): try container.encode(value)
-        case .int(let value): try container.encode(value)
-        case .double(let value): try container.encode(value)
-        case .bool(let value): try container.encode(value)
+        case let .string(value): try container.encode(value)
+        case let .int(value): try container.encode(value)
+        case let .double(value): try container.encode(value)
+        case let .bool(value): try container.encode(value)
         case .null: try container.encodeNil()
-        case .array(let value): try container.encode(value)
-        case .object(let value): try container.encode(value)
+        case let .array(value): try container.encode(value)
+        case let .object(value): try container.encode(value)
         }
     }
 }
@@ -379,11 +375,11 @@ struct DynamicCodingKey: CodingKey {
 
     init(stringValue: String) {
         self.stringValue = stringValue
-        self.intValue = nil
+        intValue = nil
     }
 
     init?(intValue: Int) {
-        self.stringValue = String(intValue)
+        stringValue = String(intValue)
         self.intValue = intValue
     }
 }

@@ -16,7 +16,6 @@ enum CodeEvent: Sendable {
     case event(CodeStreamEvent)
     case streamingBuffer(sessionId: String, content: [CodeContentBlock])
     case question(CodeQuestion)
-    case questionnaire(CodeQuestionnaire)
     case questionResolved(CodeQuestionResolved)
     case pong
     case error(CodeServerError)
@@ -67,10 +66,6 @@ extension CodeEvent: Decodable {
         case "question":
             let question = try CodeQuestion(from: decoder)
             self = .question(question)
-
-        case "questionnaire":
-            let questionnaire = try CodeQuestionnaire(from: decoder)
-            self = .questionnaire(questionnaire)
 
         case "question_resolved":
             let resolved = try CodeQuestionResolved(from: decoder)

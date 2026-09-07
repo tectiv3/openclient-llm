@@ -13,10 +13,7 @@ struct CodeQuestionCardView: View {
     // MARK: - Properties
 
     let question: CodeViewModel.PendingQuestion
-    let onAnswer: (String, String, Bool, Int?) -> Void
-    let onAnswerQuestionnaire: (
-        String, [CodeQuestionnaireAnswer]
-    ) -> Void
+    let onAnswer: (String, [CodeAnswer]) -> Void
     let onDismiss: () -> Void
 
     // MARK: - View
@@ -27,8 +24,7 @@ struct CodeQuestionCardView: View {
 
             CodeQuestionContent(
                 question: question,
-                onAnswer: onAnswer,
-                onAnswerQuestionnaire: onAnswerQuestionnaire
+                onAnswer: onAnswer
             )
         }
         .frame(maxWidth: 480)
@@ -62,12 +58,9 @@ private extension CodeQuestionCardView {
     }
 
     var title: String {
-        switch question.kind {
-        case .question:
-            return String(localized: "Question")
-        case .questionnaire:
-            return String(localized: "Questionnaire")
-        }
+        question.params.questions.count > 1
+            ? String(localized: "Questionnaire")
+            : String(localized: "Question")
     }
 }
 
@@ -77,22 +70,28 @@ private extension CodeQuestionCardView {
         CodeQuestionCardView(
             question: .init(
                 id: "q1",
-                kind: .question(CodeQuestionParams(
-                    question: "Which authentication method?",
-                    options: [
-                        CodeQuestionOption(
-                            label: "OAuth 2.0",
-                            description: "Standard OAuth flow"
-                        ),
-                        CodeQuestionOption(
-                            label: "API Key",
-                            description: "Simple API key auth"
+                params: CodeQuestionParams(
+                    questions: [
+                        CodeSubQuestion(
+                            id: "Q1",
+                            label: nil,
+                            prompt: "Which authentication method?",
+                            options: [
+                                CodeQuestionOption(
+                                    label: "OAuth 2.0",
+                                    description: "Standard OAuth flow"
+                                ),
+                                CodeQuestionOption(
+                                    label: "API Key",
+                                    description: "Simple API key auth"
+                                ),
+                            ],
+                            allowOther: nil
                         ),
                     ]
-                ))
+                )
             ),
-            onAnswer: { _, _, _, _ in },
-            onAnswerQuestionnaire: { _, _ in },
+            onAnswer: { _, _ in },
             onDismiss: {}
         )
         .padding(24)
