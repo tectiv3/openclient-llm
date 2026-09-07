@@ -893,7 +893,11 @@ async function runSingleAgent(
 					currentResult.messages.push(event.message as Message);
 					debug(`tool_result_end`);
 					emitUpdate();
-				} else if (type !== "unknown") {
+				} else if (type !== "unknown" && type !== "message_update" && type !== "tool_execution_update") {
+					// Per-event logging is for low-rate lifecycle events only:
+					// message_update / tool_execution_update fire per streaming
+					// chunk and would spam the parent TUI. The activity tracking
+					// above still records them for the stall diagnostic.
 					debug(`event: ${type}`);
 				}
 			};
