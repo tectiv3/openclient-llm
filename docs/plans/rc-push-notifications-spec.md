@@ -218,22 +218,20 @@ machine (env vars remain supported — see config precedence below).
   **Never prompt for key contents** — ask() answers transit the WS and
   land in the pi session transcript, so anything prompted for becomes
   session content; only IDs and a path are ever asked.
-- **Prompt transport** (same dual path as the question extension,
-  `pi-extensions/question/index.ts`):
+- **Prompt transport** (dual path; remote branch uses the unified
+  `ask_user_question` shape — `kind: 'question'` is rejected by the rc
+  server as `unknown_question`):
   - If `rc.isServing() && rc.hasConnectedClients()` →
-    `rc.ask({ kind: 'question', params: { question, options: [],
-    allowOther: true } })`; the answer comes from the connected
-    phone's question modal (free-text entry) as
-    `{ value, wasCustom }`, or `null`.
-  - Otherwise → TUI `ctx.ui.input(title, placeholder)`; returns a
-    string or `undefined`.
-  Both paths surface cancellation as a nullish result. Note on
-  `rc.ask()` cancellation semantics (verified in `index.ts`): it
-  resolves `null` immediately when the server is not serving or no
-  client is connected, and the pending ask is also resolved `null`
-  (with a `question_resolved { by: 'cancelled' }` broadcast) when a new
-  ask supersedes it or the server stops — so a `null` answer always
-  means "cancelled/aborted", never a real value.
+    `rc.ask({ kind: 'ask_user_question', params: { questions: [{ id: 'q1',
+    prompt: title, options: [] }] } })` (free-text entry via the phone's
+    question modal; empty `options` + a typed answer); each answer comes
+    back as `{ id, value, label, wasCustom, index? }`, the flow takes
+    `answers[0]`, or `null` on cancellation/abort. Confirms pass a
+    two-option question (`Yes, continue` / `No, cancel`) and check
+    `value === 'yes'` (custom answers are lowercased first).
+  - Otherwise → TUI `ctx.ui.input(title)`; returns a
+    string or `undefined` (confirm branch: `ctx.ui.confirm`).
+  Both paths surface cancellation as a nullish result.
 - **Validation** (per value, immediately when it arrives; an invalid
   value re-asks the same question, with the precise reason):
   - Team ID and Key ID: exactly 10 alphanumeric characters
@@ -434,8 +432,8 @@ machine (env vars remain supported — see config precedence below).
 - JWT clock skew: 5-min TTL per send means no caching; a clock-skewed pi
   machine would get `InvalidToken` — same failure class as missing config,
   surfaced in the response status.
-- **Locked-phone question gap (closed)**: the question/questionnaire extensions
-  gate remote routing on the rc singleton's `askAvailable()` — serving AND
+- **Locked-phone question gap (closed)**: the ask-user-question extension
+  gates remote routing on the rc singleton's `askAvailable()` — serving AND
   (clients connected OR push sendable) — instead of requiring a connected
   client, so `ask()` still routes with 0 clients whenever a push can actually
   be delivered. "Push sendable" means a registered token AND resolvable APNs
