@@ -107,16 +107,26 @@ extension CodeViewModel {
 
         case "message_start":
             // Transcript content only — does not touch session.isStreaming.
-            // pi also emits `message_start` for the user prompt (role
-            // "user"); those frames are transcript noise — the user item is
-            // the local echo — so only assistant messages open a bubble.
+            // pi emits message_start for every role: assistant opens a
+            // bubble; user renders a transcript item — the only record of a
+            // TUI-typed prompt (no local echo exists), and the server twin
+            // of this device's own echo otherwise (shared append dedupes).
+            // toolResult is covered by tool_execution_* events.
             if case let .object(message)? = event.payload["message"],
-               case let .string(role)? = message["role"],
-               role == "assistant"
+               case let .string(role)? = message["role"]
             {
-                session.items.append(.assistant(
-                    id: UUID(), content: [], isStreaming: true
-                ))
+                switch role {
+                case "assistant":
+                    session.items.append(.assistant(
+                        id: UUID(), content: [], isStreaming: true
+                    ))
+                case "user":
+                    if let text = userText(fromMessage: message) {
+                        appendUserItem(text, to: &session)
+                    }
+                default:
+                    break
+                }
             }
 
         case "message_update":
@@ -241,6 +251,16 @@ private extension CodeViewModel {
     /// from the server history. Returns the trailing user item (existing or
     /// new) so the caller can correlate later send failures with it.
     func appendLocalEcho(
+        _ text: String,
+        to session: inout SessionState
+    ) -> CodeTranscriptItem {
+        appendUserItem(text, to: &session)
+    }
+
+    /// Shared user-item append, deduped against a trailing identical user
+    /// item: a forwarded user frame and its local echo collapse into one
+    /// entry regardless of arrival order.
+    func appendUserItem(
         _ text: String,
         to session: inout SessionState
     ) -> CodeTranscriptItem {
@@ -372,6 +392,41 @@ private extension CodeViewModel {
                 id: id, content: content, isStreaming: true
             )
         }
+    }
+
+    /// Mirrors the server's textFromMessage for user-role frames (string
+    /// shortcuts first, text parts joined with no separator) so the result
+    /// equals what a later history sync would hold for the same message —
+    /// keeps frame/history dedup stable.
+    func userText(
+        fromMessage message: [String: AnyCodableValue]
+    ) -> String? {
+        if case let .string(text)? = message["text"] {
+            return text
+        }
+        if case let .string(text)? = message["content"] {
+            return text
+        }
+        guard case let .array(content)? = message["content"] else {
+            return nil
+        }
+
+        var result = ""
+        for part in content {
+            switch part {
+            case let .string(text):
+                result += text
+            case let .object(part):
+                if case let .string(text)? = part["text"] {
+                    result += text
+                } else if case let .string(text)? = part["content"] {
+                    result += text
+                }
+            default:
+                break
+            }
+        }
+        return result.isEmpty ? nil : result
     }
 
     /// Parses the raw pi assistant `message.content` array carried by a

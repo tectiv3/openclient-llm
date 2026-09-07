@@ -299,13 +299,82 @@ extension CodeViewModelTests {
 
     // MARK: - Tests — message_start role handling
 
-    func test_messageStart_userRoleFrame_doesNotAppendItem() async throws {
-        // Given — the pi agent loop emits message_start for the user
-        // prompt before the assistant message; that frame is noise
+    func test_messageStart_userRoleFrame_withText_appendsUserItem() async throws {
+        // Given — TUI-typed prompt arrives as a forwarded user frame;
+        // no local echo exists for it
+        try await connectAndEstablish()
+
+        // When
+        mockClient.emit(.event(messageStartEvent(
+            role: "user",
+            content: .array([.object([
+                "type": .string("text"),
+                "text": .string("typed in the tui"),
+            ])])
+        )))
+
+        // Then
+        try await waitUntil {
+            self.currentSession()?.items.count == 1
+        }
+        let last = try XCTUnwrap(lastUserItem())
+        XCTAssertEqual(last.text, "typed in the tui")
+        XCTAssertFalse(last.failed)
+    }
+
+    func test_messageStart_userRoleFrame_afterLocalEcho_dedupesToOneItem() async throws {
+        // Given — phone-originated prompt already rendered its echo
+        try await connectAndEstablish()
+        sut.send(.sendPrompt(text: "hi"))
+        let echoId = lastUserItem()?.id
+
+        // When — the forwarded twin of that echo arrives
+        mockClient.emit(.event(messageStartEvent(
+            role: "user",
+            content: .array([.object([
+                "type": .string("text"),
+                "text": .string("hi"),
+            ])])
+        )))
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Then — collapsed into the existing echo, identity preserved
+        XCTAssertEqual(currentSession()?.items.count, 1)
+        XCTAssertEqual(lastUserItem()?.id, echoId)
+    }
+
+    func test_messageStart_userRoleFrame_stringContent_usesContentText() async throws {
+        // Given — server textFromMessage fallback shape: content as string
+        try await connectAndEstablish()
+
+        // When
+        mockClient.emit(.event(messageStartEvent(
+            role: "user", content: .string("plain string content")
+        )))
+
+        // Then
+        try await waitUntil { self.lastUserItem()?.text == "plain string content" }
+    }
+
+    func test_messageStart_userRoleFrame_withoutText_doesNotAppendItem() async throws {
+        // Given — degenerate frame: role but no text payload
         try await connectAndEstablish(isStreaming: true)
 
         // When
         mockClient.emit(.event(messageStartEvent(role: "user")))
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Then
+        XCTAssertEqual(currentSession()?.items.count, 0)
+    }
+
+    func test_messageStart_toolResultRoleFrame_doesNotAppendItem() async throws {
+        // Given — toolResult frames are transcript noise here; tool steps
+        // are driven by tool_execution_* events
+        try await connectAndEstablish(isStreaming: true)
+
+        // When
+        mockClient.emit(.event(messageStartEvent(role: "toolResult")))
         try await Task.sleep(for: .milliseconds(100))
 
         // Then
@@ -347,17 +416,24 @@ extension CodeViewModelTests {
 
     // MARK: - Helpers
 
-    /// Builds a raw pi `message_start` frame. The role gates bubble
-    /// creation: assistant frames open a bubble, user-role frames (the
-    /// prompt echo) do not.
-    func messageStartEvent(role: String) -> CodeStreamEvent {
-        CodeStreamEvent(
+    /// Builds a raw pi `message_start` frame. The role drives handling:
+    /// assistant frames open a bubble, user frames render a transcript
+    /// item (TUI-typed prompts have no local echo), other roles are noise.
+    func messageStartEvent(
+        role: String,
+        content: AnyCodableValue? = nil
+    ) -> CodeStreamEvent {
+        var message: [String: AnyCodableValue] = [
+            "role": .string(role),
+        ]
+        if let content {
+            message["content"] = content
+        }
+        return CodeStreamEvent(
             sessionId: "s1",
             name: "message_start",
             payload: [
-                "message": .object([
-                    "role": .string(role),
-                ]),
+                "message": .object(message),
             ]
         )
     }
