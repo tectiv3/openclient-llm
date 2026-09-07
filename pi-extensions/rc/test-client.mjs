@@ -724,9 +724,9 @@ registerTest(11, "hello_five_bad_codes_triggers_rate_limit", async (ctx) => {
 // (j) token registered but creds missing → local fallback (--no-apns spawn).
 //
 // Push bodies (2026-09-07 decision): finished pushes identify the session
-// (name → cwd basename → fixed fallback), question pushes carry the question's
-// own text (verbatim ≤80 chars; LLM-shortened via the mock when longer, with
-// deterministic hard truncation when the LLM is unreachable).
+// (name → cwd basename → fixed fallback), question pushes carry the first
+// question's prompt (verbatim ≤80 chars; LLM-shortened via the mock when
+// longer, with deterministic hard truncation when the LLM is unreachable).
 //
 // With --no-apns the child is spawned WITHOUT the PI_RC_APNS_* env; the
 // endpoint still runs as a traffic observer and every test asserts zero push
@@ -1046,10 +1046,10 @@ registerTest(12, "push_aborted_turn_sends_no_finished_request", async (ctx) => {
   }
 });
 
-// (b) A remote question (ask() via the question extension, triggered the same
-// way as group 5's ASK flow) must produce one request with the question
-// collapse id, timeSensitive, and the question's own text as the body (short
-// text ships verbatim — the shortening LLM must never be called for it).
+// (b) A remote ask (ask_user_question via the ask extension, triggered the
+// same way as group 5's ASK flow) must produce one request with the question
+// collapse id, timeSensitive, and the first question's prompt as the body
+// (short text ships verbatim — the shortening LLM must never be called for it).
 // Token A from test (a) is still registered (singleton-persistent).
 // (--no-apns: the question still fires and is answerable; zero requests.)
 registerTest(12, "push_question_triggers_time_sensitive_request", async (ctx) => {
@@ -1061,7 +1061,10 @@ registerTest(12, "push_question_triggers_time_sensitive_request", async (ctx) =>
     const mockBefore = mockLlm.requests.length;
     hs.ws.send(JSON.stringify({ type: "prompt", text: "ASK" }));
     const q = await waitForMessage(hs.next, (m) => m?.type === "question", 60_000, "question (LLM round trip)");
-    check(q.kind === "question", `expected kind question, got ${JSON.stringify(q.kind)}`);
+    check(q.kind === "ask_user_question", `expected kind ask_user_question, got ${JSON.stringify(q.kind)}`);
+    const questions = q.params?.questions;
+    check(Array.isArray(questions) && questions.length === 1, `single-question ask must carry exactly 1 question, got ${JSON.stringify(questions)}`);
+    const question = questions[0];
     if (ctx.pushEnabled) {
       await withTimeout(
         waitUntil(() => apns.requests.length > before, APNS_PUSH_TIMEOUT_MS, "question push request"),
@@ -1083,8 +1086,8 @@ registerTest(12, "push_question_triggers_time_sensitive_request", async (ctx) =>
       const body = JSON.parse(req.body);
       check(body.aps?.timeSensitive === true, `question push must set aps.timeSensitive`);
       check(
-        body.aps?.alert?.title === "Agent has a question" && body.aps?.alert?.body === q.params?.question,
-        `short question push must carry the question text verbatim, got ${JSON.stringify(body.aps?.alert)}`,
+        body.aps?.alert?.title === "Agent has a question" && body.aps?.alert?.body === question.prompt,
+        `short question push must carry the first question's prompt verbatim, got ${JSON.stringify(body.aps?.alert)}`,
       );
       check(body.aps?.sound === "default", `question push must carry sound default`);
     }
@@ -1095,9 +1098,10 @@ registerTest(12, "push_question_triggers_time_sensitive_request", async (ctx) =>
       `short question must not call the shortening LLM, got ${mockLlm.requests.length - mockBefore} calls`,
     );
     // Answer it so the agent settles and later tests start idle.
-    hs.ws.send(JSON.stringify({ type: "answer", id: q.id, value: "red", wasCustom: false, index: 1 }));
+    hs.ws.send(JSON.stringify(answerFrame(q, question, question.options[0], 1)));
     const resolved = await waitForMessage(hs.next, (m) => m?.type === "question_resolved" && m.id === q.id, 10_000, "question_resolved");
     check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
+    check(resolved.value === question.options[0].value, `single-question resolution must carry the answer value, got ${JSON.stringify(resolved.value)}`);
     await waitForEventByName(hs.next, "agent_settled", 60_000);
   } finally {
     hs.close();
@@ -1120,8 +1124,8 @@ registerTest(12, "push_long_question_body_llm_shortened", async (ctx) => {
     const mockBefore = mockLlm.requests.length;
     hs.ws.send(JSON.stringify({ type: "prompt", text: "ASKLONG" }));
     const q = await waitForMessage(hs.next, (m) => m?.type === "question", 60_000, "long question (LLM round trip)");
-    check(q.kind === "question", `expected kind question, got ${JSON.stringify(q.kind)}`);
-    const questionText = String(q.params?.question ?? "");
+    check(q.kind === "ask_user_question", `expected kind ask_user_question, got ${JSON.stringify(q.kind)}`);
+    const questionText = String(q.params?.questions?.[0]?.prompt ?? "");
     check(questionText.length > 100, `ASKLONG question must exceed 100 chars, got ${questionText.length}`);
     if (ctx.pushEnabled) {
       await withTimeout(
@@ -1168,7 +1172,7 @@ registerTest(12, "push_long_question_body_llm_shortened", async (ctx) => {
       `LLM user message must be the sanitized question text, got ${JSON.stringify(llmBody.messages?.[1]?.content)}`,
     );
     // Answer it so the agent settles and later tests start idle.
-    hs.ws.send(JSON.stringify({ type: "answer", id: q.id, value: "yes", wasCustom: false, index: 0 }));
+    hs.ws.send(JSON.stringify(answerFrame(q, q.params.questions[0], q.params.questions[0].options[0], 1)));
     const resolved = await waitForMessage(hs.next, (m) => m?.type === "question_resolved" && m.id === q.id, 10_000, "question_resolved");
     check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
     await waitForEventByName(hs.next, "agent_settled", 60_000);
@@ -1198,8 +1202,8 @@ registerTest(12, "push_long_question_body_llm_failure_truncates", async (ctx) =>
     const before = apns.requests.length;
     hs.ws.send(JSON.stringify({ type: "prompt", text: "ASKLONG" }));
     const q = await waitForMessage(hs.next, (m) => m?.type === "question", 60_000, "long question (LLM round trip)");
-    check(q.kind === "question", `expected kind question, got ${JSON.stringify(q.kind)}`);
-    const clean = String(q.params?.question ?? "").replace(/\s+/g, " ").trim();
+    check(q.kind === "ask_user_question", `expected kind ask_user_question, got ${JSON.stringify(q.kind)}`);
+    const clean = String(q.params?.questions?.[0]?.prompt ?? "").replace(/\s+/g, " ").trim();
     check(clean.length > 100, `ASKLONG question must exceed 100 chars, got ${clean.length}`);
     const expected = clean.length <= 100 ? clean : `${clean.slice(0, 99)}…`;
     if (ctx.pushEnabled) {
@@ -1226,7 +1230,7 @@ registerTest(12, "push_long_question_body_llm_failure_truncates", async (ctx) =>
     // repointed the URL away from it).
     check(mockLlm.requests.length === mockBefore, `unreachable LLM test must make no mock calls, got ${mockLlm.requests.length - mockBefore}`);
     // Answer it so the agent settles and later tests start idle.
-    hs.ws.send(JSON.stringify({ type: "answer", id: q.id, value: "yes", wasCustom: false, index: 0 }));
+    hs.ws.send(JSON.stringify(answerFrame(q, q.params.questions[0], q.params.questions[0].options[0], 1)));
     const resolved = await waitForMessage(hs.next, (m) => m?.type === "question_resolved" && m.id === q.id, 10_000, "question_resolved");
     check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
     await waitForEventByName(hs.next, "agent_settled", 60_000);
@@ -1396,15 +1400,22 @@ async function ensureAgentIdle(ctx) {
   const probe = await connectAndVerifyConnectTime(ctx); // consumed hello_ok/state/history
   try {
     const burst = await drainUntilQuiet(probe.next, 700); // last read on this socket
-    const pending = burst.find((m) => m?.type === "question" || m?.type === "questionnaire");
-    if (pending?.type === "question") {
-      probe.ws.send(JSON.stringify({ type: "answer", id: pending.id, value: "red", wasCustom: false, index: 1 }));
-    } else if (pending?.type === "questionnaire") {
+    const pending = burst.find((m) => m?.type === "question");
+    if (pending) {
+      // Unified ask: one answer frame with a row per pending question, each
+      // row answering with the question's first option (cleanup path — the
+      // value just needs to be valid per the wire contract).
       const subs = Array.isArray(pending.params?.questions) ? pending.params.questions : [];
       probe.ws.send(JSON.stringify({
-        type: "answer_questionnaire",
+        type: "answer",
         id: pending.id,
-        answers: subs.map((q, i) => ({ id: q.id, value: `a${i + 1}`, label: `a${i + 1}`, wasCustom: false, index: 1 })),
+        answers: subs.map((q) => ({
+          id: q.id,
+          value: q.options?.[0]?.value ?? "yes",
+          label: q.options?.[0]?.label ?? "yes",
+          wasCustom: false,
+          index: 1,
+        })),
       }));
     } else {
       probe.ws.send(JSON.stringify({ type: "abort" })); // no-op per server if already idle
@@ -1428,7 +1439,7 @@ async function ensureAgentIdle(ctx) {
 // with no WS client anywhere in the flow — connecting one to observe the turn
 // would itself flip hasConnectedClients() and route the ask remote — so the
 // turn's completion is observed on the RPC notification stream instead. The
-// question tool must fall back locally: its "UI not available" error result
+// ask_user_question tool must fall back locally: its "UI not available" error result
 // lands in history (the agent settles without any answer) and zero push
 // traffic reaches the endpoint.
 async function assertAskFallsBackWithZeroClients(ctx) {
@@ -1458,7 +1469,7 @@ async function assertAskFallsBackWithZeroClients(ctx) {
     const messages = history.messages ?? [];
     check(
       messages.some((m) => m?.role === "toolResult" && String(m.output ?? "").includes("UI not available")),
-      `question tool must fall back locally with zero clients (no "UI not available" tool result in history; tail: ${JSON.stringify(messages.slice(-4)).slice(0, 400)})`,
+      `ask_user_question tool must fall back locally with zero clients (no "UI not available" tool result in history; tail: ${JSON.stringify(messages.slice(-4)).slice(0, 400)})`,
     );
   } finally {
     hs.close();
@@ -1551,18 +1562,20 @@ registerTest(12, "ask_locked_phone_zero_clients_pushes_and_redelivers", async (c
   try {
     const q = await waitForMessage(
       b.next,
-      (m) => m?.type === "question" && m?.kind === "question",
+      (m) => m?.type === "question" && m?.kind === "ask_user_question",
       10_000,
       "redelivered question after reconnect",
     );
+    const question = q.params?.questions?.[0];
     check(
-      typeof q.params?.question === "string" && q.params.question.toLowerCase().includes("color"),
-      `question text must mention color, got ${JSON.stringify(q.params?.question)}`,
+      typeof question?.prompt === "string" && question.prompt.toLowerCase().includes("color"),
+      `question text must mention color, got ${JSON.stringify(question?.prompt)}`,
     );
-    assertOptionsShape(q.params?.options, "question", 3);
-    b.ws.send(JSON.stringify({ type: "answer", id: q.id, value: "red", wasCustom: false, index: 1 }));
+    assertOptionsShape(question?.options, "question", 3);
+    b.ws.send(JSON.stringify(answerFrame(q, question, question.options[0], 1)));
     const resolved = await waitForMessage(b.next, (m) => m?.type === "question_resolved" && m.id === q.id, 10_000, "question_resolved");
     check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
+    check(resolved.value === question.options[0].value, `single-question resolution must carry the answer value, got ${JSON.stringify(resolved.value)}`);
     await waitForEventByName(b.next, "agent_settled", 45_000);
   } finally {
     b.close();
@@ -1630,25 +1643,52 @@ registerTest(12, "push_token_uppercase_registration_auto_auths_lowercase", async
 
 // --- groups 5, 6, 7, 8, 9 -------------------------------------------------------
 
-// Group 5: Questions. LLM-dependent: test-project AGENTS.md forces the question/questionnaire tools for the exact prompts ASK/ASKFORM
+// Group 5: Questions. LLM-dependent: test-project AGENTS.md forces the ask_user_question tool for the exact prompts ASK/ASKFORM
 // (~10-30s per round trip, hence 60s waits). Each test chains two LLM waits, so the worst-case total may exceed the 60s framework timeout -> a framework timeout FAIL, by design.
+// The unified wire (2026-09-07 protocol collapse): ONE pending frame type `question` with kind
+// `ask_user_question` and params { questions: [...] } for 1..N questions, answered with ONE frame
+// type `answer` carrying an `answers` array. question_resolved carries `value` only for
+// single-question asks.
 const assertOptionsShape = (options, where, min = 1) => {
   check(Array.isArray(options) && options.length >= min, `${where} needs >= ${min} options`);
   options.forEach((opt, i) => check(nonEmptyString(opt?.label) && nonEmptyString(opt?.value), `${where}.options[${i}] needs label+value`));
 };
+
+// Unified answer frame (2026-09-07 protocol collapse): the client answers any
+// ask — single or multi-question — with ONE `answer` frame whose `answers`
+// array carries a row per question; the row echoes the question id and the
+// chosen option's value/label. `frame` is the pending `question` frame; the
+// harness always answers from the wire values, never from assumed literals.
+const answerFrame = (frame, question, option, index = 1) => ({
+  type: "answer",
+  id: frame.id,
+  answers: [
+    {
+      id: question.id,
+      value: option.value,
+      label: option.label,
+      wasCustom: false,
+      index,
+    },
+  ],
+});
 
 registerTest(5, "ask_triggers_question_and_answer_resolves", async (ctx) => {
   requireAuth(ctx);
   await withConnection(ctx, async ({ ws, next }) => {
     ws.send(JSON.stringify({ type: "prompt", text: "ASK" }));
     const q = await waitForMessage(next, (m) => m?.type === "question", 60_000, "question (LLM round trip)");
-    check(q.kind === "question", `expected kind question, got ${JSON.stringify(q.kind)}`);
-    check(typeof q.params?.question === "string" && q.params.question.toLowerCase().includes("color"),
-      `question text must mention color, got ${JSON.stringify(q.params?.question)}`);
-    assertOptionsShape(q.params?.options, "question", 3);
-    ws.send(JSON.stringify({ type: "answer", id: q.id, value: "red", wasCustom: false, index: 1 }));
+    check(q.kind === "ask_user_question", `expected kind ask_user_question, got ${JSON.stringify(q.kind)}`);
+    const questions = q.params?.questions;
+    check(Array.isArray(questions) && questions.length === 1, `single-question ask must carry exactly 1 question, got ${JSON.stringify(questions)}`);
+    const question = questions[0];
+    check(typeof question?.prompt === "string" && question.prompt.toLowerCase().includes("color"),
+      `question text must mention color, got ${JSON.stringify(question?.prompt)}`);
+    assertOptionsShape(question?.options, "question", 3);
+    ws.send(JSON.stringify(answerFrame(q, question, question.options[0], 1)));
     const resolved = await waitForMessage(next, (m) => m?.type === "question_resolved" && m.id === q.id, 10_000, "question_resolved");
     check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
+    check(resolved.value === question.options[0].value, `single-question resolution must carry the answer value, got ${JSON.stringify(resolved.value)}`);
     await waitForEventByName(next, "agent_settled", 60_000); // tool returned; agent replies -> idle again
   });
 });
@@ -1666,9 +1706,9 @@ registerTest(5, "question_survives_disconnect_and_is_redelivered", async (ctx) =
   await sleep(1000);
   const b = await connectAndVerifyConnectTime(ctx);
   try {
-    // The connect burst must re-deliver the SAME pending question (same id, kind question).
-    await waitForMessage(b.next, (m) => m?.type === "question" && m?.kind === "question" && m.id === questionId, 10_000, "re-delivered question");
-    b.ws.send(JSON.stringify({ type: "answer", id: questionId, value: "green", wasCustom: false, index: 2 }));
+    // The connect burst must re-deliver the SAME pending question (same id, kind ask_user_question).
+    const q = await waitForMessage(b.next, (m) => m?.type === "question" && m?.kind === "ask_user_question" && m.id === questionId, 10_000, "re-delivered question");
+    b.ws.send(JSON.stringify(answerFrame(q, q.params.questions[0], q.params.questions[0].options[1], 2)));
     const resolved = await waitForMessage(b.next, (m) => m?.type === "question_resolved" && m.id === questionId, 10_000, "question_resolved");
     check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
     await waitForEventByName(b.next, "agent_settled", 60_000);
@@ -1686,9 +1726,10 @@ registerTest(5, "two_clients_first_answer_wins", async (ctx) => {
       const qA = await waitForMessage(next, (m) => m?.type === "question", 60_000, "question on A (LLM round trip)");
       // B must observe the SAME question (same id): broadcast to all clients.
       await waitForMessage(b.next, (m) => m?.type === "question" && m.id === qA.id, 60_000, "question on B (same id)");
-      ws.send(JSON.stringify({ type: "answer", id: qA.id, value: "blue", wasCustom: false, index: 3 }));
+      const question = qA.params?.questions?.[0];
+      ws.send(JSON.stringify(answerFrame(qA, question, question.options[2], 3)));
       const resA = await waitForMessage(next, (m) => m?.type === "question_resolved" && m.id === qA.id, 10_000, "question_resolved on A");
-      check(resA.by === "client" && resA.value === "blue", `A resolution mismatch: ${JSON.stringify(resA)}`);
+      check(resA.by === "client" && resA.value === question.options[2].value, `A resolution mismatch: ${JSON.stringify(resA)}`);
       const resB = await waitForMessage(b.next, (m) => m?.type === "question_resolved" && m.id === qA.id, 10_000, "question_resolved on B");
       check(resB.by === "client", `B must receive the same resolution broadcast, got ${JSON.stringify(resB)}`);
       await waitForEventByName(next, "agent_settled", 60_000);
@@ -1698,23 +1739,30 @@ registerTest(5, "two_clients_first_answer_wins", async (ctx) => {
   });
 });
 
-registerTest(5, "askform_triggers_questionnaire_and_answer_resolves", async (ctx) => {
+registerTest(5, "askform_triggers_multi_question_ask_and_answers_resolve", async (ctx) => {
   requireAuth(ctx);
   await withConnection(ctx, async ({ ws, next }) => {
     ws.send(JSON.stringify({ type: "prompt", text: "ASKFORM" }));
-    const qf = await waitForMessage(next, (m) => m?.type === "questionnaire", 60_000, "questionnaire (LLM round trip)");
-    check(qf.kind === "questionnaire", `expected kind questionnaire, got ${JSON.stringify(qf.kind)}`);
+    const qf = await waitForMessage(next, (m) => m?.type === "question" && m?.kind === "ask_user_question", 60_000, "multi-question ask (LLM round trip)");
     const subs = qf.params?.questions;
-    check(Array.isArray(subs) && subs.length === 2, "questionnaire must have exactly 2 questions");
+    check(Array.isArray(subs) && subs.length === 2, "multi-question ask must have exactly 2 questions");
     check(subs.map((s) => s?.id).join(",") === "q1,q2", `expected ids q1,q2, got ${JSON.stringify(subs.map((s) => s?.id))}`);
     // every sub-question needs a prompt + its options
     subs.forEach((s, i) => { check(nonEmptyString(s?.prompt), `questions[${i}] needs a prompt`); assertOptionsShape(s?.options, `questions[${i}]`, 2); });
-    ws.send(JSON.stringify({ type: "answer_questionnaire", id: qf.id, answers: [
-      { id: "q1", value: "red", label: "red", wasCustom: false, index: 1 },
-      { id: "q2", value: "M", label: "M", wasCustom: false, index: 2 },
-    ] }));
-    const resolved = await waitForMessage(next, (m) => m?.type === "question_resolved" && m.id === qf.id, 10_000, "questionnaire resolved");
+    // ONE unified answer frame: a row per sub-question, echoing each id and the
+    // chosen option's value/label (wire values, not assumed literals).
+    const [q1, q2] = subs;
+    ws.send(JSON.stringify({
+      type: "answer",
+      id: qf.id,
+      answers: [
+        { id: q1.id, value: q1.options[0].value, label: q1.options[0].label, wasCustom: false, index: 1 },
+        { id: q2.id, value: q2.options[1].value, label: q2.options[1].label, wasCustom: false, index: 2 },
+      ],
+    }));
+    const resolved = await waitForMessage(next, (m) => m?.type === "question_resolved" && m.id === qf.id, 10_000, "multi-question resolved");
     check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
+    check(resolved.value === undefined, `multi-question resolution must NOT carry a value, got ${JSON.stringify(resolved.value)}`);
     await waitForEventByName(next, "agent_settled", 60_000);
   });
 });
@@ -1736,11 +1784,10 @@ registerTest(5, "ask_signal_already_aborted_resolves_null_and_broadcasts_cancell
     );
     const q = await waitForMessage(
       next,
-      (m) => m?.type === "question" && m?.params?.question === "rc signal probe",
+      (m) => m?.type === "question" && m?.kind === "ask_user_question" && m?.params?.questions?.[0]?.prompt === "rc signal probe",
       10_000,
       "probe question",
     );
-    check(q.kind === "question", `expected kind question, got ${JSON.stringify(q.kind)}`);
     const resolved = await waitForMessage(next, (m) => m?.type === "question_resolved" && m.id === q.id, 10_000, "question_resolved");
     check(resolved.by === "cancelled", `expected by cancelled, got ${JSON.stringify(resolved.by)}`);
   });
@@ -1756,16 +1803,16 @@ registerTest(5, "ask_signal_aborted_mid_wait_resolves_null_and_late_answer_is_un
     );
     const q = await waitForMessage(
       next,
-      (m) => m?.type === "question" && m?.params?.question === "rc signal probe",
+      (m) => m?.type === "question" && m?.kind === "ask_user_question" && m?.params?.questions?.[0]?.prompt === "rc signal probe",
       15_000,
       "probe question",
     );
-    check(q.kind === "question", `expected kind question, got ${JSON.stringify(q.kind)}`);
+    const question = q.params?.questions?.[0];
     const resolved = await waitForMessage(next, (m) => m?.type === "question_resolved" && m.id === q.id, 15_000, "question_resolved");
     check(resolved.by === "cancelled", `expected by cancelled, got ${JSON.stringify(resolved.by)}`);
     // The pending ask is gone: an answer for the cancelled id must be
     // rejected with unknown_question (and the connection stays open).
-    ws.send(JSON.stringify({ type: "answer", id: q.id, value: "yes", wasCustom: false, index: 1 }));
+    ws.send(JSON.stringify(answerFrame(q, question, question.options[0], 1)));
     const err = await waitForMessage(
       next,
       (m) => m?.type === "error" && m.code === "unknown_question",
