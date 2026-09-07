@@ -1222,7 +1222,12 @@ function buildRcInspectReport(state: RcSingleton): string {
     lines.push(`mode: ${mode}`)
     if (state.server && state.host && state.code) {
         const clients = connectedClientCount(state)
-        lines.push(`serving: ws://${state.host}:${state.port} code ${state.code}`)
+        // The pairing code is human-only knowledge (typed on the phone
+        // keypad): the full secret must never land in LLM context, where a
+        // prompt-injected agent with network access could read host:port:code
+        // and pair a rogue client. Agents can check status without it.
+        const maskedCode = `•••${state.code.slice(-2)}`
+        lines.push(`serving: ws://${state.host}:${state.port} code ${maskedCode}`)
         lines.push(`clients: ${clients === 0 ? 'none' : String(clients)}`)
     } else {
         lines.push('serving: no')

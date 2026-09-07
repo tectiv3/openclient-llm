@@ -331,7 +331,7 @@ export function closeApns(): void {
     }
 }
 
-export function finishedPayload(sessionId: string, body = 'Agent finished'): JsonObject {
+export function finishedPayload(sessionId: string, body: string): JsonObject {
     return {
         aps: {
             alert: { title: 'Agent finished', body },
@@ -341,10 +341,7 @@ export function finishedPayload(sessionId: string, body = 'Agent finished'): Jso
     }
 }
 
-export function questionPayload(
-    sessionId: string,
-    body = 'Agent has a question — answer needed'
-): JsonObject {
+export function questionPayload(sessionId: string, body: string): JsonObject {
     return {
         aps: {
             alert: { title: 'Agent has a question', body },
@@ -356,7 +353,7 @@ export function questionPayload(
 }
 
 // Bodies are built by title.ts: session identity (name/cwd basename, never
-// agent text) for finished/test pushes, and the question's own capped,
+// agent text) for finished pushes, and the question's own capped,
 // sanitized text for question pushes — the documented 2026-09-07 relaxation.
 // Everything else in the payload is fixed server-side strings, so a verbose
 // or compromised agent cannot place arbitrary session content on a lock

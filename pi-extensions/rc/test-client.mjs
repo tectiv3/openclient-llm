@@ -8,7 +8,11 @@
  * auth file) is the thing under test.
  *
  * Usage:
- *   node test-client.mjs [--only 1,3] [--keep-tmp] [--fast] [--no-apns]
+ *   node test-client.mjs [--only 1,3|name-substr] [--list] [--keep-tmp] [--fast] [--no-apns]
+ *
+ * Caveat: tests share singleton state (tokens, lockout), so filtering out
+ * prerequisite tests can make state-dependent tests fail — filtering is a
+ * debugging tool.
  *
  * Groups 0-11 cover the rc WS protocol (spec: rc-remote-control-spec.md, C2).
  * Group 12 covers APNs push (spec: docs/plans/rc-push-notifications-spec.md,
@@ -70,17 +74,30 @@ const TEST_PROJECT_SRC = join(HERE, "test-project");
 // --- arg parsing -----------------------------------------------------------------
 
 function parseArgs(argv) {
+  // --list short-circuits before any --only validation: it only needs the registry.
+  if (argv.includes("--list")) {
+    for (const test of [...tests].sort((a, b) => a.group - b.group)) {
+      console.log(`group ${test.group} — ${test.name}`);
+    }
+    process.exit(0);
+  }
   const opts = { only: null, keepTmp: false, fast: false, noApns: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--only") {
       const spec = argv[(i += 1)] ?? "";
-      const groups = spec.split(",").map((part) => Number.parseInt(part, 10));
-      if (groups.some((n) => Number.isNaN(n))) {
-        console.error(`bad --only value: ${JSON.stringify(spec)} (expected comma-separated group numbers)`);
+      const parts = spec.split(",");
+      if (parts.some((part) => part === "")) {
+        console.error(`bad --only value: ${JSON.stringify(spec)} (expected comma-separated group numbers or test-name substrings)`);
         process.exit(2);
       }
-      opts.only = groups;
+      const groups = new Set();
+      const names = [];
+      for (const part of parts) {
+        if (/^\d+$/.test(part)) groups.add(Number.parseInt(part, 10));
+        else names.push(part.toLowerCase()); // substring match is case-insensitive
+      }
+      opts.only = { groups, names };
     } else if (arg === "--keep-tmp") {
       opts.keepTmp = true;
     } else if (arg === "--fast") {
@@ -459,7 +476,7 @@ class Skip {
 
 // --- test definitions ----------------------------------------------------------------
 
-// Group 0: setup smoke tests. Run regardless of --only; must pass before group 1-10 is meaningful.
+// Group 0: setup smoke tests. Subject to --only like every other group; must pass before group 1-10 is meaningful.
 
 registerTest(0, "rc_toggle_on_reports_auth_file", async (ctx) => {
   ctx.auth = await ctx.toggleRcOn();
@@ -996,6 +1013,34 @@ registerTest(12, "push_agent_settled_sends_one_valid_request", async (ctx) => {
     check(body.aps?.sound === "default", `finished push must carry sound default`);
     check(body.aps?.["thread-id"] === sessionId, `thread-id must be the session id, got ${body.aps?.["thread-id"]}`);
     check(!JSON.stringify(body).includes("PONG-12A"), `push payload must not contain prompt text`);
+  } finally {
+    hs.close();
+  }
+});
+
+// (a-abort) THE abort-gate pin: with a token registered (test (a) just
+// registered APNS_TOKEN_A) and push enabled, an aborted turn must fire NO
+// finished push. The natural-settle conversions in the other group-12 tests
+// are accommodations for the gate, not coverage of it — this test is the pin.
+// If the gate's message_end/stopReason tracking (index.ts trackEvent) is
+// dropped or reordered, this zero-assertion must fail.
+// (--no-apns: mirror the !ctx.pushEnabled branches — zero requests overall.)
+registerTest(12, "push_aborted_turn_sends_no_finished_request", async (ctx) => {
+  const apns = ctx.apns;
+  const hs = await connectAndVerifyConnectTime(ctx);
+  try {
+    const before = apns.requests.length;
+    hs.ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+    await waitForEventByName(hs.next, "message_update", 15_000);
+    hs.ws.send(JSON.stringify({ type: "abort" }));
+    await waitForEventByName(hs.next, "agent_settled", 20_000);
+    await sleep(1_500); // quiet window: a (buggy) push would land here
+    const finished = apns.requests.slice(before).filter((r) => r.headers["apns-collapse-id"] === "rc-finished");
+    if (!ctx.pushEnabled) {
+      check(apns.requests.length === before, `push disabled, expected zero requests overall, got ${apns.requests.length - before}`);
+    } else {
+      check(finished.length === 0, `aborted turn must not push (abort gate), got ${finished.length} rc-finished requests`);
+    }
   } finally {
     hs.close();
   }
@@ -1978,8 +2023,15 @@ async function main() {
   };
 
   const results = [];
-  const byGroup = (g) => tests.filter((t) => t.group === g);
-  const groupOrder = [0, ...Array.from({ length: 12 }, (_, i) => i + 1).filter((g) => opts.only === null || opts.only.includes(g))];
+  // Single filter predicate shared by group selection and the per-test loop: a
+  // test runs iff no filter is active, its group is selected, or its name
+  // matches a --only substring (case-insensitive).
+  const matches = (test) =>
+    opts.only === null ||
+    opts.only.groups.has(test.group) ||
+    opts.only.names.some((name) => test.name.toLowerCase().includes(name));
+  const byGroup = (g) => tests.filter((t) => t.group === g && matches(t));
+  const groupOrder = [...new Set(tests.filter(matches).map((t) => t.group))].sort((a, b) => a - b);
 
   for (const group of groupOrder) {
     // Group 11's bad-code hellos lock out this host for 60 s (RATE_LIMIT_LOCK_MS),
@@ -2011,7 +2063,9 @@ async function main() {
   const passed = results.filter((r) => r.status === "pass").length;
   const failed = results.filter((r) => r.status === "fail").length;
   const skipped = results.filter((r) => r.status === "skip").length;
-  console.log(`${passed} passed, ${failed} failed, ${skipped} skipped`);
+  // Filtered-out tests never run, so they affect neither results nor the exit code.
+  const filtered = opts.only === null ? "" : `, ${tests.filter((t) => !matches(t)).length} filtered`;
+  console.log(`${passed} passed, ${failed} failed, ${skipped} skipped${filtered}`);
 
   await cleanup();
   // A group-0 smoke test IS the setup check for its area (the /rc toggle):

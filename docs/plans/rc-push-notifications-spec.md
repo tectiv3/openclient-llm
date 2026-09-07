@@ -168,7 +168,7 @@ the session is connected (covers token arrival/refresh mid-session).
     user-controlled text in any push payload" is DELIBERATELY RELAXED for
     question pushes only — a question push without the question text is
     near-useless on a lock screen. Exposure is bounded: question text only
-    (never agent prose), capped at 100 chars, control-char-free,
+    (never agent prose), capped at 100 chars, control/format-char-free,
     whitespace-sanitized. Finished pushes keep the invariant: the session
     name and cwd basename are pi-side metadata, not agent/user text.
   - **Shortening LLM (question pushes only, only when text >80 chars)**:

@@ -31,20 +31,26 @@ export type TitleState = {
     } | null
 }
 
-// Strips control characters (C0 incl. \n\t\r, plus DEL) and collapses every
-// whitespace run to a single space, so no body can smuggle line breaks or
-// exotic spacing to the lock screen.
+// Strips control characters (C0 incl. \n\t\r, plus DEL) and format
+// characters (Cf: bidi overrides like U+202E RLO — a lock-screen spoofing
+// vector, ZWJ, soft hyphen), and collapses every whitespace run to a single
+// space, so no body can smuggle line breaks, exotic spacing, or reversed-
+// rendering tricks to the lock screen.
 export function sanitizeBodyText(text: string): string {
     return text
-        .replace(/\p{Cc}/gu, '')
+        .replace(/[\p{Cc}\p{Cf}]/gu, '')
         .replace(/\s+/g, ' ')
         .trim()
 }
 
-// Deterministic cap: `max` characters including a trailing ellipsis.
+// Deterministic cap: `max` code points including a trailing ellipsis.
+// Slices by code point, never UTF-16 unit — a cut mid-surrogate-pair (emoji)
+// would ship a lone surrogate (mojibake, or a possibly APNs-rejected JSON
+// escape) to the lock screen.
 export function hardTruncate(text: string, max = HARD_TRUNCATE_MAX): string {
-    if (text.length <= max) return text
-    return `${text.slice(0, max - 1)}…`
+    const cps = [...text]
+    if (cps.length <= max) return text
+    return `${cps.slice(0, max - 1).join('')}…`
 }
 
 export function finishedBody(state: TitleState): string {
@@ -63,7 +69,12 @@ export function questionBody(text: string | null | undefined): Promise<string> {
     const clean = typeof text === 'string' ? sanitizeBodyText(text) : ''
     if (!clean) return Promise.resolve(QUESTION_FALLBACK)
     if (clean.length <= SHORT_BODY_MAX) return Promise.resolve(clean)
-    return shortenWithLlm(clean).then(shortened => shortened ?? hardTruncate(clean))
+    // Cap the LLM input at the first 300 code points: bounds egress for
+    // pathological multi-KB questions — 300 is ample context for a ≤60-char
+    // summary. The truncation fallback keeps using the full sanitized text.
+    return shortenWithLlm([...clean].slice(0, 300).join('')).then(
+        shortened => shortened ?? hardTruncate(clean)
+    )
 }
 
 // Env is read per call (not at module load) so the test harness can flip the
