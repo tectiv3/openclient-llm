@@ -398,103 +398,62 @@ The buffer represents a single assistant message in progress. Multi-message turn
 
 ### A5. Remote-aware questions
 
-The `question` and `questionnaire` extensions are forked into this repo:
-- `pi-extensions/question/index.ts` — copy of `~/.pi/agent/extensions/question/index.ts`
-- `pi-extensions/questionnaire/index.ts` — copy of `~/.pi/agent/extensions/questionnaire/index.ts`
+> Updated 2026-09-07: consolidated to the unified `ask_user_question` protocol;
+> the previous two-extension design (forked `question/` + `questionnaire/`,
+> `kind: "question"` routing sketch, per-kind answer shapes) is superseded.
+> This section now describes the shipped design.
 
-Symlinked: `~/.pi/agent/extensions/question` → `<repo>/pi-extensions/question/`,
-`~/.pi/agent/extensions/questionnaire` → `<repo>/pi-extensions/questionnaire/`.
+**One tool: `ask_user_question`** (`pi-extensions/ask-user-question/index.ts`) —
+replaces the deleted `question/` and `questionnaire/` extensions. Single- and
+multi-question in one schema: `{questions: [...]}`, each question
+`{id?, label?, prompt, options: [{label, value?, description?}], allowOther?}`
+(`id`/`label` default to `Q${i+1}`, option `value` defaults to `label`,
+`allowOther` defaults true). TUI rendering: single question = simple option
+list; multiple = tabbed pages. The tool normalizes defaults once up front; every
+later consumer (remote params, TUI, result details) uses the normalized array.
 
-**Modification — remote-first with TUI fallback (final design):**
+**Remote relaying (rc singleton).** The tool looks up the rc singleton on
+`globalThis[Symbol.for("pi-rc")]` through a structural `rcRemote()` guard that
+requires BOTH `askAvailable` AND `ask` to be functions — a stale pre-`askAvailable`
+singleton surviving `/reload` falls through to the local prompt instead of
+throwing (no import of rc; see INV3 in
+`specs/pi-extensions-remote-ask.instructions.md`). The routing gate is
+`rc.askAvailable()`: the server is serving AND (clients are connected OR the
+push is sendable — a registered device token plus resolved APNs credentials).
+Routing therefore also happens with ZERO connected clients when the push is
+sendable (the locked-phone case; see docs/plans/rc-push-notifications-spec.md),
+and the question push (fired inside `rc.ask()`) wakes the phone.
 
-The routing gate is `rc.askAvailable()`: the server is serving AND (clients are
-connected OR the push is sendable — a registered device token plus resolved APNs
-credentials). Routing therefore also happens with ZERO connected clients when
-the push is sendable (the locked-phone case; see
-docs/plans/rc-push-notifications-spec.md), and the question push wakes the
-phone.
+Wire frames (one set for 1..N questions):
 
-In TUI mode the routing is non-blocking: a wait panel
-("Question sent to remote client(s)." / "Press Esc to answer locally.") is
-shown via `ctx.ui.custom()`, and an `AbortSignal` (from an `AbortController`)
-is passed to `rc.ask()` (`ask()` takes an optional `signal`, an internal
-pi-extension API, not part of the wire protocol). Esc aborts the signal, the
-singleton cancels the pending ask (broadcasting `question_resolved` with
-`by: "cancelled"`) and resolves `null`. ANY `null` — Esc, `/rc` toggle-off, or
-all clients disconnected — falls through in TUI mode to the normal local TUI
-prompt, which then runs as usual. In non-TUI modes (RPC/JSON) the ask is made
-without a signal and a `null` returns the "User cancelled" tool result.
+- **Pending** (server → all clients, `rc/index.ts:233-245`):
+  `{type: "question", sessionId, id, kind: "ask_user_question", params: {questions}}`
+  — server-generated 8-hex `id`; the old `question`/`questionnaire` kinds are
+  gone; pending asks are stored in the singleton's registry and re-delivered to
+  new/reconnecting clients on `hello_ok`.
+- **Answer** (client → server, `rc/index.ts:568-599`): `{type: "answer", id,
+  answers: [{id, value, label, wasCustom, index?}]}` — one entry per question,
+  `id` matching the question's id; first client wins.
+- **Resolution broadcast**: `question_resolved {id, by: "client", value?}` —
+  `value` included for single-question asks only (the answer's value, so the
+  Swift transcript can display it); omitted for multi-question asks and for
+  cancellations (`by: "cancelled"`).
 
-Add import: `import { uuidv7 } from "@earendil-works/pi-ai";`
+**TUI behavior (local vs remote).** In TUI mode the remote ask is non-blocking:
+the tool opens a wait panel via `ctx.ui.custom()` ("Question(s) sent to remote
+client(s)." / "Press Esc to answer locally.") and passes an `AbortController`'s
+signal to `rc.ask()` (`signal` is an internal pi-extension API, not part of the
+wire protocol). Esc aborts the signal, the singleton cancels the pending ask
+(broadcasting `question_resolved` with `by: "cancelled"`) and resolves `null`.
+ANY `null` — Esc, `/rc` toggle-off, or all clients disconnected — falls through
+in TUI mode to the normal local TUI prompt, which then runs as usual. In non-TUI
+modes (RPC/JSON) the ask is made without a wait panel and a `null` returns the
+"User cancelled the question" tool result — the ask is final there, there is no
+local fallback. With no rc singleton at all, non-TUI modes error out ("UI not
+available").
 
-At the top of `execute()`, before the `ctx.mode !== "tui"` check:
-
-```typescript
-const RC_KEY = Symbol.for("pi-rc");
-const rc = globalThis[RC_KEY];
-if (rc?.hasConnectedClients()) {
-  // Route to remote — TUI shows wait status with Esc escape hatch
-  const result = await rc.ask({
-    id: uuidv7(),
-    kind: "question",
-    params,
-    // signal allows TUI Esc to cancel the remote wait
-    signal: ctx.mode === "tui" ? await showRemoteWaitUI(ctx) : undefined,
-  });
-  if (result !== null) {
-    // Remote client answered — build return matching tool's expected shape
-    const simpleOptions = params.options.map((o) => o.label);
-    const text = result.wasCustom
-      ? `User wrote: ${result.value}`
-      : `User selected: ${result.index}. ${result.value}`;
-    return {
-      content: [{ type: "text", text }],
-      details: {
-        question: params.question,
-        options: simpleOptions,
-        answer: result.value,
-        wasCustom: result.wasCustom,
-      },
-    };
-  }
-  // null = cancelled (Esc), all clients disconnected, or /rc toggled off
-  // → fall through to normal TUI prompt below
-}
-```
-
-For `questionnaire`, the pattern is identical but `result.answers` is
-`[{id, value, label, wasCustom, index?}]` and the return shape matches
-`QuestionnaireResult`.
-
-`showRemoteWaitUI(ctx)` displays a non-blocking `ctx.ui.custom()` status panel
-("Waiting for remote answer... Esc to answer locally") and returns an `AbortSignal`
-that fires when Esc is pressed. Implementation detail for Task 2.
-
-The `ask` function is exposed by the rc singleton on `globalThis[Symbol.for("pi-rc")]`:
-- Checks `hasConnectedClients()` before awaiting (caller checks too, but
-  defensive)
-- Broadcasts `question`/`questionnaire` to all connected clients
-- Returns a `Promise<Answer | null>` — resolves with the answer (first client wins)
-  or `null` (signal aborted / all clients disconnected / `/rc` toggled off / pi exit)
-- Pending asks are stored in the singleton's registry; re-delivered to
-  new/reconnecting clients
-- **Answer shape** for `question`: `{value: string, wasCustom: boolean, index?: number}`
-- **Answer shape** for `questionnaire`: `{answers: [{id, value, label, wasCustom, index?}]}`
-
-No event bus needed — the question extensions access the rc singleton directly via
+No event bus needed — the tool accesses the rc singleton directly via
 `globalThis[Symbol.for("pi-rc")]`.
-
-> **Correction to the draft (Task 2, implemented):** the implementation deviates
-> from the sketch above in the following ways. (1) The question `id` is generated
-> server-side in `rc.ask()` (`crypto.randomBytes(4).toString("hex")`); the
-> caller does not pass one (`uuidv7` is not imported). (2) The Esc escape hatch
-> is implemented without a `showRemoteWaitUI` API: the tool itself opens the
-> non-blocking wait panel via `ctx.ui.custom()` and passes the
-> `AbortController`'s signal to `rc.ask()`; Esc aborts the remote ask and the
-> local TUI prompt runs (final design above). (3) `ask()` resolves `null`
-> ("cancelled") when the ask is aborted, the server stops, or `/rc` toggles off.
-> Note that zero connected clients does NOT force the local path: when the
-> push is sendable, the ask routes remote with zero clients (locked-phone case)
 
 ### A6. Heartbeat
 
@@ -624,7 +583,9 @@ mirroring existing feature layout). Tests in `openclient-llm-test/Features/Code/
   for that `id`, auto-dismiss it. If `by: "cancelled"`, no transcript trace. If
   `by: "client"`, show a resolved card in transcript with the answer value.
 
-**File length**: Split via extensions to stay under SwiftLint's 500-line limit:
+**File length**: Accepted target: files ≤ 650 lines (the SwiftLint error
+threshold — `.swiftlint.yml` sets `file_length` warning 500 / error 650; 500 is
+a soft warning). Split via partials, preferred:
 - `CodeViewModel.swift` — state, events, connection lifecycle
 - `CodeViewModel+Messages.swift` — history/event → view model item mapping
 - `CodeViewModel+Questions.swift` — question/questionnaire handling
@@ -727,7 +688,9 @@ attachments/recording/web search):
 #### B3.5 Question modal overlay
 
 **iOS**: Presented as a centered modal card over the session view (dimmed
-background, dismissable via X button or swipe-down).
+background). X-only dismissal by deliberate design (see the
+`CodeQuestionCardView` doc comment): only the X button dismisses — it sends
+`abort` to pi; there is no swipe-down gesture.
 **macOS**: Presented as a `.sheet()` attached to the window (native macOS
 convention). Same content layout, different presentation.
 

@@ -18,6 +18,7 @@ Each spec uses `.instructions.md` suffix with YAML front matter. Update this tab
 | `concurrency.instructions.md` | Working with async code, isolation, or `Sendable`. |
 | `design-ui.instructions.md` | Designing general SwiftUI UI, accessibility, haptics, or animation. |
 | `litellm-api.instructions.md` | Changing LiteLLM/OpenAI-compatible API integration. |
+| `pi-extensions-remote-ask.instructions.md` | Remote ask protocol — rc question/answer frames, ask gate, pending-question push (SUPERSEDED 2026-09-07; kept as the historical record of the push mode-guard and singleton-shape rules). |
 | `security.instructions.md` | Handling sensitive data, user input, credentials, or security review. |
 | `swiftui-multiplatform.instructions.md` | Building shared iOS, iPadOS, or macOS SwiftUI. |
 | `testing.instructions.md` | Adding or changing tests and mocks. |
@@ -56,6 +57,16 @@ xcodebuild test -project openclient-llm.xcodeproj -scheme openclient-llm \
 - CI skips signing: append `CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO`.
 - VS Code + XcodeBuildMCP config at `.xcodebuildmcp/config.yaml`.
 
+### CLI Build Workarounds
+
+`xcodebuild` from the CLI (coding agents, CI) requires SPM sandbox workarounds — always append
+the flags below to the build/test commands above when running from CLI:
+
+```bash
+-skipPackageUpdates -skipMacroValidation \
+OTHER_SWIFT_FLAGS='$(inherited) -Xfrontend -disable-sandbox'
+```
+
 ## Targets
 
 | Target | Purpose |
@@ -70,13 +81,13 @@ Shared business logic: `openclient-llm/Shared/`, referenced by both app targets.
 
 ## pi Extensions
 
-`pi-extensions/` contains TypeScript extensions for [pi](https://github.com/anthropics/claude-code) (Claude Code):
+`pi-extensions/` contains TypeScript extensions for [pi](https://github.com/earendil-works/pi) (the `@earendil-works/pi-coding-agent` coding agent):
 
 | Directory | Purpose |
 |---|---|
 | `rc/` | Remote control — WebSocket server + APNs push for mobile companion access to a pi session. |
 | `subagent/` | Subagent tool — delegates tasks to specialized agents with isolated context (single, parallel, chain modes). |
-| `questionnaire/` | Multi-question tool — structured question prompts with typed answers. |
+| `ask-user-question/` | Structured question tool — single- and multi-question prompts with typed answers (tabbed per-question pages, `allowOther` "Type something" option). |
 
 These run inside the pi process (Node/Bun). The Swift app's `Features/Code/` is the mobile client for `rc`.
 

@@ -1,9 +1,9 @@
 ---
-description: "Use when changing pi-extensions/rc, pi-extensions/question, or pi-extensions/questionnaire — APNs push mode-guards, the rc globalThis singleton shape-version rules, the shared remote-ask helper, or remote question relaying."
+description: "Use when changing pi-extensions/rc or pi-extensions/ask-user-question — the remote-ask protocol (rc question/answer frames, ask gate, pending-question push), APNs push mode-guards, and the rc globalThis singleton shape rules. SUPERSEDED — kept as historical record."
 applyTo: "pi-extensions/**"
 ---
 
-# pi Extensions — Remote-Control Ask Pipeline (rc / question / questionnaire)
+# pi Extensions — Remote-Control Ask Pipeline (rc / ask-user-question)
 
 ## Status
 
@@ -17,9 +17,10 @@ applyTo: "pi-extensions/**"
   is being retired, and the widened guard covers the current call surface.
 - **T4 (APNs session unref)** — REMAINING optional hardening, not landed.
 
-The INV1–INV4 invariants below remain true and binding. The rest of this file is
-kept as the historical record of the bug mechanisms (verified 2026-09-07 against
-pi 0.85.1, `../pi-mono` source) and the original plan.
+The invariants below reflect current behavior; INV4 is open (unimplemented —
+not binding, see T4). The rest of this file is kept as the historical record
+of the bug mechanisms (verified 2026-09-07 against pi 0.85.1, `../pi-mono`
+source) and the original plan.
 
 ## Background
 
@@ -61,23 +62,30 @@ a reload. The only cross-reload survivor is the `globalThis` singleton itself.
 
 ## Invariants (durable rules)
 
-- **INV1 — Push mode-guard.** APNs pushes fire only when `binding.ctx.mode` is `tui` or `rpc`.
-  Every current or future push site goes through the same guard helper in `rc/index.ts`.
-  `apns.ts` stays mode-agnostic. Deliberately NOT gated on the `/rc` server being enabled:
-  in a TUI session a finished push still fires on every settled turn whenever a token is
-  registered and creds resolve, even if `/rc` was never toggled — push is the completion
-  notification, the server is for interactive control (matches
-  `rc-push-notifications-spec.md` "only when a token is registered").
+- **INV1 — Push mode-guard, plus the `/rc` gate.** APNs pushes fire only when
+  `binding.ctx.mode` is `tui` or `rpc` — every current or future push site goes through the
+  same `pushAllowed` helper in `rc/index.ts`; `apns.ts` stays mode-agnostic. On top of the
+  mode guard, finished pushes are gated on `/rc` being enabled: `fireFinishedPush` returns
+  early on `!state.isServing()` (35521d9; user decision 2026-09-07 — no push traffic when rc
+  is off), and question pushes get the same serving requirement transitively via
+  `askAvailable()` (serving AND (clients connected OR push sendable)). Matches decision #2 in
+  `rc-push-notifications-spec.md`: the finished event **and `/rc` is enabled**. (The original
+  intent — finished pushes firing even if `/rc` was never toggled — was overturned.)
 - **INV2 — Singleton surface is append-only.** The `RcSingleton` method surface only ever gains
   methods; renames/removals are forbidden. Any surface change bumps `SINGLETON_SHAPE_VERSION`.
   The wire-protocol `VERSION` constant is unrelated and must not be reused for this.
-- **INV3 — Decoupled access with full-shape guard.** question/questionnaire never import rc.
-  They reach it exclusively through the shared helper's `rcRemote()`, which accepts a cached
-  singleton only if every method the callers invoke is a `function`.
-- **INV4 — APNs session must not pin the event loop.** The cached http2 session is unref'd;
-  in-flight sends stay protected by the ref'd `SEND_TIMEOUT_MS` timer. This is safe *only in
-  combination with INV1*: unref would drop a push fired while the loop is already draining,
-  so any future non-interactive push site must re-evaluate INV4 before relying on delivery.
+- **INV3 — Decoupled access with full-shape guard.** ask-user-question never imports rc.
+  It reaches the singleton exclusively through its `rcRemote()` guard, which accepts a cached
+  singleton only if every method the callers invoke is a `function` (requires BOTH
+  `askAvailable` AND `ask`).
+- **INV4 — APNs session must not pin the event loop (NOT implemented — not binding).**
+  The cached http2 session is NOT unref'd in current code (`rc/apns.ts` has no `unref`; T4 is
+  "REMAINING optional hardening, not landed"). The B1 hang is currently prevented by INV1's
+  mode gate instead (json/print children never open an APNs session). The intended fix —
+  `newSession.unref()` in `getSession()`, in-flight sends protected by the ref'd
+  `SEND_TIMEOUT_MS` timer — stays open as T4; it was originally safe *only in combination
+  with INV1*: unref would drop a push fired while the loop is already draining, so any future
+  non-interactive push site must re-evaluate INV4 before relying on delivery.
 
 ## Plan
 
