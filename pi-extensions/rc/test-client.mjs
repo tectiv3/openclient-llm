@@ -811,8 +811,9 @@ class FakeApns {
 const apnsB64u = (part) => Buffer.from(part, "base64url").toString("utf8");
 
 // Full JWT assertions for one request: 3 parts, header {alg,kid}, claims
-// {iss,sub,aud,iat,exp} with a 300 s TTL, and an ES256 (IEEE P-1363) signature
-// that verifies against the generated P-256 public key.
+// {iss,sub,aud,iat,exp} with a 3000 s TTL (Apple caps exp at 60 min and
+// wants token updates no more than once per 20 min), and an ES256
+// (IEEE P-1363) signature that verifies against the generated P-256 key.
 function checkApnsJwt(apns, request, label) {
   const auth = String(request.headers.authorization ?? "");
   check(auth.startsWith("Bearer "), `${label}: no Bearer authorization`);
@@ -827,8 +828,8 @@ function checkApnsJwt(apns, request, label) {
     `${label}: jwt claims iss/sub/aud`,
   );
   check(
-    Number.isInteger(claims.iat) && Number.isInteger(claims.exp) && claims.exp - claims.iat === 300,
-    `${label}: jwt iat/exp (exp-iat=300)`,
+    Number.isInteger(claims.iat) && Number.isInteger(claims.exp) && claims.exp - claims.iat === 3000,
+    `${label}: jwt iat/exp (exp-iat=3000)`,
   );
   const signingInput = Buffer.from(jwt.slice(0, jwt.lastIndexOf(".")), "utf8");
   check(

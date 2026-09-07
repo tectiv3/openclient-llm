@@ -10,7 +10,12 @@ import { dbgLog } from './debug'
 // (BadDeviceToken) while sandbox accepts both sandbox and production tokens.
 const DEFAULT_HOST = 'api.sandbox.push.apple.com:443'
 const DEFAULT_TOPIC = 'com.kinchaku.openclient-llm'
-const JWT_TTL_SECONDS = 300
+// Apple: update the provider auth token no more than once every 20 minutes
+// (429 TooManyProviderTokenUpdates), and JWT exp may be at most 60 minutes
+// in the future. 50 minutes satisfies both: one re-sign per ~50 min,
+// shared by every pi process via the config file.
+const JWT_TTL_SECONDS = 3000
+const JWT_REUSE_SKEW_SECONDS = 60
 const SEND_TIMEOUT_MS = 15_000
 
 export const FINISHED_COLLAPSE_ID = 'rc-finished'
@@ -224,6 +229,44 @@ function base64Url(input: Buffer | string): string {
     return buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
+function jwtIdentityMatches(jwt: string, config: ApnsConfig): boolean {
+    const parts = jwt.split('.')
+    if (parts.length !== 3) return false
+    try {
+        const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'))
+        const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'))
+        // A stored JWT from a previous push-setup (different key or team) must
+        // not be reused: sign fresh for the current identity.
+        return header?.kid === config.keyId && claims?.iss === config.teamId
+    } catch {
+        return false
+    }
+}
+
+// The provider JWT is shared across pi processes through the config file:
+// every process re-signs at most once per TTL window, so APNs sees one
+// provider-token update per machine per window instead of one per push per
+// process (the 429 TooManyProviderTokenUpdates trigger).
+function providerJwt(config: ApnsConfig, key: KeyObject): string {
+    const now = Math.floor(Date.now() / 1000)
+    const raw = readRawConfig()
+    const existing = raw.providerJwt
+    const existingExp = raw.providerJwtExp
+    if (
+        typeof existing === 'string' &&
+        existing.length > 0 &&
+        typeof existingExp === 'number' &&
+        existingExp > now + JWT_REUSE_SKEW_SECONDS &&
+        jwtIdentityMatches(existing, config)
+    ) {
+        return existing
+    }
+    const jwt = signJwt(config, key)
+    const updated = { ...raw, providerJwt: jwt, providerJwtExp: now + JWT_TTL_SECONDS }
+    writeRawConfig(updated)
+    return jwt
+}
+
 function signJwt(config: ApnsConfig, key: KeyObject): string {
     const now = Math.floor(Date.now() / 1000)
     const header = base64Url(JSON.stringify({ alg: 'ES256', kid: config.keyId }))
@@ -405,7 +448,7 @@ function postToApns(
             ':path': `/3/device/${token}`,
             ':scheme': 'https',
             ':authority': authority,
-            authorization: `Bearer ${signJwt(config, key)}`,
+            authorization: `Bearer ${providerJwt(config, key)}`,
             'apns-topic': config.topic,
             'apns-push-type': 'alert',
             'apns-priority': '5',
