@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	Editor,
 	type EditorTheme,
@@ -39,7 +39,11 @@ interface RcRemote {
 	// Widened ask gate: serving AND (clients connected OR push sendable) —
 	// keeps the question push reachable for a locked phone with 0 clients.
 	askAvailable(): boolean;
-	ask(opts: { kind: "question"; params: unknown }): Promise<{ value: string; wasCustom: boolean; index?: number } | null>;
+	ask(opts: { kind: "question"; params: unknown; signal?: AbortSignal }): Promise<{
+		value: string;
+		wasCustom: boolean;
+		index?: number;
+	} | null>;
 }
 
 const RC_KEY = Symbol.for("pi-rc");
@@ -47,6 +51,60 @@ const RC_KEY = Symbol.for("pi-rc");
 function rcRemote(): RcRemote | undefined {
 	const rc = (globalThis as unknown as Record<symbol, unknown>)[RC_KEY];
 	return rc && typeof (rc as RcRemote).ask === "function" ? (rc as RcRemote) : undefined;
+}
+
+// Esc escape hatch for the remote ask: show a non-blocking wait panel while
+// the singleton waits for a remote client answer. Esc aborts the ask through
+// its signal (the singleton cancels the pending ask and resolves null) so the
+// caller falls through to the local TUI prompt. Any other null cause (Esc,
+// /rc toggle-off, all clients disconnected) resolves the same way.
+async function askRemoteWithEscHatch(
+	ctx: ExtensionContext,
+	question: string,
+	options: OptionWithDesc[],
+): Promise<{ value: string; wasCustom: boolean; index?: number } | null> {
+	const rc = rcRemote();
+	if (!rc) return null;
+	const controller = new AbortController();
+	const askPromise = rc.ask({
+		kind: "question",
+		params: {
+			question,
+			options: options.map((o) => ({ label: o.label, value: o.label, description: o.description })),
+			allowOther: true,
+		},
+		signal: controller.signal,
+	});
+	// Non-blocking wait panel: closes when the remote ask settles, however it
+	// settles (client answered, or Esc/toggle-off/disconnect cancelled it).
+	await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
+		let settled = false;
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			done();
+		};
+		void askPromise.then(finish, finish);
+		return {
+			render: (width: number) => {
+				const bar = "─".repeat(Math.max(1, width));
+				return [
+					theme.fg("accent", bar),
+					" " + theme.fg("text", "Question sent to remote client(s)."),
+					" " + theme.fg("dim", "Press Esc to answer locally."),
+					theme.fg("accent", bar),
+				];
+			},
+			invalidate: () => {},
+			handleInput: (data: string) => {
+				if (matchesKey(data, Key.escape)) {
+					controller.abort();
+					finish();
+				}
+			},
+		};
+	});
+	return await askPromise;
 }
 
 // Parent-relay access (see extensions/subagent). When running inside a pi
@@ -132,31 +190,39 @@ export default function question(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const rc = rcRemote();
 			if (rc && rc.askAvailable()) {
-				const answer = await rc.ask({
-					kind: "question",
-					params: {
-						question: params.question,
-						options: params.options.map((o) => ({ label: o.label, value: o.label, description: o.description })),
-						allowOther: true,
-					},
-				});
+				const answer =
+					ctx.mode === "tui"
+						? await askRemoteWithEscHatch(ctx, params.question, params.options)
+						: await rc.ask({
+								kind: "question",
+								params: {
+									question: params.question,
+									options: params.options.map((o) => ({ label: o.label, value: o.label, description: o.description })),
+									allowOther: true,
+								},
+							});
 				const simpleOptions = params.options.map((o) => o.label);
-				if (!answer) {
+				if (answer !== null) {
+					if (answer.wasCustom) {
+						return {
+							content: [{ type: "text", text: `User wrote: ${answer.value}` }],
+							details: { question: params.question, options: simpleOptions, answer: answer.value, wasCustom: true } as QuestionDetails,
+						};
+					}
+					return {
+						content: [{ type: "text", text: `User selected: ${answer.index ?? "?"}. ${answer.value}` }],
+						details: { question: params.question, options: simpleOptions, answer: answer.value, wasCustom: false } as QuestionDetails,
+					};
+				}
+				// TUI + null (Esc, toggle-off, all clients disconnected): fall through to
+				// the local TUI prompt below. Non-TUI has no local prompt; the ask is
+				// final there (RPC/JSON relay paths run below for the non-remote case).
+				if (ctx.mode !== "tui") {
 					return {
 						content: [{ type: "text", text: "User cancelled the selection" }],
 						details: { question: params.question, options: simpleOptions, answer: null } as QuestionDetails,
 					};
 				}
-				if (answer.wasCustom) {
-					return {
-						content: [{ type: "text", text: `User wrote: ${answer.value}` }],
-						details: { question: params.question, options: simpleOptions, answer: answer.value, wasCustom: true } as QuestionDetails,
-					};
-				}
-				return {
-					content: [{ type: "text", text: `User selected: ${answer.index ?? "?"}. ${answer.value}` }],
-					details: { question: params.question, options: simpleOptions, answer: answer.value, wasCustom: false } as QuestionDetails,
-				};
 			}
 
 			if (ctx.mode !== "tui") {

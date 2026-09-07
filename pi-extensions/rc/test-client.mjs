@@ -837,9 +837,10 @@ function checkApnsJwt(apns, request, label) {
   );
 }
 
-// apns-topic/priority/timestamp are common to every push type.
+// apns-topic/push-type/priority/timestamp are common to every push type.
 function checkApnsCommonHeaders(apns, request, label) {
   check(request.headers["apns-topic"] === apns.topic, `${label}: apns-topic`);
+  check(request.headers["apns-push-type"] === "alert", `${label}: apns-push-type must be alert`);
   check(request.headers["apns-priority"] === "5", `${label}: apns-priority must be 5`);
   check(
     Number.isFinite(Number(request.headers["apns-timestamp"])) &&
@@ -1220,18 +1221,16 @@ async function assertAskFallsBackWithZeroClients(ctx) {
 }
 
 // (h) Zero clients + push not sendable: ask() must NOT route remote — the
-// TUI/local fallback runs, the agent settles without an answer, and no push
-// is attempted. In the push-enabled spawn the not-sendable state is forced
+// local fallback runs, the agent settles without an answer, and no push is
+// attempted. In the push-enabled spawn the not-sendable state is forced
 // deterministically here (register a token, settle against a 410-ing
 // endpoint → the drop clears the token and the persisted file) instead of
 // relying on (f) having run its drop — an earlier failure upstream must not
-// break this test's premise. On a pristine --no-apns machine creds are
-// missing outright; with file creds + a restored token (--no-apns on a
-// configured machine) push IS sendable, so the case skips.
+// break this test's premise. In the --no-apns spawn the not-sendable state is
+// guaranteed by the harness: the child's PI_RC_APNS_CONFIG points at an
+// isolated temp file, so file creds can never be present and push is never
+// sendable for the child.
 registerTest(12, "ask_zero_clients_not_push_ready_falls_back_without_push", async (ctx) => {
-  if (!ctx.pushEnabled && ctx.rcPushConfigHasCreds) {
-    throw skip("--no-apns with file creds + restored token: push is sendable, so the not-ready case cannot occur");
-  }
   if (ctx.pushEnabled) {
     const apns = ctx.apns;
     await ensureAgentIdle(ctx);
@@ -1266,9 +1265,9 @@ registerTest(12, "ask_zero_clients_not_push_ready_falls_back_without_push", asyn
 // ask() must route remote with ZERO clients, fire the rc-question push, and
 // keep the pending ask; a reconnecting client gets the question redelivered
 // after the connect burst and the ask resolves from that fresh client.
-// (--no-apns: not observable on the fake endpoint — the push would go to the
-// real host when ~/.pi/agent/rc-push.json exists — so the case runs only in
-// the push-enabled spawn.)
+// (--no-apns: push is never sendable — the child's PI_RC_APNS_CONFIG points
+// at an isolated temp file, so file creds can never resolve in any spawn
+// mode — so the case runs only in the push-enabled spawn.)
 registerTest(12, "ask_locked_phone_zero_clients_pushes_and_redelivers", async (ctx) => {
   if (!ctx.pushEnabled) throw skip("needs the env-pointed fake APNs endpoint (push-enabled spawn)");
   const apns = ctx.apns;
@@ -1364,6 +1363,25 @@ registerTest(12, "hello_auto_auth_registered_token_no_fresh_code", async (ctx) =
   await expectErrorThenClose(b.result, "bad_code", b.next, b.close);
 });
 
+// push_token accepts 64-hex case-insensitively, but storage and the
+// case-sensitive hello compare must agree: an UPPER-case registration must
+// auto-authenticate when the client presents the same token lower-cased
+// (Swift always presents lowercase, so the stored form is what must match).
+const APNS_TOKEN_HEX = ("abcdef0123456789".repeat(4));
+registerTest(12, "push_token_uppercase_registration_auto_auths_lowercase", async (ctx) => {
+  requireAuth(ctx);
+  const reg = await connectAndVerifyConnectTime(ctx);
+  reg.ws.send(JSON.stringify({ type: "push_token", token: APNS_TOKEN_HEX.toUpperCase() }));
+  await sleep(500); // register before the disconnect
+  reg.close();
+  const a = await handshake(ctx, { code: "deadbe", token: APNS_TOKEN_HEX });
+  check(
+    a.result?.type === "hello_ok",
+    `expected auto-auth after uppercase registration (stored form must be lowercase), got ${JSON.stringify(a.result)}`
+  );
+  a.close();
+});
+
 // --- groups 5, 6, 7, 8, 9 -------------------------------------------------------
 
 // Group 5: Questions. LLM-dependent: test-project AGENTS.md forces the question/questionnaire tools for the exact prompts ASK/ASKFORM
@@ -1452,6 +1470,63 @@ registerTest(5, "askform_triggers_questionnaire_and_answer_resolves", async (ctx
     const resolved = await waitForMessage(next, (m) => m?.type === "question_resolved" && m.id === qf.id, 10_000, "questionnaire resolved");
     check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
     await waitForEventByName(next, "agent_settled", 60_000);
+  });
+});
+
+// Group 5b: the ask() signal path (the TUI esc-hatch's abort mechanism,
+// covered at the singleton level). The esc hatch itself cannot be exercised
+// in this spawn (ctx.mode is "rpc" and ctx.ui.custom() returns undefined),
+// so the probe extension (test-project/rc-signal-probe.ts, loaded via
+// --extension) drives rc.ask() with an AbortSignal. Assertions are
+// protocol-level: the question broadcast, the question_resolved
+// by:cancelled, and the unknown_question rejection of a late answer.
+registerTest(5, "ask_signal_already_aborted_resolves_null_and_broadcasts_cancelled", async (ctx) => {
+  requireAuth(ctx);
+  await withConnection(ctx, async ({ ws, next }) => {
+    await withTimeout(
+      ctx.client.sendCommand({ type: "prompt", message: "/rcsignal aborted" }),
+      10_000,
+      "pi /rcsignal aborted timed out",
+    );
+    const q = await waitForMessage(
+      next,
+      (m) => m?.type === "question" && m?.params?.question === "rc signal probe",
+      10_000,
+      "probe question",
+    );
+    check(q.kind === "question", `expected kind question, got ${JSON.stringify(q.kind)}`);
+    const resolved = await waitForMessage(next, (m) => m?.type === "question_resolved" && m.id === q.id, 10_000, "question_resolved");
+    check(resolved.by === "cancelled", `expected by cancelled, got ${JSON.stringify(resolved.by)}`);
+  });
+});
+
+registerTest(5, "ask_signal_aborted_mid_wait_resolves_null_and_late_answer_is_unknown", async (ctx) => {
+  requireAuth(ctx);
+  await withConnection(ctx, async ({ ws, next }) => {
+    await withTimeout(
+      ctx.client.sendCommand({ type: "prompt", message: "/rcsignal pend" }),
+      10_000,
+      "pi /rcsignal pend timed out",
+    );
+    const q = await waitForMessage(
+      next,
+      (m) => m?.type === "question" && m?.params?.question === "rc signal probe",
+      15_000,
+      "probe question",
+    );
+    check(q.kind === "question", `expected kind question, got ${JSON.stringify(q.kind)}`);
+    const resolved = await waitForMessage(next, (m) => m?.type === "question_resolved" && m.id === q.id, 15_000, "question_resolved");
+    check(resolved.by === "cancelled", `expected by cancelled, got ${JSON.stringify(resolved.by)}`);
+    // The pending ask is gone: an answer for the cancelled id must be
+    // rejected with unknown_question (and the connection stays open).
+    ws.send(JSON.stringify({ type: "answer", id: q.id, value: "yes", wasCustom: false, index: 1 }));
+    const err = await waitForMessage(
+      next,
+      (m) => m?.type === "error" && m.code === "unknown_question",
+      10_000,
+      "unknown_question after cancel",
+    );
+    check(err.code === "unknown_question", `expected unknown_question, got ${JSON.stringify(err)}`);
   });
 });
 
@@ -1648,7 +1723,10 @@ async function main() {
     childEnv.PI_RC_APNS_KEY_FILE = join(tmpRoot, "apns-key.p8");
   }
 
-  const child = spawn(PI_COMMAND, PI_ARGS, {
+  // The signal probe is a test-only extension loaded into the child (see the
+  // group-5b tests); it is copied with the test project into tmpRoot.
+  const childArgs = [...PI_ARGS, "--extension", join(tmpRoot, "rc-signal-probe.ts")];
+  const child = spawn(PI_COMMAND, childArgs, {
     cwd: tmpRoot,
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],

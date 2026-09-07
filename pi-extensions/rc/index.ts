@@ -118,6 +118,7 @@ type RcSingleton = {
     ask(opts: {
         kind: 'question' | 'questionnaire'
         params: JsonObject
+        signal?: AbortSignal
     }): Promise<RemoteQuestionAnswer | RemoteQuestionnaireAnswer | null>
 }
 
@@ -195,16 +196,7 @@ function singleton(): RcSingleton {
         },
         async stop(reason, detail) {
             dbgLog('server stopped:', reason, detail ?? '')
-            if (this.pendingAsk) {
-                dbgLog('ask cancelled:', this.pendingAsk.id)
-                this.broadcast({
-                    type: 'question_resolved',
-                    id: this.pendingAsk.id,
-                    by: 'cancelled',
-                })
-                this.pendingAsk.resolve(null)
-                this.pendingAsk = null
-            }
+            cancelPendingAsk(this)
             if (this.heartbeat) clearInterval(this.heartbeat)
             this.heartbeat = null
             const closeCode = reason === 'quit' ? 1001 : undefined
@@ -236,16 +228,7 @@ function singleton(): RcSingleton {
         },
         async ask(opts) {
             if (!this.askAvailable()) return null
-            if (this.pendingAsk) {
-                dbgLog('ask cancelled (superseded):', this.pendingAsk.id)
-                this.broadcast({
-                    type: 'question_resolved',
-                    id: this.pendingAsk.id,
-                    by: 'cancelled',
-                })
-                this.pendingAsk.resolve(null)
-                this.pendingAsk = null
-            }
+            cancelPendingAsk(this)
             const id = randomBytes(4).toString('hex')
             const message: JsonObject = {
                 type: opts.kind,
@@ -259,7 +242,7 @@ function singleton(): RcSingleton {
             dbgLog('ask created:', id, opts.kind)
             this.broadcast(message)
             fireQuestionPush(this)
-            return new Promise<RemoteQuestionAnswer | RemoteQuestionnaireAnswer[] | null>(
+            const askPromise = new Promise<RemoteQuestionAnswer | RemoteQuestionnaireAnswer[] | null>(
                 resolve => {
                     pending.resolve = result => {
                         if (this.pendingAsk === pending) this.pendingAsk = null
@@ -267,11 +250,36 @@ function singleton(): RcSingleton {
                     }
                 }
             )
+            if (opts.signal) {
+                // Identity guard: an abort that lands after this pending ask
+                // already resolved (client answered first) or was superseded
+                // must not cancel the NEW pending ask it no longer is.
+                const onAbort = () => {
+                    if (this.pendingAsk === pending) cancelPendingAsk(this)
+                }
+                if (opts.signal.aborted) onAbort()
+                else opts.signal.addEventListener('abort', onAbort, { once: true })
+            }
+            return askPromise
         },
     }
     registerProcessExitHandler(state)
     globalRecord[RC_KEY] = state
     return state
+}
+
+// Cancels the in-flight ask (toggle-off, pi exit, supersede, abort signal):
+// tells the clients it is gone and resolves the waiting caller with null.
+function cancelPendingAsk(state: RcSingleton): void {
+    if (!state.pendingAsk) return
+    dbgLog('ask cancelled:', state.pendingAsk.id)
+    state.broadcast({
+        type: 'question_resolved',
+        id: state.pendingAsk.id,
+        by: 'cancelled',
+    })
+    state.pendingAsk.resolve(null)
+    state.pendingAsk = null
 }
 
 function handleUpgrade(
@@ -618,11 +626,15 @@ function handleAnswerQuestionnaire(state: RcSingleton, client: RcClient, message
 // APNs device tokens are 64 hex chars. Anything else is ignored silently:
 // no error frame, no close, no state change (spec: wire protocol, push_token).
 function handlePushToken(state: RcSingleton, client: RcClient, message: JsonObject): void {
-    const token = message.token
+    let token = message.token
     if (typeof token !== 'string' || !/^[0-9a-f]{64}$/i.test(token)) {
         dbgLog('push_token ignored (invalid):', client.ip)
         return
     }
+    // Normalize at the single write point: readStoredDeviceToken also
+    // lowercases on read, and helloTokenMatches is case-sensitive, so an
+    // upper/mixed-case registration would otherwise fail auto-auth.
+    token = token.toLowerCase()
     state.pushToken = token
     saveDeviceToken(token)
     refreshStatus(state)
@@ -1108,7 +1120,6 @@ function pushOutcomeText(outcome: PushOutcome): string {
     if (outcome.ok === 'sent')
         return `apns ${outcome.status}${outcome.reason ? ` ${outcome.reason}` : ''}`
     if (outcome.ok === 'disabled') return `apns disabled: ${outcome.reason}`
-    if (outcome.ok === 'no_token') return 'apns no token'
     if (outcome.ok === 'dropped')
         return `apns ${outcome.status}${outcome.reason ? ` ${outcome.reason}` : ''} (token dropped)`
     const detail = outcome.detail.length > 48 ? `${outcome.detail.slice(0, 48)}…` : outcome.detail

@@ -38,7 +38,6 @@ export type ApnsConfig = {
 export type PushOutcome =
     | { ok: 'sent'; status: number; reason?: string }
     | { ok: 'disabled'; reason: string }
-    | { ok: 'no_token' }
     | { ok: 'dropped'; status: number; reason?: string }
     | { ok: 'error'; detail: string }
 
@@ -53,7 +52,9 @@ export function apnsConfigPath(): string {
     return join(homedir(), '.pi', 'agent', 'rc-push.json')
 }
 
-function expandHomePath(path: string): string {
+// Single home-expansion helper for the rc extension (os.homedir()-based);
+// every caller passes user-supplied paths through this one function.
+export function expandHomePath(path: string): string {
     if (path === '~') return homedir()
     if (path.startsWith('~/')) return join(homedir(), path.slice(2))
     return path
@@ -306,8 +307,7 @@ export function testPayload(sessionId: string): JsonObject {
 export async function sendApnsPush(
     token: string,
     collapseId: string,
-    payload: JsonObject,
-    sessionId?: string
+    payload: JsonObject
 ): Promise<PushOutcome> {
     const config = resolveApnsConfig()
     if (!config) {
@@ -322,7 +322,7 @@ export async function sendApnsPush(
     }
     let result: { status: number; reason?: string }
     try {
-        result = await postToApns(config, keyValidation.key, token, collapseId, payload, sessionId)
+        result = await postToApns(config, keyValidation.key, token, collapseId, payload)
     } catch (error) {
         const detail = errorMessage(error)
         dbgLog('apns push failed:', detail)
@@ -341,8 +341,7 @@ function postToApns(
     key: KeyObject,
     token: string,
     collapseId: string,
-    payload: JsonObject,
-    sessionId?: string
+    payload: JsonObject
 ): Promise<{ status: number; reason?: string }> {
     const authority = `${config.host}:${config.port}`
     const body = Buffer.from(JSON.stringify(payload), 'utf8')

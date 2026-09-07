@@ -395,13 +395,25 @@ The `question` and `questionnaire` extensions are forked into this repo:
 Symlinked: `~/.pi/agent/extensions/question` → `<repo>/pi-extensions/question/`,
 `~/.pi/agent/extensions/questionnaire` → `<repo>/pi-extensions/questionnaire/`.
 
-**Modification — remote-first with TUI fallback:**
+**Modification — remote-first with TUI fallback (final design):**
 
-When rc is running with connected clients, route the question to remote clients
-first. The TUI shows a non-blocking status ("Question sent to remote client(s).
-Press Esc to answer locally."). If Esc is pressed, the remote ask is cancelled and
-the normal TUI prompt appears. If no clients are connected when the question fires,
-skip straight to the TUI prompt.
+The routing gate is `rc.askAvailable()`: the server is serving AND (clients are
+connected OR the push is sendable — a registered device token plus resolved APNs
+credentials). Routing therefore also happens with ZERO connected clients when
+the push is sendable (the locked-phone case; see
+docs/plans/rc-push-notifications-spec.md), and the question push wakes the
+phone.
+
+In TUI mode the routing is non-blocking: a wait panel
+("Question sent to remote client(s)." / "Press Esc to answer locally.") is
+shown via `ctx.ui.custom()`, and an `AbortSignal` (from an `AbortController`)
+is passed to `rc.ask()` (`ask()` takes an optional `signal`, an internal
+pi-extension API, not part of the wire protocol). Esc aborts the signal, the
+singleton cancels the pending ask (broadcasting `question_resolved` with
+`by: "cancelled"`) and resolves `null`. ANY `null` — Esc, `/rc` toggle-off, or
+all clients disconnected — falls through in TUI mode to the normal local TUI
+prompt, which then runs as usual. In non-TUI modes (RPC/JSON) the ask is made
+without a signal and a `null` returns the "User cancelled" tool result.
 
 Add import: `import { uuidv7 } from "@earendil-works/pi-ai";`
 
@@ -463,15 +475,16 @@ No event bus needed — the question extensions access the rc singleton directly
 `globalThis[Symbol.for("pi-rc")]`.
 
 > **Correction to the draft (Task 2, implemented):** the implementation deviates
-> from the sketch above in three ways. (1) The question `id` is generated
+> from the sketch above in the following ways. (1) The question `id` is generated
 > server-side in `rc.ask()` (`crypto.randomBytes(4).toString("hex")`); the
-> caller does not pass one (`uuidv7` is not imported). (2) There is no
-> `showRemoteWaitUI` / Esc escape hatch: while a remote ask is pending, the TUI
-> shows the in-flight tool call; a local answer cannot preempt it (v1 limitation,
-> acceptable per the `executionMode: "sequential"` note below). (3) `ask()`
-> resolves `null` (tool reports "cancelled") when the server stops or `/rc`
-> toggles off; if no clients are connected at ask time, the extension falls
-> through to the normal TUI path.
+> caller does not pass one (`uuidv7` is not imported). (2) The Esc escape hatch
+> is implemented without a `showRemoteWaitUI` API: the tool itself opens the
+> non-blocking wait panel via `ctx.ui.custom()` and passes the
+> `AbortController`'s signal to `rc.ask()`; Esc aborts the remote ask and the
+> local TUI prompt runs (final design above). (3) `ask()` resolves `null`
+> ("cancelled") when the ask is aborted, the server stops, or `/rc` toggles off.
+> Note that zero connected clients does NOT force the local path: when the
+> push is sendable, the ask routes remote with zero clients (locked-phone case)
 
 ### A6. Heartbeat
 

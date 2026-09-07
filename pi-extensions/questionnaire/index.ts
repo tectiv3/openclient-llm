@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	Editor,
 	type EditorTheme,
@@ -90,7 +90,7 @@ interface RcRemote {
 	// Widened ask gate: serving AND (clients connected OR push sendable) —
 	// keeps the question push reachable for a locked phone with 0 clients.
 	askAvailable(): boolean;
-	ask(opts: { kind: "questionnaire"; params: unknown }): Promise<Answer[] | null>;
+	ask(opts: { kind: "questionnaire"; params: unknown; signal?: AbortSignal }): Promise<Answer[] | null>;
 }
 
 const RC_KEY = Symbol.for("pi-rc");
@@ -98,6 +98,51 @@ const RC_KEY = Symbol.for("pi-rc");
 function rcRemote(): RcRemote | undefined {
 	const rc = (globalThis as unknown as Record<symbol, unknown>)[RC_KEY];
 	return rc && typeof (rc as RcRemote).ask === "function" ? (rc as RcRemote) : undefined;
+}
+
+// Esc escape hatch for the remote ask: show a non-blocking wait panel while
+// the singleton waits for a remote client answer. Esc aborts the ask through
+// its signal (the singleton cancels the pending ask and resolves null) so the
+// caller falls through to the local TUI prompt. Any other null cause (Esc,
+// /rc toggle-off, all clients disconnected) resolves the same way.
+async function askRemoteWithEscHatch(
+	ctx: ExtensionContext,
+	questions: Question[],
+): Promise<Answer[] | null> {
+	const rc = rcRemote();
+	if (!rc) return null;
+	const controller = new AbortController();
+	const askPromise = rc.ask({ kind: "questionnaire", params: { questions }, signal: controller.signal });
+	// Non-blocking wait panel: closes when the remote ask settles, however it
+	// settles (client answered, or Esc/toggle-off/disconnect cancelled it).
+	await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
+		let settled = false;
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			done();
+		};
+		void askPromise.then(finish, finish);
+		return {
+			render: (width: number) => {
+				const bar = "─".repeat(Math.max(1, width));
+				return [
+					theme.fg("accent", bar),
+					" " + theme.fg("text", "Questionnaire sent to remote client(s)."),
+					" " + theme.fg("dim", "Press Esc to answer locally."),
+					theme.fg("accent", bar),
+				];
+			},
+			invalidate: () => {},
+			handleInput: (data: string) => {
+				if (matchesKey(data, Key.escape)) {
+					controller.abort();
+					finish();
+				}
+			},
+		};
+	});
+	return await askPromise;
 }
 
 // Parent-relay access (see extensions/subagent). When running inside a pi
@@ -177,21 +222,29 @@ export default function questionnaire(pi: ExtensionAPI) {
 					label: q.label || `Q${i + 1}`,
 					allowOther: q.allowOther !== false,
 				}));
-				const answers = await rc.ask({ kind: "questionnaire", params: { questions } });
-				if (!answers) {
+				const answers =
+					ctx.mode === "tui"
+						? await askRemoteWithEscHatch(ctx, questions)
+						: await rc.ask({ kind: "questionnaire", params: { questions } });
+				if (answers !== null) {
+					const answerLines = answers.map((a) => {
+						const qLabel = questions.find((q) => q.id === a.id)?.label || a.id;
+						if (a.wasCustom) {
+							return `${qLabel}: user wrote: ${a.label}`;
+						}
+						return `${qLabel}: user selected: ${a.index}. ${a.label}`;
+					});
+					return {
+						content: [{ type: "text", text: answerLines.join("\n") }],
+						details: { questions, answers, cancelled: false },
+					};
+				}
+				// TUI + null (Esc, toggle-off, all clients disconnected): fall through to
+				// the local TUI prompt below. Non-TUI has no local prompt; the ask is
+				// final there (RPC/JSON relay paths run below for the non-remote case).
+				if (ctx.mode !== "tui") {
 					return errorResult("User cancelled the questionnaire", questions);
 				}
-				const answerLines = answers.map((a) => {
-					const qLabel = questions.find((q) => q.id === a.id)?.label || a.id;
-					if (a.wasCustom) {
-						return `${qLabel}: user wrote: ${a.label}`;
-					}
-					return `${qLabel}: user selected: ${a.index}. ${a.label}`;
-				});
-				return {
-					content: [{ type: "text", text: answerLines.join("\n") }],
-					details: { questions, answers, cancelled: false },
-				};
 			}
 
 			if (ctx.mode !== "tui") {

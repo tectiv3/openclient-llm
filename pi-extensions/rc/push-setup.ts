@@ -3,6 +3,7 @@ import { basename, resolve } from 'node:path'
 import {
     apnsConfigPath,
     describeSources,
+    expandHomePath,
     loadApnsKey,
     resolveApnsConfig,
     writeApnsConfig,
@@ -12,8 +13,10 @@ import {
 const DEFAULT_HOST_DISPLAY = 'api.sandbox.push.apple.com:443'
 import { dbgLog } from './debug'
 
-// Structural type mirrors the question extension's RcRemote: rc is
-// referenced by shape only, never imported.
+// Structural type for the rc singleton passed in by the /rc command handler.
+// Like the question extension's RcRemote, it is a shape check only (rc is
+// referenced via globalThis, never imported), but the shapes are deliberately
+// independent: push-setup also needs refreshStatus and its ask params differ.
 interface RcRemoteLike {
     isServing(): boolean
     hasConnectedClients(): boolean
@@ -28,12 +31,12 @@ interface RcRemoteLike {
 const ID_PATTERN = /^[A-Za-z0-9]{10}$/
 
 async function promptValue(
-    remote: RcRemoteLike,
+    state: RcRemoteLike,
     ui: ExtensionContext['ui'],
     title: string
 ): Promise<string | null> {
-    if (remote.isServing() && remote.hasConnectedClients()) {
-        const answer = await remote.ask({
+    if (state.isServing() && state.hasConnectedClients()) {
+        const answer = await state.ask({
             kind: 'question',
             params: { question: title, options: [], allowOther: true },
         })
@@ -48,11 +51,11 @@ async function promptValue(
 }
 
 export async function runPushSetup(
-    remote: RcRemoteLike,
+    state: RcRemoteLike,
     ui: ExtensionContext['ui'],
     sessionId: string
 ): Promise<void> {
-    remote.refreshStatus()
+    state.refreshStatus()
     const config = resolveApnsConfig()
     if (config) {
         ui.notify(
@@ -60,21 +63,21 @@ export async function runPushSetup(
             'info'
         )
     }
-    const teamId = await promptValidated(remote, ui, 'APNs Team ID (10 alphanumeric characters)', value =>
+    const teamId = await promptValidated(state, ui, 'APNs Team ID (10 alphanumeric characters)', value =>
         ID_PATTERN.test(value) ? null : 'must be exactly 10 alphanumeric characters'
     )
     if (teamId === null) return cancelled(ui)
-    const keyId = await promptValidated(remote, ui, 'APNs Key ID (10 alphanumeric characters)', value =>
+    const keyId = await promptValidated(state, ui, 'APNs Key ID (10 alphanumeric characters)', value =>
         ID_PATTERN.test(value) ? null : 'must be exactly 10 alphanumeric characters'
     )
     if (keyId === null) return cancelled(ui)
     let keyFile: string
     for (;;) {
-        const raw = await promptValue(remote, ui, 'File path to the .p8 private key (never its contents)')
+        const raw = await promptValue(state, ui, 'File path to the .p8 private key (never its contents)')
         if (raw === null) return cancelled(ui)
         const validation = loadApnsKey(raw)
         if (validation.ok) {
-            keyFile = resolve(expandHome(raw))
+            keyFile = resolve(expandHomePath(raw))
             break
         }
         ui.notify(`key file invalid: ${validation.reason} — try again`, 'warning')
@@ -84,7 +87,7 @@ export async function runPushSetup(
     const match = base.match(/^AuthKey_([A-Za-z0-9]+)\.p8$/)
     if (match && match[1] !== keyId) {
         const proceed = await promptConfirm(
-            remote,
+            state,
             ui,
             `key file ${base} encodes key ID ${match[1]}, not ${keyId} — use it anyway?`
         )
@@ -94,7 +97,7 @@ export async function runPushSetup(
         }
     }
 
-    const host = await promptHost(remote, ui)
+    const host = await promptHost(state, ui)
     if (host === null) return cancelled(ui)
 
     try {
@@ -109,18 +112,18 @@ export async function runPushSetup(
         `apns push configured: teamId ${teamId}, keyId ${keyId}, keyFile ${keyFile}, host ${host} → ${apnsConfigPath()}`,
         'info'
     )
-    remote.refreshStatus()
+    state.refreshStatus()
     dbgLog('push-setup: wrote config, teamId', teamId, 'keyId', keyId, 'keyFile', keyFile, 'sessionId', sessionId)
 }
 
 async function promptValidated(
-    remote: RcRemoteLike,
+    state: RcRemoteLike,
     ui: ExtensionContext['ui'],
     title: string,
     validate: (value: string) => string | null
 ): Promise<string | null> {
     for (;;) {
-        const raw = await promptValue(remote, ui, title)
+        const raw = await promptValue(state, ui, title)
         if (raw === null) return null
         const problem = validate(raw)
         if (problem === null) return raw
@@ -130,12 +133,12 @@ async function promptValidated(
 
 const HOST_PATTERN = /^[a-z0-9][a-z0-9.-]*(:[0-9]{1,5})?$/i
 
-async function promptHost(remote: RcRemoteLike, ui: ExtensionContext['ui']): Promise<string | null> {
+async function promptHost(state: RcRemoteLike, ui: ExtensionContext['ui']): Promise<string | null> {
     // Empty answer takes the default host — the common case, so the prompt is
     // skippable instead of a forced re-entry of a long hostname.
     for (;;) {
         const raw = await promptValue(
-            remote,
+            state,
             ui,
             `APNs host:port (default ${DEFAULT_HOST_DISPLAY}, empty = default; sandbox is required for development builds)`
         )
@@ -150,12 +153,12 @@ async function promptHost(remote: RcRemoteLike, ui: ExtensionContext['ui']): Pro
 }
 
 async function promptConfirm(
-    remote: RcRemoteLike,
+    state: RcRemoteLike,
     ui: ExtensionContext['ui'],
     message: string
 ): Promise<boolean> {
-    if (remote.isServing() && remote.hasConnectedClients()) {
-        const answer = await remote.ask({
+    if (state.isServing() && state.hasConnectedClients()) {
+        const answer = await state.ask({
             kind: 'question',
             params: {
                 question: message,
@@ -179,10 +182,4 @@ function cancelled(ui: ExtensionContext['ui']): void {
         'info'
     )
     dbgLog('push-setup: cancelled')
-}
-
-function expandHome(path: string): string {
-    if (path === '~') return process.env.HOME ?? path
-    if (path.startsWith('~/')) return `${process.env.HOME ?? ''}${path.slice(1)}`
-    return path
 }
