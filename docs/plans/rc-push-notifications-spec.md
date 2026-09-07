@@ -1,6 +1,6 @@
 # Plan: RC push notifications (APNs)
 
-Status: design agreed (revised after plan-critic review) — pending implementation.
+Status: design agreed (revised after plan-critic review) — implemented.
 Date: 2026-09-07. Supersedes the parent spec's open item "APNs-based push
 notifications are future work".
 Parent: `docs/plans/rc-remote-control-spec.md`
@@ -121,9 +121,10 @@ the session is connected (covers token arrival/refresh mid-session).
     collapse is explicit, not incidental.
   - `ask()` creating a pending remote question/questionnaire → push "Agent
     has a question — answer needed", payload carries `timeSensitive: true`,
-    collapse-id `rc-question`. (The question/questionnaire extensions call
-    `rc.ask()` only when the server is serving and clients are connected, so
-    this fires exactly when the remote modal would show.)
+    collapse-id `rc-question`. (The question/questionnaire extensions gate on
+    the rc singleton's `askAvailable()` — serving AND (clients connected OR
+    push sendable) — so this fires exactly when the remote modal would show
+    or would be pushed to a locked phone.)
 - **Payload** (minimal, < 4 KB, no secrets, no paths, and — explicitly —
   **no agent- or user-controlled text at all**; the bodies are fixed strings
   compiled into the sender, so a compromised/verbose agent can never place
@@ -361,18 +362,28 @@ machine (env vars remain supported — see config precedence below).
 - JWT clock skew: 5-min TTL per send means no caching; a clock-skewed pi
   machine would get `InvalidToken` — same failure class as missing config,
   surfaced in the response status.
-- **Locked-phone question gap (known, accepted for now)**: the question/questionnaire
-  extensions route to `rc.ask()` only when `isServing() && hasConnectedClients()`. A
-  locked phone has a dead WS, so `ask()` is never called and `fireQuestionPush` never
-  fires in the exact scenario the question push targets (agent blocked, user away).
-  The push only works in the background-but-socket-alive window. Proposed fix (not
-  implemented): route to remote ask when serving + a push token is registered, even
-  with 0 clients — `pendingAsk` already survives disconnects and redelivers on
-  reconnect (harness test `question_survives_disconnect_and_is_redelivered`), so the
-  phone would get the timeSensitive push, the user unlocks, taps, reconnects, and the
-  pending question is redelivered. Falls back to TUI when no push token exists.
-  Diagnostic aid added alongside: `/rc push-test` command and the footer's `last`
-  APNs outcome segment.
+- **Locked-phone question gap (closed)**: the question/questionnaire extensions
+  gate remote routing on the rc singleton's `askAvailable()` — serving AND
+  (clients connected OR push sendable) — instead of requiring a connected
+  client, so `ask()` still routes with 0 clients whenever a push can actually
+  be delivered. "Push sendable" means a registered token AND resolvable APNs
+  credentials (`resolveApnsConfig()`), mirroring the status line's
+  `push ok` / `push: no token` / `push: not configured` readiness; a token
+  alone is not enough, or the question would silently wait forever on a
+  no-op push. Config is resolved at ask time (not cached) because
+  `/rc push-setup` can rewrite creds while serving. With 0 clients and no
+  sendable push, the extensions keep the pi TUI fallback (unchanged).
+  `pendingAsk` survives disconnects and is redelivered after `hello_ok` on
+  reconnect, so the phone gets the timeSensitive push, the user unlocks,
+  reconnects, and the pending question modal appears; there is no TTL (the
+  ask blocks until answered/superseded/stopped) and no wire-protocol change.
+  `/rc push-setup` prompts keep their stricter `isServing() &&
+  hasConnectedClients()` gate — setup is interactive by design. Verified by
+  harness group 12 (`ask_locked_phone_zero_clients_pushes_and_redelivers`,
+  `ask_zero_clients_not_push_ready_falls_back_without_push`,
+  `ask_zero_clients_token_without_creds_stays_local`). Diagnostic aid added
+  alongside: `/rc push-test` command and the footer's `last` APNs outcome
+  segment.
 
 ## Out of scope
 

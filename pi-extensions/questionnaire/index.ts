@@ -87,6 +87,9 @@ function errorResult(
 interface RcRemote {
 	isServing(): boolean;
 	hasConnectedClients(): boolean;
+	// Widened ask gate: serving AND (clients connected OR push sendable) —
+	// keeps the question push reachable for a locked phone with 0 clients.
+	askAvailable(): boolean;
 	ask(opts: { kind: "questionnaire"; params: unknown }): Promise<Answer[] | null>;
 }
 
@@ -168,7 +171,7 @@ export default function questionnaire(pi: ExtensionAPI) {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const rc = rcRemote();
-			if (rc && rc.isServing() && rc.hasConnectedClients()) {
+			if (rc && rc.askAvailable()) {
 				const questions: Question[] = params.questions.map((q, i) => ({
 					...q,
 					label: q.label || `Q${i + 1}`,

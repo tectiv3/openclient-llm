@@ -123,6 +123,8 @@ class RpcClient {
     this.nextId = 1;
     this.pending = new Map();
     this.stderr = "";
+    this.notifications = []; // every non-response JSON line (pi RPC event stream)
+    this.notificationWaiters = [];
     child.stdout.on("data", (chunk) => this.onData(chunk));
     child.stderr.on("data", (chunk) => {
       this.stderr += chunk.toString();
@@ -167,7 +169,10 @@ class RpcClient {
     } catch {
       return; // events without JSON (should not happen in RPC mode)
     }
-    if (parsed.type !== "response" || parsed.id === undefined) return;
+    if (parsed.type !== "response" || parsed.id === undefined) {
+      this.deliverNotification(parsed);
+      return;
+    }
     const waiter = this.pending.get(String(parsed.id));
     if (!waiter) return;
     this.pending.delete(String(parsed.id));
@@ -176,6 +181,38 @@ class RpcClient {
     } else {
       waiter.resolve(parsed);
     }
+  }
+
+  // pi RPC streams agent events (agent_start, agent_settled, ...) as
+  // notification lines with no id. They are recorded (indexed in arrival
+  // order) and can be awaited — the only completion signal that works while
+  // ZERO rc WS clients are connected, where connecting one to observe the
+  // turn would itself change what is under test (hasConnectedClients).
+  deliverNotification(msg) {
+    this.notifications.push(msg);
+    const index = this.notifications.length - 1;
+    this.notificationWaiters = this.notificationWaiters.filter((w) => {
+      if (w.predicate(msg, index)) {
+        w.resolve(msg);
+        return false;
+      }
+      return true;
+    });
+  }
+
+  // First notification matching predicate(msg, index). The recorded stream is
+  // scanned first, so a late subscriber still catches up; tests that must not
+  // see older events capture an index cursor before triggering the turn.
+  waitForNotification(predicate, ms, label) {
+    const seen = this.notifications.findIndex((m, i) => predicate(m, i));
+    if (seen !== -1) return Promise.resolve(this.notifications[seen]);
+    return withTimeout(
+      new Promise((resolve) => {
+        this.notificationWaiters.push({ predicate, resolve });
+      }),
+      ms,
+      label,
+    );
   }
 
   settleAll(err) {
@@ -654,7 +691,12 @@ registerTest(11, "hello_five_bad_codes_triggers_rate_limit", async (ctx) => {
 // The child's singleton pushToken persists across tests, so the tests are
 // registered in token-state order: (c) null, (d) invalid/ignored, (a) first
 // valid registration, (b) question push on the same token, (e) persists across
-// disconnect + replaced by a second registration, (f) dropped on 410.
+// disconnect + replaced by a second registration, (f) dropped on 410, then
+// the zero-client ask-routing gate (askAvailable = serving AND (clients OR
+// push-sendable)): (h) not push-ready → local fallback with zero push
+// traffic, (i) locked-phone — the question push fires with 0 clients and the
+// pending question is redelivered on reconnect (push-enabled spawn only),
+// (j) token registered but creds missing → local fallback (--no-apns spawn).
 //
 // With --no-apns the child is spawned WITHOUT the PI_RC_APNS_* env; the
 // endpoint still runs as a traffic observer and every test asserts zero push
@@ -1071,6 +1113,231 @@ registerTest(12, "push_410_drops_token_and_rc_still_serves", async (ctx) => {
 // the child is spawned without the PI_RC_APNS_* env, the fake endpoint still
 // runs as a traffic observer, and every test above takes its !ctx.pushEnabled
 // branch (zero requests while settles/questions/get_state keep working).
+
+// A failed earlier test can leave the agent busy (blocked on an unanswered
+// pending ask, or still streaming), which would make the RPC prompt below
+// reject with "Agent is already processing". Connect once, answer any
+// redelivered pending ask, abort any streaming turn, and wait for idle —
+// cheap (~2 s) on a green run, and it isolates the zero-client tests from
+// upstream flakes instead of cascading them.
+// True when the agent turn that started last has not settled yet, judged
+// over the recorded RPC notification prefix [0, until). A pending ask keeps
+// its turn open, so "busy" covers both the streaming and the ask-blocked
+// case.
+function agentBusySince(client, until) {
+  let lastStart = -1;
+  let lastSettled = -1;
+  for (let i = 0; i < until; i += 1) {
+    const type = client.notifications[i]?.type;
+    if (type === "agent_start") lastStart = i;
+    else if (type === "agent_settled") lastSettled = i;
+  }
+  return lastStart > lastSettled;
+}
+
+// A failed earlier test can leave the agent busy (blocked on an unanswered
+// pending ask, or still streaming), which would make the RPC prompt below
+// reject with "Agent is already processing". If busy: connect once, either
+// answer the redelivered pending ask or abort the streaming turn, and close
+// the socket immediately — completion is awaited on the RPC notification
+// stream, because a WS read after the burst drain would race the drained
+// connection's abandoned waiter (which swallows one frame). Cheap (~1 s) on
+// a green run, and it isolates the zero-client tests from upstream flakes
+// instead of cascading them.
+async function ensureAgentIdle(ctx) {
+  const since = ctx.client.notifications.length;
+  if (!agentBusySince(ctx.client, since)) return;
+  const probe = await connectAndVerifyConnectTime(ctx); // consumed hello_ok/state/history
+  try {
+    const burst = await drainUntilQuiet(probe.next, 700); // last read on this socket
+    const pending = burst.find((m) => m?.type === "question" || m?.type === "questionnaire");
+    if (pending?.type === "question") {
+      probe.ws.send(JSON.stringify({ type: "answer", id: pending.id, value: "red", wasCustom: false, index: 1 }));
+    } else if (pending?.type === "questionnaire") {
+      const subs = Array.isArray(pending.params?.questions) ? pending.params.questions : [];
+      probe.ws.send(JSON.stringify({
+        type: "answer_questionnaire",
+        id: pending.id,
+        answers: subs.map((q, i) => ({ id: q.id, value: `a${i + 1}`, label: `a${i + 1}`, wasCustom: false, index: 1 })),
+      }));
+    } else {
+      probe.ws.send(JSON.stringify({ type: "abort" })); // no-op per server if already idle
+    }
+  } finally {
+    probe.close();
+  }
+  await withTimeout(
+    ctx.client.waitForNotification(
+      (m, idx) => idx >= since && m?.type === "agent_settled",
+      45_000,
+      "idle cleanup settle (LLM round trip)",
+    ),
+    50_000,
+    "idle cleanup settle (deadline)",
+  );
+}
+
+// Shared body for the zero-client ask-routing negatives ((h) not push-ready,
+// (j) token registered but creds missing): drives ASK over the RPC channel
+// with no WS client anywhere in the flow — connecting one to observe the turn
+// would itself flip hasConnectedClients() and route the ask remote — so the
+// turn's completion is observed on the RPC notification stream instead. The
+// question tool must fall back locally: its "UI not available" error result
+// lands in history (the agent settles without any answer) and zero push
+// traffic reaches the endpoint.
+async function assertAskFallsBackWithZeroClients(ctx) {
+  const apns = ctx.apns;
+  await ensureAgentIdle(ctx);
+  const before = apns.requests.length;
+  const since = ctx.client.notifications.length;
+  await withTimeout(ctx.client.sendCommand({ type: "prompt", message: "ASK" }), 10_000, "pi ASK prompt RPC");
+  await withTimeout(
+    ctx.client.waitForNotification(
+      (m, idx) => idx >= since && m?.type === "agent_settled",
+      45_000,
+      "agent_settled over RPC (LLM round trip)",
+    ),
+    50_000,
+    "agent_settled over RPC (deadline)",
+  );
+  await sleep(1_000); // quiet window: a (buggy) push would land here
+  check(
+    apns.requests.length === before,
+    `ask() with zero clients must not push when push is not sendable, got ${apns.requests.length - before} requests`,
+  );
+  const hs = await connectAndVerifyConnectTime(ctx);
+  try {
+    hs.ws.send(JSON.stringify({ type: "get_history" }));
+    const history = await waitForMessage(hs.next, (m) => m?.type === "history", 10_000, "history after zero-client ask");
+    const messages = history.messages ?? [];
+    check(
+      messages.some((m) => m?.role === "toolResult" && String(m.output ?? "").includes("UI not available")),
+      `question tool must fall back locally with zero clients (no "UI not available" tool result in history; tail: ${JSON.stringify(messages.slice(-4)).slice(0, 400)})`,
+    );
+  } finally {
+    hs.close();
+  }
+}
+
+// (h) Zero clients + push not sendable: ask() must NOT route remote — the
+// TUI/local fallback runs, the agent settles without an answer, and no push
+// is attempted. In the push-enabled spawn the not-sendable state is forced
+// deterministically here (register a token, settle against a 410-ing
+// endpoint → the drop clears the token and the persisted file) instead of
+// relying on (f) having run its drop — an earlier failure upstream must not
+// break this test's premise. On a pristine --no-apns machine creds are
+// missing outright; with file creds + a restored token (--no-apns on a
+// configured machine) push IS sendable, so the case skips.
+registerTest(12, "ask_zero_clients_not_push_ready_falls_back_without_push", async (ctx) => {
+  if (!ctx.pushEnabled && ctx.rcPushConfigHasCreds) {
+    throw skip("--no-apns with file creds + restored token: push is sendable, so the not-ready case cannot occur");
+  }
+  if (ctx.pushEnabled) {
+    const apns = ctx.apns;
+    await ensureAgentIdle(ctx);
+    apns.status = 410;
+    apns.reason = "Unregistered";
+    let dropper = null;
+    try {
+      const before = apns.requests.length;
+      dropper = await connectAndVerifyConnectTime(ctx);
+      dropper.ws.send(JSON.stringify({ type: "push_token", token: APNS_TOKEN_A }));
+      await sleep(500); // register before the settle
+      dropper.ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+      await waitForEventByName(dropper.next, "message_update", 15_000);
+      dropper.ws.send(JSON.stringify({ type: "abort" }));
+      await waitForEventByName(dropper.next, "agent_settled", 20_000);
+      await withTimeout(
+        waitUntil(() => apns.requests.length > before, APNS_PUSH_TIMEOUT_MS, "410 drop push"),
+        APNS_PUSH_TIMEOUT_MS + 5_000,
+        "410 drop push (deadline)",
+      );
+      await sleep(1_000); // let the (async) drop handler clear the token
+    } finally {
+      apns.status = 200;
+      apns.reason = null;
+      dropper?.close();
+    }
+  }
+  await assertAskFallsBackWithZeroClients(ctx);
+});
+
+// (i) The locked-phone case: token registered, WS dead, creds configured.
+// ask() must route remote with ZERO clients, fire the rc-question push, and
+// keep the pending ask; a reconnecting client gets the question redelivered
+// after the connect burst and the ask resolves from that fresh client.
+// (--no-apns: not observable on the fake endpoint — the push would go to the
+// real host when ~/.pi/agent/rc-push.json exists — so the case runs only in
+// the push-enabled spawn.)
+registerTest(12, "ask_locked_phone_zero_clients_pushes_and_redelivers", async (ctx) => {
+  if (!ctx.pushEnabled) throw skip("needs the env-pointed fake APNs endpoint (push-enabled spawn)");
+  const apns = ctx.apns;
+  await ensureAgentIdle(ctx);
+  await drainPushQuiet(apns); // earlier tests' settle pushes must not pollute the window
+  const a = await connectAndVerifyConnectTime(ctx);
+  a.ws.send(JSON.stringify({ type: "push_token", token: APNS_TOKEN_A }));
+  await sleep(500); // register before the disconnect
+  a.close(); // the locked phone: dead WS, token kept on the singleton
+  await sleep(500); // let the server-side close land before the ask gate is evaluated
+  const before = apns.requests.length;
+  await withTimeout(ctx.client.sendCommand({ type: "prompt", message: "ASK" }), 10_000, "pi ASK prompt RPC");
+  await withTimeout(
+    waitUntil(
+      () => apns.requests.slice(before).some((r) => r.headers["apns-collapse-id"] === "rc-question"),
+      40_000,
+      "question push with zero clients",
+    ),
+    45_000,
+    "question push with zero clients (deadline)",
+  );
+  await sleep(1_000); // quiet window: at most one question push per ask
+  const pushes = apns.requests.slice(before).filter((r) => r.headers["apns-collapse-id"] === "rc-question");
+  check(pushes.length === 1, `expected exactly one question push with zero clients, got ${pushes.length}`);
+  const [req] = pushes;
+  check(req.path === `/3/device/${APNS_TOKEN_A}`, `locked-phone push must use the registered token, got ${req.path}`);
+  checkApnsCommonHeaders(apns, req, "locked-phone question push");
+  // The JWT contract itself is asserted by tests (a)/(b); this test owns the
+  // zero-client routing, redelivery, and resolution behavior.
+  const pushBody = JSON.parse(req.body);
+  check(pushBody.aps?.timeSensitive === true, `locked-phone push must set aps.timeSensitive, got ${JSON.stringify(pushBody.aps)}`);
+  // The unlocked phone reconnects: the pending question is redelivered right
+  // after hello_ok + the connect burst, and answering it resolves the ask.
+  const b = await connectAndVerifyConnectTime(ctx); // consumed hello_ok/state/history
+  try {
+    const q = await waitForMessage(
+      b.next,
+      (m) => m?.type === "question" && m?.kind === "question",
+      10_000,
+      "redelivered question after reconnect",
+    );
+    check(
+      typeof q.params?.question === "string" && q.params.question.toLowerCase().includes("color"),
+      `question text must mention color, got ${JSON.stringify(q.params?.question)}`,
+    );
+    assertOptionsShape(q.params?.options, "question", 3);
+    b.ws.send(JSON.stringify({ type: "answer", id: q.id, value: "red", wasCustom: false, index: 1 }));
+    const resolved = await waitForMessage(b.next, (m) => m?.type === "question_resolved" && m.id === q.id, 10_000, "question_resolved");
+    check(resolved.by === "client", `expected by client, got ${JSON.stringify(resolved.by)}`);
+    await waitForEventByName(b.next, "agent_settled", 45_000);
+  } finally {
+    b.close();
+  }
+});
+
+// (j) The token-alone trap: token registered but APNs creds UNSET must NOT
+// route remote with 0 clients — with no sendable push the question would
+// silently wait forever, so the local fallback runs instead. Reachable only
+// in a --no-apns spawn whose config file carries no creds (a token-only file
+// still resolves no creds; a full file makes the case (i) against the real
+// host, which the harness must not push to).
+registerTest(12, "ask_zero_clients_token_without_creds_stays_local", async (ctx) => {
+  if (ctx.pushEnabled) throw skip("creds are present in this spawn (case runs under --no-apns)");
+  const a = await connectAndVerifyConnectTime(ctx);
+  a.ws.send(JSON.stringify({ type: "push_token", token: APNS_TOKEN_A }));
+  await sleep(500); // register before the disconnect
+  a.close();
+  await assertAskFallsBackWithZeroClients(ctx);
+});
 
 // (k) Auto-auth: presenting the currently registered push token authenticates
 // without a fresh 6-digit code (the code is re-randomized every pi session,

@@ -114,6 +114,7 @@ type RcSingleton = {
     refreshStatus(): void
     hasConnectedClients(): boolean
     isServing(): boolean
+    askAvailable(): boolean
     ask(opts: {
         kind: 'question' | 'questionnaire'
         params: JsonObject
@@ -230,8 +231,11 @@ function singleton(): RcSingleton {
         isServing() {
             return this.server !== null
         },
+        askAvailable() {
+            return this.server !== null && (this.hasConnectedClients() || canPush(this))
+        },
         async ask(opts) {
-            if (!this.server || !this.hasConnectedClients()) return null
+            if (!this.askAvailable()) return null
             if (this.pendingAsk) {
                 dbgLog('ask cancelled (superseded):', this.pendingAsk.id)
                 this.broadcast({
@@ -1084,6 +1088,15 @@ function safeSetStatus(ctx: ExtensionContext | undefined, text: string | undefin
     } catch {
         // Status support varies by harness mode; rc operation should not depend on it.
     }
+}
+
+// Push sendability for ask() routing. A registered token alone is not enough:
+// with unresolved credentials the question push would silently no-op and the
+// ask would block forever, so the local fallback must stay. Mirrors the status
+// line's readiness and resolves per call — /rc push-setup can rewrite creds
+// while the server is serving, so readiness must never be cached at startup.
+function canPush(state: RcSingleton): boolean {
+    return state.pushToken !== null && resolveApnsConfig() !== null
 }
 
 function pushStatusText(state: RcSingleton): string {
