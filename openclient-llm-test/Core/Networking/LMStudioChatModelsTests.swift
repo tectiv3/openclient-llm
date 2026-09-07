@@ -6,14 +6,14 @@
 //  Copyright © 2026 Arturo Carretero Calvo. All rights reserved.
 //
 
-import XCTest
 @testable import openclient_llm
+import XCTest
 
 @MainActor
 final class LMStudioChatModelsTests: XCTestCase {
     // MARK: - Tests
 
-    func test_pluginIntegration_stringEncodingAndDecoding_roundTrips() throws {
+    func test_pluginIntegration_objectEncodingAndDecoding_roundTrips() throws {
         // Given
         let integrations: [MCPIntegration] = [.plugin(id: "mcp/transmission")]
 
@@ -22,7 +22,8 @@ final class LMStudioChatModelsTests: XCTestCase {
         let decoded = try JSONDecoder().decode([MCPIntegration].self, from: data)
 
         // Then
-        XCTAssertEqual(String(decoding: data, as: UTF8.self), "[\"mcp/transmission\"]")
+        let encodedObjects = try JSONDecoder().decode([[String: String]].self, from: data)
+        XCTAssertEqual(encodedObjects, [["type": "plugin", "id": "mcp/transmission"]])
         XCTAssertEqual(decoded, integrations)
     }
 
@@ -37,7 +38,7 @@ final class LMStudioChatModelsTests: XCTestCase {
             maxOutputTokens: 512,
             topP: nil,
             reasoning: "off",
-            contextLength: 8_000,
+            contextLength: 8000,
             previousResponseId: "resp_previous",
             store: true,
             stream: nil
@@ -46,10 +47,14 @@ final class LMStudioChatModelsTests: XCTestCase {
         // When
         let data = try JSONEncoder().encode(request)
         let json = String(decoding: data, as: UTF8.self)
+        let jsonObject = try JSONSerialization.jsonObject(with: data) as? [String: Any]
 
         // Then
         XCTAssertTrue(json.contains("\"input\":\"Find an active torrent\""))
-        XCTAssertTrue(json.contains("\"integrations\":[\"mcp/transmission\"]"))
+        XCTAssertEqual(
+            jsonObject?["integrations"] as? [[String: String]],
+            [["type": "plugin", "id": "mcp/transmission"]]
+        )
         XCTAssertTrue(json.contains("\"previous_response_id\":\"resp_previous\""))
         XCTAssertTrue(json.contains("\"system_prompt\":\"Use the available tools.\""))
     }

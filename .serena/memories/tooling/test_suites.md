@@ -55,3 +55,27 @@ xcodebuild test -project openclient-llm.xcodeproj -scheme openclient-llm \
 
 ## Full regression (after shared-code changes)
 Full iOS suite + both platform builds per AGENTS.md commands.
+
+## Known blocker: full iOS suite crash-loops (iOS 26.3 sim runtime, found 2026-09-08)
+
+The full `xcodebuild test` run crash-loops: the test host dies on a malloc error and
+xcodebuild restarts it, forever. Crash points vary between restarts (VM-lifecycle tests
+in Chat/Home/Launch/Onboarding), always during normal ARC deinit of view models.
+
+- **Root cause (ASan-verified): a Swift Concurrency runtime bug in the iOS 26.3 simulator
+  runtime (build 23D8133), NOT app memory corruption.** ASan report: `bad-free` on a fixed
+  address (0x2610e4360) inside `swift::TaskLocal::StopLookupScope::~StopLookupScope()` in
+  `libswift_Concurrency.dylib`, reached via `swift_task_deinitOnExecutorImpl` from an
+  ordinary `__deallocating_deinit` (e.g. `ChatViewModel.deinit` → `PlayAudioUseCase`
+  deinit on the main executor). All frames above the app's deinit are system code; app code
+  under ARC cannot free arbitrary pointers. Reproduced identically on a clean `origin/main`
+  worktree → pre-existing, independent of any recent change.
+- **Workaround:** verify with targeted runs — `-only-testing:openclient-llm-test/<Class>`
+  (the 4 Code-feature classes run clean: 121/121). A single test method can be targeted too:
+  `-only-testing:openclient-llm-test/<Class>/<method>`. Do NOT chase this as an app bug.
+- **Why no runtime switch:** app minimum is iOS 26; the only other installed sim runtime is
+  iOS 18.4 (too old to run the app). Re-test the full suite after Xcode/sim-runtime updates —
+  this is tracked as Apple-side.
+- The 3 stale-test failures that previously also red-lined the suite (LMStudio ×2, Chat
+  history-limit off-by-one) were fixed 2026-09-08 — they were stale expectations orphaned
+  by commit 5ad1c89 (encoder revert) and a birth-time arithmetic error, not bugs.

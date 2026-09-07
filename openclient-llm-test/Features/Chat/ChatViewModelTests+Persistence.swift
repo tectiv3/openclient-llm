@@ -6,8 +6,8 @@
 //  Copyright © 2026 Arturo Carretero Calvo. All rights reserved.
 //
 
-import XCTest
 @testable import openclient_llm
+import XCTest
 
 // MARK: - Tests — Conversation persistence
 
@@ -27,7 +27,7 @@ extension ChatViewModelTests {
         try await Task.sleep(for: .milliseconds(200))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -66,7 +66,7 @@ extension ChatViewModelTests {
         try await Task.sleep(for: .milliseconds(200))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -82,7 +82,7 @@ extension ChatViewModelTests {
 
         let messages = [
             ChatMessage(role: .user, content: "Hello"),
-            ChatMessage(role: .assistant, content: "Hi there!")
+            ChatMessage(role: .assistant, content: "Hi there!"),
         ]
         let conversation = Conversation(
             modelId: "gpt-4",
@@ -94,7 +94,7 @@ extension ChatViewModelTests {
         sut.send(.conversationLoaded(conversation))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -113,8 +113,9 @@ extension ChatViewModelTests {
         sut.send(.inputChanged("First chat"))
         sut.send(.sendTapped)
 
-        guard case .loaded(let streamingState) = sut.state,
-              let previousConversation = streamingState.conversation else {
+        guard case let .loaded(streamingState) = sut.state,
+              let previousConversation = streamingState.conversation
+        else {
             XCTFail("Expected a streaming conversation")
             return
         }
@@ -128,7 +129,7 @@ extension ChatViewModelTests {
         try await Task.sleep(for: .milliseconds(400))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -142,7 +143,7 @@ extension ChatViewModelTests {
     func test_send_sendTapped_withLongHistory_limitsRequestHistory() async throws {
         // Given
         mockFetchModels.result = .success([LLMModel(id: "gpt-4")])
-        let history = (0..<60).map { ChatMessage(role: .user, content: "Message \($0)") }
+        let history = (0 ..< 60).map { ChatMessage(role: .user, content: "Message \($0)") }
         sut.send(.viewAppeared)
         try await Task.sleep(for: .milliseconds(100))
         sut.send(.conversationLoaded(Conversation(modelId: "gpt-4", messages: history)))
@@ -153,7 +154,7 @@ extension ChatViewModelTests {
         try await Task.sleep(for: .milliseconds(200))
 
         // Then
-        XCTAssertEqual(mockStreamMessage.receivedMessages.last?.count, 51)
+        XCTAssertEqual(mockStreamMessage.receivedMessages.last?.count, 50)
         XCTAssertEqual(mockStreamMessage.receivedMessages.last?.last?.content, "Latest message")
     }
 
@@ -169,7 +170,7 @@ extension ChatViewModelTests {
         sut.send(.systemPromptChanged("You are a pirate"))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -190,7 +191,7 @@ extension ChatViewModelTests {
         try await Task.sleep(for: .milliseconds(50))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -208,8 +209,9 @@ extension ChatViewModelTests {
         sut.send(.attachmentAdded(data: Data([0xFF, 0xD8]), fileName: "test.jpg", type: .image))
         try await Task.sleep(for: .milliseconds(50))
 
-        guard case .loaded(let loadedState) = sut.state,
-              let addedAttachment = loadedState.pendingAttachments.first else {
+        guard case let .loaded(loadedState) = sut.state,
+              let addedAttachment = loadedState.pendingAttachments.first
+        else {
             XCTFail("Expected loaded state with attachment")
             return
         }
@@ -218,7 +220,7 @@ extension ChatViewModelTests {
         sut.send(.attachmentRemoved(addedAttachment.id))
 
         // Then
-        guard case .loaded(let finalState) = sut.state else {
+        guard case let .loaded(finalState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -242,7 +244,7 @@ extension ChatViewModelTests {
         sut.send(.sendTapped)
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -257,7 +259,7 @@ extension ChatViewModelTests {
         let models = [LLMModel(id: "gpt-4"), LLMModel(id: "llama3")]
         let messages = [
             ChatMessage(role: .user, content: "Hello"),
-            ChatMessage(role: .assistant, content: "Hi!")
+            ChatMessage(role: .assistant, content: "Hi!"),
         ]
         let conversation = Conversation(
             modelId: "llama3",
@@ -281,7 +283,7 @@ extension ChatViewModelTests {
         try await Task.sleep(for: .milliseconds(100))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -313,7 +315,7 @@ extension ChatViewModelTests {
         try await Task.sleep(for: .milliseconds(100))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -338,7 +340,7 @@ extension ChatViewModelTests {
         try await Task.sleep(for: .milliseconds(200))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -362,7 +364,7 @@ extension ChatViewModelTests {
         try await Task.sleep(for: .milliseconds(200))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -387,7 +389,7 @@ extension ChatViewModelTests {
                 role: .assistant,
                 content: "I'm good!",
                 tokenUsage: TokenUsage(promptTokens: 8, completionTokens: 12, totalTokens: 20)
-            )
+            ),
         ]
         let conversation = Conversation(modelId: "gpt-4", messages: messages)
 
@@ -408,7 +410,7 @@ extension ChatViewModelTests {
         sut.send(.modelParametersChanged(parameters))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -457,7 +459,7 @@ extension ChatViewModelTests {
         sut.send(.conversationLoaded(conversation))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }

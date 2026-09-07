@@ -46,7 +46,8 @@ Working branch: `code-rc` (shared with a second agent; never push). Spec (source
 
 ## Not done
 - Spec C4 manual matrix (most items covered by harness/E2E/phone smoke; notification/background/foreground/reconnect scenarios untested on device).
-- 3 PRE-EXISTING test failures outside the Code feature (verified identical on clean HEAD via git stash): `ChatViewModelTests.test_send_sendTapped_withLongHistory_limitsRequestHistory` (50 vs 51), `LMStudioChatModelsTests.test_pluginIntegration_stringEncodingAndDecoding_roundTrips` + `test_request_withMCPIntegration_encodesNativeLMStudioFields`. Unrelated to RC; belongs to Chat/LMStudio work.
+- 3 stale-test failures outside the Code feature (LMStudio ×2, Chat history-limit off-by-one): FIXED 2026-09-08 — stale expectations orphaned by commit 5ad1c89 (encoder revert) and a birth-time arithmetic error, not bugs.
+- Full iOS suite crash-loops on the iOS 26.3 sim runtime (Swift Concurrency TaskLocal bad-free in `libswift_Concurrency` during VM deinit — Apple-side, ASan-verified, reproduces on clean origin/main). Verify with targeted `-only-testing` runs until a runtime fix lands. See `test_suites.md` "Known blocker".
 
 ## Key invariants (don't regress)
 - Protocol is FROZEN against the Swift client (`openclient-llm/Shared/Features/Code/Models/`): strict Codable decoding, so field names/shapes must match exactly. `contextUsage = {tokens, contextWindow, percent}`; `sessionId = sessionManager.getSessionId()` (NOT `getLeafId()`); error codes: `bad_code, rate_limited, version_mismatch, invalid_message, not_idle, unknown_question`.
