@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname } from 'node:path'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { execFileSync } from 'node:child_process'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
@@ -242,14 +242,14 @@ function singleton(): RcSingleton {
             dbgLog('ask created:', id, opts.kind)
             this.broadcast(message)
             fireQuestionPush(this)
-            const askPromise = new Promise<RemoteQuestionAnswer | RemoteQuestionnaireAnswer[] | null>(
-                resolve => {
-                    pending.resolve = result => {
-                        if (this.pendingAsk === pending) this.pendingAsk = null
-                        resolve(result)
-                    }
+            const askPromise = new Promise<
+                RemoteQuestionAnswer | RemoteQuestionnaireAnswer[] | null
+            >(resolve => {
+                pending.resolve = result => {
+                    if (this.pendingAsk === pending) this.pendingAsk = null
+                    resolve(result)
                 }
-            )
+            })
             if (opts.signal) {
                 // Identity guard: an abort that lands after this pending ask
                 // already resolved (client answered first) or was superseded
@@ -599,7 +599,11 @@ function isRemoteQuestionnaireAnswer(value: unknown): value is RemoteQuestionnai
     )
 }
 
-function handleAnswerQuestionnaire(state: RcSingleton, client: RcClient, message: JsonObject): void {
+function handleAnswerQuestionnaire(
+    state: RcSingleton,
+    client: RcClient,
+    message: JsonObject
+): void {
     const pending = state.pendingAsk
     if (!pending || pending.kind !== 'questionnaire' || pending.id !== message.id) {
         writeJson(client, { type: 'error', code: 'unknown_question' })
@@ -641,7 +645,16 @@ function handlePushToken(state: RcSingleton, client: RcClient, message: JsonObje
     dbgLog('push_token registered:', client.ip)
 }
 
+// INV1: pushes only in interactive modes. Subagent children run json/print mode
+// and would otherwise fire a push per settled turn, and the opened APNs session
+// would pin the event loop and hang the child (the B1 hang).
+function pushAllowed(state: RcSingleton): boolean {
+    const mode = state.binding?.ctx?.mode
+    return mode === 'tui' || mode === 'rpc'
+}
+
 function fireFinishedPush(state: RcSingleton): void {
+    if (!pushAllowed(state)) return
     const token = state.pushToken
     if (!token) return
     void sendApnsPush(token, FINISHED_COLLAPSE_ID, finishedPayload(sessionId(state)))
@@ -650,6 +663,7 @@ function fireFinishedPush(state: RcSingleton): void {
 }
 
 function fireQuestionPush(state: RcSingleton): void {
+    if (!pushAllowed(state)) return
     const token = state.pushToken
     if (!token) return
     void sendApnsPush(token, QUESTION_COLLAPSE_ID, questionPayload(sessionId(state)))
@@ -657,7 +671,12 @@ function fireQuestionPush(state: RcSingleton): void {
         .catch(error => dbgLog('apns question push failed:', errorMessage(error)))
 }
 
-function handlePushOutcome(state: RcSingleton, outcome: PushOutcome, label: string, token: string): void {
+function handlePushOutcome(
+    state: RcSingleton,
+    outcome: PushOutcome,
+    label: string,
+    token: string
+): void {
     // Only clear the token if it is still the one APNs rejected: a newer
     // registration that landed while this send was in flight must survive.
     if (outcome.ok === 'dropped' && state.pushToken === token) {
@@ -777,8 +796,17 @@ function buildState(state: RcSingleton): JsonObject {
         model: { provider, id },
         ...(ctx?.thinkingLevel ? { thinkingLevel: ctx.thinkingLevel } : {}),
         isStreaming: ctx ? !ctx.isIdle() : state.isStreaming,
-        ...(usage && usage.tokens !== null && usage.contextWindow !== null && usage.percent !== null
-            ? { contextUsage: { tokens: usage.tokens, contextWindow: usage.contextWindow, percent: usage.percent } }
+        ...(usage &&
+        usage.tokens !== null &&
+        usage.contextWindow !== null &&
+        usage.percent !== null
+            ? {
+                  contextUsage: {
+                      tokens: usage.tokens,
+                      contextWindow: usage.contextWindow,
+                      percent: usage.percent,
+                  },
+              }
             : {}),
     }
 }
@@ -929,9 +957,7 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
     pi.on('tool_execution_update', (event, ctx) =>
         forward('tool_execution_update', event, ctx)
     )
-    pi.on('tool_execution_end', (event, ctx) =>
-        forward('tool_execution_end', event, ctx)
-    )
+    pi.on('tool_execution_end', (event, ctx) => forward('tool_execution_end', event, ctx))
 }
 
 function trackEvent(state: RcSingleton, name: string, event: unknown): void {
@@ -1012,8 +1038,11 @@ function eventPayload(event: unknown): JsonObject {
 }
 
 function sessionId(state: RcSingleton): string {
-    return (state.binding?.ctx.sessionManager as { getSessionId?: () => string })?.getSessionId?.()
-      ?? 'unknown'
+    return (
+        (
+            state.binding?.ctx.sessionManager as { getSessionId?: () => string }
+        )?.getSessionId?.() ?? 'unknown'
+    )
 }
 
 function sessionName(state: RcSingleton): string | undefined {
@@ -1070,7 +1099,6 @@ function writeAuth(payload: JsonObject): void {
     renameSync(tempFile, file)
 }
 
-
 // Test seam only: written solely when a harness sets PI_RC_AUTH_FILE.
 // Production never touches the filesystem for RC state (TUI shows it via notify).
 function authFilePath(): string | null {
@@ -1122,7 +1150,8 @@ function pushOutcomeText(outcome: PushOutcome): string {
     if (outcome.ok === 'disabled') return `apns disabled: ${outcome.reason}`
     if (outcome.ok === 'dropped')
         return `apns ${outcome.status}${outcome.reason ? ` ${outcome.reason}` : ''} (token dropped)`
-    const detail = outcome.detail.length > 48 ? `${outcome.detail.slice(0, 48)}…` : outcome.detail
+    const detail =
+        outcome.detail.length > 48 ? `${outcome.detail.slice(0, 48)}…` : outcome.detail
     return `apns error: ${detail}`
 }
 
@@ -1134,7 +1163,8 @@ function recordPushOutcome(state: RcSingleton, outcome: PushOutcome): void {
 function refreshStatus(state: RcSingleton): void {
     if (!state.server || !state.host || !state.code) return
     const clients = connectedClientCount(state)
-    const clientsText = clients === 0 ? 'no clients' : `${clients} client${clients === 1 ? '' : 's'}`
+    const clientsText =
+        clients === 0 ? 'no clients' : `${clients} client${clients === 1 ? '' : 's'}`
     const lastPush = state.lastPush ? ` · ${state.lastPush}` : ''
     safeSetStatus(
         state.binding?.ctx,
@@ -1233,12 +1263,25 @@ export default function rc(pi: ExtensionAPI): void {
     state.refreshStatus = () => refreshStatus(state)
     registerEventHandlers(pi, state)
     pi.registerCommand('rc', {
-        description: 'Toggle remote-control WebSocket server (subcommands: push-setup, push-test, show-token)',
+        description:
+            'Toggle remote-control WebSocket server (subcommands: push-setup, push-test, show-token)',
         getArgumentCompletions: (argumentPrefix: string) => {
             const subs = [
-                { value: 'push-setup', label: 'push-setup', description: 'Configure APNs push delivery for the rc app' },
-                { value: 'push-test', label: 'push-test', description: 'Send a test push to the registered phone token' },
-                { value: 'show-token', label: 'show-token', description: 'Print the registered APNs device token (for diagnosis)' },
+                {
+                    value: 'push-setup',
+                    label: 'push-setup',
+                    description: 'Configure APNs push delivery for the rc app',
+                },
+                {
+                    value: 'push-test',
+                    label: 'push-test',
+                    description: 'Send a test push to the registered phone token',
+                },
+                {
+                    value: 'show-token',
+                    label: 'show-token',
+                    description: 'Print the registered APNs device token (for diagnosis)',
+                },
             ]
             return subs.filter(sub => sub.value.startsWith(argumentPrefix))
         },
@@ -1260,16 +1303,24 @@ export default function rc(pi: ExtensionAPI): void {
                     )
                     return
                 }
-                const outcome = await sendApnsPush(token, TEST_COLLAPSE_ID, testPayload(sessionId(state)))
+                const outcome = await sendApnsPush(
+                    token,
+                    TEST_COLLAPSE_ID,
+                    testPayload(sessionId(state))
+                )
                 handlePushOutcome(state, outcome, 'test', token)
-                const severity = outcome.ok === 'sent' && outcome.status < 300 ? 'info' : 'warning'
+                const severity =
+                    outcome.ok === 'sent' && outcome.status < 300 ? 'info' : 'warning'
                 ctx.ui.notify(`push-test: ${pushOutcomeText(outcome)}`, severity)
                 return
             }
             if (args.trim() === 'show-token') {
                 dbgLog('command /rc show-token invoked')
                 if (!state.pushToken) {
-                    ctx.ui.notify('show-token: no device token registered — connect the phone once first', 'warning')
+                    ctx.ui.notify(
+                        'show-token: no device token registered — connect the phone once first',
+                        'warning'
+                    )
                     return
                 }
                 ctx.ui.notify(`push token: ${state.pushToken}`, 'info')

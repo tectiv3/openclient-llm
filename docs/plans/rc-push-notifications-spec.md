@@ -18,7 +18,7 @@ APNs push covers the suspended case.
 | # | Decision | Chosen |
 |---|----------|--------|
 | 1 | Delivery path | APNs **direct from the pi rc server** (not a Casa/relay proxy). APNs is a public HTTPS/HTTP2 endpoint; the rc server needs only outbound egress, which it already has (LLM calls). Rejected: local notifications only (dead after the ~30 s background window — the case this feature targets); silent push (content-available) to wake the app (throttled by Apple for battery, unreliable); Casa proxy (extra hop, no benefit — Casa would only be for the app, not for pushing to the app) |
-| 2 | Trigger points | `agent_settled` → "Agent finished" (normal); `ask()` creating a remote question → "Agent has a question — answer needed" with `timeSensitive`. Push bodies are **fixed strings, chosen at send time by the server** — no LLM-generated or agent/user-controlled text in any push payload. Only when a token is registered |
+| 2 | Trigger points | `agent_settled` → "Agent finished" (normal); `ask()` creating a remote question → "Agent has a question — answer needed" with `timeSensitive`. Push bodies are **fixed strings, chosen at send time by the server** — no LLM-generated or agent/user-controlled text in any push payload. Only when a token is registered **and the session is in an interactive mode (`tui`/`rpc`)** |
 | 3 | Server impl | Node stdlib only (constraint preserved): `node:http2` + `node:tls` for APNs HTTP/2 over TLS, `node:crypto` for a per-send ES256 JWT (5-min TTL) from a P-256 key parsed out of a `.p8` PEM file |
 | 4 | Config | Env vars on the pi machine (`PI_RC_APNS_*`) or `~/.pi/agent/rc-push.json` (written by the `/rc push-setup` command, chmod 600, holds team id + key id + key path + APNs host — never key contents; the singleton also maintains a runtime `token` field there); env overrides config file. Nothing committed. Push is **disabled** (no-op, single log line) unless key file + team id + key id are all set; all other RC features unaffected |
 | 5 | Protocol | Additive: one new client→server message `push_token`. **No new server→client messages** — pushes go via APNs, never over the WS |
@@ -109,7 +109,9 @@ the session is connected (covers token arrival/refresh mid-session).
     against APNs, 2026-09-07: identical token → 400 on production, 200
     + `apns-id` on sandbox; the rejection reason arrives in the JSON
     response body `{"reason": ...}`, not only the `apns-reason` header.)
-- **Triggers** (only when the singleton holds a token):
+- **Triggers** (only when the singleton holds a token, and only in
+  interactive mode — `tui`/`rpc`; subagent `json`/`print` children never
+  push, see INV1 in `specs/pi-extensions-remote-ask.instructions.md`):
   - `agent_settled` (inside `trackEvent`, which already toggles
     `isStreaming`) → push "Agent finished". **Firing frequency**: this fires
     on *every* settled turn — normal completion, aborts, every follow-up
@@ -344,6 +346,11 @@ machine (env vars remain supported — see config precedence below).
 
 ## Open items / risks
 
+- **Mode gate (INV1, implemented 2026-09-07)**: pushes fire only in
+  interactive modes (`tui`/`rpc`). Subagent children (`pi --mode json -p`)
+  load this extension and would otherwise push on every settled turn — and
+  the APNs session they open pins the event loop so the child can never
+  exit (the B1 hang). See `specs/pi-extensions-remote-ask.instructions.md`.
 - **Environment-declared push endpoint (follow-up, not implemented)**: the
   `push_token` frame should carry the client's own aps environment
   (`{ token, env: "development" | "production" }`, from the app's
