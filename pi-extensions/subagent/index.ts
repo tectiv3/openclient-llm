@@ -1041,6 +1041,9 @@ async function runSingleAgent(
                 debug(`exit: code=${code} signal=${killSignal ?? '-'}`)
                 const exitValue = killSignal ? 1 : (code ?? 0)
                 const fallback = setTimeout(() => {
+                    // The timer fires even when close already resolved; without
+                    // this check every run logged a false "close did not fire".
+                    if (resolved) return
                     debug('exit fallback: close did not fire in 3s, destroying streams')
                     proc.stdout?.destroy()
                     proc.stderr?.destroy()
