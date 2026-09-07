@@ -15,7 +15,11 @@ final class MockLocalNotificationManager: LocalNotificationManagerProtocol, @unc
     var requestAuthorizationCalled = false
     private(set) var sendCompletionCount = 0
     private(set) var sendExpiredCount = 0
-    private(set) var sendQuestionCount = 0
+    private(set) var sendQuestionIds: [String] = []
+
+    var sendQuestionCount: Int {
+        sendQuestionIds.count
+    }
 
     // MARK: - LocalNotificationManagerProtocol
 
@@ -31,7 +35,7 @@ final class MockLocalNotificationManager: LocalNotificationManagerProtocol, @unc
         sendExpiredCount += 1
     }
 
-    func sendQuestionNotification() {
-        sendQuestionCount += 1
+    func sendQuestionNotification(id: String) {
+        sendQuestionIds.append(id)
     }
 }

@@ -8,7 +8,7 @@
 import Foundation
 
 #if os(iOS)
-import SwiftUI
+    import SwiftUI
 #endif
 
 // MARK: - Question Handling
@@ -126,6 +126,20 @@ extension CodeViewModel {
 
         updateSession(session)
     }
+
+    /// Fires the pending-question local notification at most once per
+    /// question id, covering both paths: a question frame arriving while
+    /// backgrounded and a question still showing when the app backgrounds
+    /// (its APNs push was suppressed while the app was active).
+    func notifyPendingQuestionIfNeeded() {
+        #if os(iOS)
+            guard let questionId = currentSession?.pendingQuestion?.id,
+                  notifiedQuestionId != questionId
+            else { return }
+            notifiedQuestionId = questionId
+            notificationManager.sendQuestionNotification(id: questionId)
+        #endif
+    }
 }
 
 // MARK: - Private
@@ -135,8 +149,8 @@ private extension CodeViewModel {
     /// the notification is opportunistic — only shown while backgrounded.
     func notifyIfBackgrounded() {
         #if os(iOS)
-        guard isBackgrounded() else { return }
-        notificationManager.sendQuestionNotification()
+            guard isBackgrounded() else { return }
+            notifyPendingQuestionIfNeeded()
         #endif
     }
 
@@ -174,9 +188,10 @@ private extension CodeViewModel {
         in session: SessionState
     ) -> String {
         if let pending = session.pendingQuestion,
-           pending.id == id {
+           pending.id == id
+        {
             switch pending.kind {
-            case .question(let params):
+            case let .question(params):
                 return params.question
             case .questionnaire:
                 return String(localized: "Questionnaire")

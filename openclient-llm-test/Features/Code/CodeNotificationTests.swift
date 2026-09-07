@@ -5,8 +5,8 @@
 //  Created by tectiv3 on 05/09/2026.
 //
 
-import XCTest
 @testable import openclient_llm
+import XCTest
 
 @MainActor
 final class CodeNotificationTests: XCTestCase {
@@ -124,6 +124,57 @@ final class CodeNotificationTests: XCTestCase {
         XCTAssertEqual(mockNotifications.sendQuestionCount, 0)
     }
 
+    // MARK: - Tests — Background transition
+
+    func test_appDidEnterBackground_withPendingQuestion_firesQuestionNotification() async throws {
+        // Given — question arrives while foregrounded (push suppressed,
+        // no notification yet)
+        try await connectAndEstablish()
+        sut.isBackgrounded = { false }
+        mockClient.emit(.question(Self.question(id: "q1")))
+        try await waitUntil {
+            self.currentSession()?.pendingQuestion != nil
+        }
+
+        // When
+        sut.send(.appDidEnterBackground)
+
+        // Then
+        XCTAssertEqual(mockNotifications.sendQuestionCount, 1)
+        XCTAssertEqual(mockNotifications.sendQuestionIds, ["q1"])
+    }
+
+    func test_appDidEnterBackground_withoutPendingQuestion_doesNotFireNotification() async throws {
+        // Given
+        try await connectAndEstablish()
+
+        // When
+        sut.send(.appDidEnterBackground)
+
+        // Then
+        XCTAssertEqual(mockNotifications.sendQuestionCount, 0)
+    }
+
+    func test_appDidEnterBackground_alreadyNotifiedQuestion_doesNotDuplicate() async throws {
+        // Given — question arrived while backgrounded (notification fired)
+        try await connectAndEstablish()
+        sut.isBackgrounded = { true }
+        mockClient.emit(.question(Self.question(id: "q1")))
+        try await waitUntil {
+            self.currentSession()?.pendingQuestion != nil
+        }
+        XCTAssertEqual(mockNotifications.sendQuestionCount, 1)
+
+        // When — briefly foregrounded, then backgrounded again with the
+        // question still pending
+        sut.isBackgrounded = { false }
+        sut.send(.appWillEnterForeground)
+        sut.send(.appDidEnterBackground)
+
+        // Then
+        XCTAssertEqual(mockNotifications.sendQuestionCount, 1)
+    }
+
     // MARK: - Helpers
 
     private func connectAndEstablish() async throws {
@@ -139,14 +190,16 @@ final class CodeNotificationTests: XCTestCase {
             contextUsage: nil
         )))
         try await waitUntil {
-            if case .connected = self.sut.state { return true }
+            if case .connected = self.sut.state {
+                return true
+            }
             return false
         }
     }
 
     private func currentSession() -> CodeViewModel.SessionState? {
         switch sut.state {
-        case .connected(let session), .reconnecting(let session):
+        case let .connected(session), let .reconnecting(session):
             return session
         default:
             return nil
@@ -174,7 +227,7 @@ final class CodeNotificationTests: XCTestCase {
             params: CodeQuestionParams(
                 question: "Pick one",
                 options: [
-                    CodeQuestionOption(label: "Yes", value: "yes")
+                    CodeQuestionOption(label: "Yes", value: "yes"),
                 ]
             )
         )
@@ -192,10 +245,10 @@ final class CodeNotificationTests: XCTestCase {
                         label: nil,
                         prompt: "Pick one",
                         options: [
-                            CodeQuestionOption(label: "A", value: "a")
+                            CodeQuestionOption(label: "A", value: "a"),
                         ],
                         allowOther: nil
-                    )
+                    ),
                 ]
             )
         )

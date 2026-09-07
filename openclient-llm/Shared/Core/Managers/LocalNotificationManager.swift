@@ -22,7 +22,7 @@ protocol LocalNotificationManagerProtocol {
     func requestAuthorization() async
     func sendCompletionNotification()
     func sendExpiredNotification()
-    func sendQuestionNotification()
+    func sendQuestionNotification(id: String)
 }
 
 // MARK: - LocalNotificationManager
@@ -59,20 +59,22 @@ final class LocalNotificationManager: LocalNotificationManagerProtocol, @uncheck
         schedule(content: content)
     }
 
-    func sendQuestionNotification() {
+    func sendQuestionNotification(id: String) {
         let content = UNMutableNotificationContent()
         content.title = String(localized: "pi is asking a question")
         content.body = String(localized: "Tap to answer.")
         content.sound = .default
 
-        schedule(content: content)
+        // A stable identifier per question lets a re-schedule replace the
+        // pending copy instead of stacking duplicates.
+        schedule(content: content, identifier: "question-\(id)")
     }
 
     // MARK: - Private functions
 
-    private func schedule(content: UNMutableNotificationContent) {
+    private func schedule(content: UNMutableNotificationContent, identifier: String? = nil) {
         let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
+            identifier: identifier ?? UUID().uuidString,
             content: content,
             trigger: nil
         )

@@ -103,6 +103,10 @@ final class CodeViewModel {
     private(set) var lastConnect: ConnectCredentials?
     var backgroundDisconnected = false
 
+    /// Question id that already produced a local notification, keeping the
+    /// arrival-while-backgrounded and background-transition paths idempotent.
+    var notifiedQuestionId: String?
+
     /// Transient toast text (e.g. question resolved on another device),
     /// displayed by the session view which clears it after dismissal.
     var transientToast: String?
@@ -234,114 +238,9 @@ private extension CodeViewModel {
         resetToDisconnected()
     }
 
-    func handleSendPrompt(_ text: String) {
-        guard case var .connected(session) = state,
-              !session.isStreaming else { return }
-        let echo = appendLocalEcho(text, to: &session)
-        updateSession(session)
-        sendPromptText(text, echo: echo)
-    }
-
-    /// Re-sends a failed prompt by reusing its existing echo item, so the
-    /// dedup guard cannot append a duplicate. Deliberately skips the
-    /// `isStreaming` guard in `handleSendPrompt`: a tap is an explicit user
-    /// intent and the server is the authority — a prompt rejected while
-    /// streaming answers `not_idle`, which re-marks the same bubble failed.
-    func handleRetryPrompt(id: UUID) {
-        guard case var .connected(session) = state,
-              let index = session.items.firstIndex(where: {
-                  if case let .user(itemId, _, _) = $0 {
-                      return itemId == id
-                  }
-                  return false
-              }),
-              case let .user(_, text, failed) = session.items[index],
-              failed
-        else { return }
-
-        let echo = CodeTranscriptItem.user(
-            id: id, text: text, failed: false
-        )
-        session.items[index] = echo
-        updateSession(session)
-        sendPromptText(text, echo: echo)
-    }
-
-    func handleSendSteer(_ text: String) {
-        guard case var .connected(session) = state,
-              session.isStreaming else { return }
-        let echo = appendLocalEcho(text, to: &session)
-        updateSession(session)
-        Task {
-            let sent = await client.send(.steer(text: text))
-            if !sent {
-                markLocalEchoFailed(echo.id)
-            }
-        }
-    }
-
-    /// Shares the prompt-send tail between `handleSendPrompt` and
-    /// `handleRetryPrompt` so a failed transport marks the echoed item
-    /// failed in both paths.
-    func sendPromptText(_ text: String, echo: CodeTranscriptItem) {
-        pendingPromptEchoes.append(echo.id)
-        let id = echo.id
-        Task {
-            let sent = await client.send(.prompt(text: text))
-            if !sent {
-                markLocalEchoFailed(id)
-            }
-        }
-    }
-
-    func markLocalEchoFailed(_ id: UUID) {
-        guard var session = currentSession,
-              let index = session.items.firstIndex(where: {
-                  if case let .user(itemId, _, _) = $0 {
-                      return itemId == id
-                  }
-                  return false
-              })
-        else { return }
-
-        if case let .user(itemId, text, _) = session.items[index] {
-            session.items[index] = .user(
-                id: itemId, text: text, failed: true
-            )
-            updateSession(session)
-        }
-    }
-
     func handleAbort() {
         guard case .connected = state else { return }
         Task { await client.send(.abort) }
-    }
-
-    /// Local echo so the prompt renders immediately instead of waiting for
-    /// the next server history sync. Deduped against a trailing identical
-    /// user item, which can only exist if the same text was already synced
-    /// from the server history. Returns the trailing user item (existing or
-    /// new) so the caller can correlate later send failures with it.
-    func appendLocalEcho(
-        _ text: String,
-        to session: inout SessionState
-    ) -> CodeTranscriptItem {
-        if case let .user(id, lastText, _)? = session.items.last,
-           lastText == text
-        {
-            // Reusing the existing item also resets its failed flag, so a
-            // re-send of the same text (type-again or retry) starts clean.
-            let item = CodeTranscriptItem.user(
-                id: id, text: lastText, failed: false
-            )
-            session.items[session.items.count - 1] = item
-            return item
-        }
-        let item = CodeTranscriptItem.user(
-            id: UUID(), text: text, failed: false
-        )
-        session.items.append(item)
-        return item
     }
 }
 
