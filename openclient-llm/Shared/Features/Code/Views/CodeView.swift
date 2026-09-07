@@ -56,18 +56,21 @@ struct CodeView: View {
                 }
             }
             .navigationTitle(String(localized: "Code"))
+            .onAppear {
+                viewModel.send(.viewAppeared)
+            }
             #if os(iOS)
-                .navigationBarTitleDisplayMode(.inline)
-                .onChange(of: scenePhase) { _, newPhase in
-                    switch newPhase {
-                    case .background:
-                        viewModel.send(.appDidEnterBackground)
-                    case .active:
-                        viewModel.send(.appWillEnterForeground)
-                    default:
-                        break
-                    }
+            .navigationBarTitleDisplayMode(.inline)
+            .onChange(of: scenePhase) { _, newPhase in
+                switch newPhase {
+                case .background:
+                    viewModel.send(.appDidEnterBackground)
+                case .active:
+                    viewModel.send(.appWillEnterForeground)
+                default:
+                    break
                 }
+            }
             #endif
         }
     }

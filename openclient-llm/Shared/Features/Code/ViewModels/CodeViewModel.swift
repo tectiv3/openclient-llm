@@ -17,6 +17,7 @@ final class CodeViewModel {
     // MARK: - Types
 
     enum Event {
+        case viewAppeared
         case connect(host: String, port: Int, code: String)
         case cancelConnect
         case disconnect
@@ -103,6 +104,17 @@ final class CodeViewModel {
     private(set) var lastConnect: ConnectCredentials?
     var backgroundDisconnected = false
 
+    /// True while the in-flight connection was auto-initiated from
+    /// `viewAppeared` (push-token auth). WHY: lets auth failures
+    /// distinguish "server no longer knows this device's token" from a
+    /// user-typed bad pairing code, so the former can fail silently.
+    private(set) var isAutoConnectAttempt = false
+
+    /// WHY: bounds auto-connect to one attempt per ViewModel lifetime —
+    /// a failed auto attempt or a user-initiated disconnect must not be
+    /// silently retried when the tab re-appears.
+    private(set) var autoConnectSuppressed = false
+
     /// Question id that already produced a local notification, keeping the
     /// arrival-while-backgrounded and background-transition paths idempotent.
     var notifiedQuestionId: String?
@@ -159,6 +171,8 @@ final class CodeViewModel {
 
     func send(_ event: Event) {
         switch event {
+        case .viewAppeared:
+            handleViewAppeared()
         case let .connect(host, port, code):
             handleConnect(host: host, port: port, code: code)
         case .cancelConnect:
@@ -198,6 +212,8 @@ final class CodeViewModel {
 
 private extension CodeViewModel {
     func handleConnect(host: String, port: Int, code: String) {
+        // Manual intent overrides any auto-attempt bookkeeping.
+        isAutoConnectAttempt = false
         settingsManager.setCodeHost(host)
         settingsManager.setCodePort(port)
         lastConnect = ConnectCredentials(
@@ -209,12 +225,37 @@ private extension CodeViewModel {
         establishConnection(host: host, port: port, code: code)
     }
 
+    /// Token-based auto-connect on screen appearance. The RC server accepts
+    /// a hello carrying the currently-registered push token even without a
+    /// pairing code, so a returning user with a saved host skips code entry.
+    /// No `requestAuthorization()` here: a token implies prior registration.
+    func handleViewAppeared() {
+        guard case .disconnected = state,
+              !autoConnectSuppressed,
+              remoteNotificationManager.getToken() != nil
+        else { return }
+
+        // Same source of truth as `disconnectedForm()`: settings, not the
+        // user-editable connect form fields.
+        let host = settingsManager.getCodeHost() ?? ""
+        let port = settingsManager.getCodePort()
+        guard !host.isEmpty else { return }
+
+        let portValue = port > 0 ? port : 47800
+        isAutoConnectAttempt = true
+        // Empty code so retry/foreground-reconnect re-auth via the token.
+        lastConnect = ConnectCredentials(host: host, port: portValue, code: "")
+        establishConnection(host: host, port: portValue, code: "")
+    }
+
     func handleCancelConnect() {
         eventTask?.cancel()
         eventTask = nil
         client.disconnect()
         backgroundUseCase.end()
         backgroundDisconnected = false
+        isAutoConnectAttempt = false
+        autoConnectSuppressed = true
 
         resetToDisconnected()
     }
@@ -234,6 +275,8 @@ private extension CodeViewModel {
         queuedAnswer = nil
         backgroundUseCase.end()
         backgroundDisconnected = false
+        isAutoConnectAttempt = false
+        autoConnectSuppressed = true
 
         resetToDisconnected()
     }
@@ -304,6 +347,12 @@ extension CodeViewModel {
 
         case let .connectionFailed(message):
             backgroundUseCase.end()
+            // WHY: a failed auto attempt must not be retried on the next
+            // tab appearance; the failed screen lets the user decide.
+            if isAutoConnectAttempt {
+                autoConnectSuppressed = true
+                isAutoConnectAttempt = false
+            }
             state = .failed(errorMessage: message)
 
         case let .authFailed(error):
@@ -318,6 +367,7 @@ extension CodeViewModel {
     }
 
     private func handleHelloOk() {
+        isAutoConnectAttempt = false
         switch state {
         case .connecting:
             state = .connected(SessionState())
@@ -481,9 +531,15 @@ extension CodeViewModel {
 
         backgroundUseCase.end()
 
-        let message: String
+        // WHY: a bad_code on a token-auth auto attempt means the server no
+        // longer knows this device (pi restarted, first pairing) — the clean
+        // code-entry form is more useful than an error about a code the user
+        // never typed. rate_limited stays visible: it is actionable.
+        let message: String?
         if wasReconnecting, error.code == "bad_code" {
             message = String(localized: "Pairing code expired — re-pair from pi")
+        } else if isAutoConnectAttempt, error.code == "bad_code" {
+            message = nil
         } else {
             message = authErrorMessage(error)
         }
@@ -494,6 +550,13 @@ extension CodeViewModel {
                 .addingTimeInterval(Self.rateLimitSeconds)
         }
         state = .disconnected
+
+        // Suppression applies to any failed auto attempt, including
+        // rate_limited: bounded retries, one shot.
+        if isAutoConnectAttempt {
+            autoConnectSuppressed = true
+            isAutoConnectAttempt = false
+        }
     }
 
     private func sendQueuedAnswerIfNeeded() {
