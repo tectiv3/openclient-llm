@@ -33,7 +33,11 @@ import { type AgentConfig, type AgentScope, discoverAgents } from './agents.ts'
 
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
-const STALL_TIMEOUT_MS = 120_000
+// A child turn is stdio-silent until the model emits its first token. Local
+// LLM providers can take >120s to reach that token on a large context or a
+// contended server, so the default is generous rather than "fast kill". Tune
+// via PI_SUBAGENT_STALL_TIMEOUT_MS (ms).
+const STALL_TIMEOUT_MS = Number(process.env.PI_SUBAGENT_STALL_TIMEOUT_MS ?? 300_000)
 const STALL_CHECK_INTERVAL_MS = 10_000
 const COLLAPSED_ITEM_COUNT = 10
 const PER_TASK_OUTPUT_CAP = 50 * 1024
