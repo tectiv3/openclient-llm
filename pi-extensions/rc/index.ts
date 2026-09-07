@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomInt } from 'node:crypto'
+import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
@@ -507,6 +507,14 @@ function handleClientMessage(state: RcSingleton, client: RcClient, message: unkn
     }
 }
 
+// Timing-safe comparison of a presented token against the registered one;
+// length checked first because timingSafeEqual throws on unequal lengths.
+function helloTokenMatches(state: RcSingleton, presented: string): boolean {
+    const registered = state.pushToken
+    if (registered === null || presented.length !== registered.length) return false
+    return timingSafeEqual(Buffer.from(presented), Buffer.from(registered))
+}
+
 function handleHello(state: RcSingleton, client: RcClient, message: JsonObject): void {
     cleanupRateLimits(state)
     if (message.version !== VERSION) {
@@ -519,7 +527,15 @@ function handleHello(state: RcSingleton, client: RcClient, message: JsonObject):
         return
     }
     const code = typeof message.code === 'string' ? message.code : ''
-    if (!/^[0-9]{6}$/.test(code) || code !== state.code) {
+    const token = typeof message.token === 'string' ? message.token : ''
+    // A client presenting the currently registered push token authenticates
+    // without a fresh code: the code is re-randomized every pi session, so
+    // without this every session would force re-pairing of an already-paired
+    // device. First-time pairing (no token registered yet) still requires
+    // the code; a stale code plus a matching token is the auto-auth path.
+    const codeOk = /^[0-9]{6}$/.test(code) && code === state.code
+    const tokenOk = helloTokenMatches(state, token)
+    if (!codeOk && !tokenOk) {
         recordFailedHello(state, client.ip)
         const failed = state.rateLimits.get(client.ip)
         sendErrorAndClose(

@@ -319,7 +319,9 @@ async function handshake(ctx, overrides = {}) {
   const { ws, connect, next, close } = connectRc({ host: ctx.host, port: ctx.rcPort, code, version });
   try {
     await withTimeout(connect, RC_WS_TIMEOUT_MS, "rc ws connect timeout");
-    ws.send(JSON.stringify({ type: "hello", code, version }));
+    const hello = { type: "hello", code, version };
+    if (overrides.token !== undefined) hello.token = overrides.token;
+    ws.send(JSON.stringify(hello));
     return { result: await next(), ws, next, close };
   } catch {
     close();
@@ -1069,6 +1071,31 @@ registerTest(12, "push_410_drops_token_and_rc_still_serves", async (ctx) => {
 // the child is spawned without the PI_RC_APNS_* env, the fake endpoint still
 // runs as a traffic observer, and every test above takes its !ctx.pushEnabled
 // branch (zero requests while settles/questions/get_state keep working).
+
+// (k) Auto-auth: presenting the currently registered push token authenticates
+// without a fresh 6-digit code (the code is re-randomized every pi session,
+// so without this every session would force re-pairing of an already-paired
+// device). Token A was registered earlier in this group and is still the
+// registered token here in both spawn modes. The wrong-token hello below is
+// the group's only bad hello and runs after the lockout wait, so it cannot
+// trip the rate limiter (and does not expect to).
+registerTest(12, "hello_auto_auth_registered_token_no_fresh_code", async (ctx) => {
+  requireAuth(ctx);
+  // Register the token first — via a code-authenticated client, the only way
+  // a token becomes "the registered token" — so the test is self-contained
+  // regardless of which earlier tests left the token slot in what state.
+  const reg = await connectAndVerifyConnectTime(ctx);
+  reg.ws.send(JSON.stringify({ type: "push_token", token: APNS_TOKEN_A }));
+  await sleep(500); // register before the disconnect
+  reg.close();
+  const a = await handshake(ctx, { code: "deadbe", token: APNS_TOKEN_A });
+  check(a.result?.type === "hello_ok", `expected auto-auth hello_ok with the registered token, got ${JSON.stringify(a.result)}`);
+  a.close();
+  // An unregistered token authenticates nothing: wrong code + wrong token
+  // must still be bad_code (and counts as a failed hello, like any bad code).
+  const b = await handshake(ctx, { code: "deadbe", token: "0".repeat(64) });
+  await expectErrorThenClose(b.result, "bad_code", b.next, b.close);
+});
 
 // --- groups 5, 6, 7, 8, 9 -------------------------------------------------------
 

@@ -78,7 +78,7 @@ struct URLSessionCodeWebSocketTransport: CodeWebSocketTransport {
 // MARK: - Client Messages
 
 enum CodeClientMessage: Sendable {
-    case hello(code: String, version: Int = 1)
+    case hello(code: String, version: Int = 1, token: String? = nil)
     case prompt(text: String)
     case steer(text: String)
     case abort
@@ -517,10 +517,13 @@ private extension CodeServerClient {
         var dict: [String: AnyCodableValue] = [:]
 
         switch message {
-        case let .hello(code, version):
+        case let .hello(code, version, token):
             dict["type"] = .string("hello")
             dict["code"] = .string(code)
             dict["version"] = .int(version)
+            if let token {
+                dict["token"] = .string(token)
+            }
 
         case let .prompt(text):
             dict["type"] = .string("prompt")

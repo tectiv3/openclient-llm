@@ -358,7 +358,7 @@ extension CodeViewModel {
         )
         eventTask?.cancel()
         eventTask = Task {
-            await client.send(.hello(code: code))
+            await client.send(.hello(code: code, token: remoteNotificationManager.getToken()))
             for await event in stream {
                 guard !Task.isCancelled else { break }
                 handleEvent(event)

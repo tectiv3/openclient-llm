@@ -16,7 +16,7 @@ answer the agent's `question`/`questionnaire` prompts from the phone.
 | 1 | Architecture | In-process pi extension with embedded WS server (not a separate RPC bridge daemon) |
 | 2 | Capability scope | View live + prompt + steer + abort + answer agent questions from phone |
 | 3 | Multi-session | Fixed port (47800). On-demand enable. If port is taken (another pi session already serving), this instance cannot start its server |
-| 4 | Auth | Tailnet-only bind + 6-digit decimal pairing code generated fresh on each `/rc` toggle-on, printed in TUI, entered in app. Code is ephemeral (in-memory only, not persisted). Rate-limit failed `hello`: 5 per IP → 60 s lockout. App stores host/port in `CodeSettings` (SettingsManager) for convenience; code is entered each session |
+| 4 | Auth | Tailnet-only bind + 6-digit decimal pairing code generated fresh on each `/rc` toggle-on, printed in TUI, entered in app. Code is ephemeral (in-memory only, not persisted). Rate-limit failed `hello`: 5 per IP → 60 s lockout. App stores host/port in `CodeSettings` (SettingsManager) for convenience; code is entered each session. Additive auto-auth: a `hello` also authenticates when it presents the currently registered push token (the app sends its own token in `hello`), so an already-paired device needs no re-pairing across pi sessions; first-time pairing still requires the code |
 | 5 | App scope | New "Code" tab in the existing tab bar (iOS TabView + macOS sidebar), shared feature code, both platforms |
 | 6 | Persistence | No local transcript persistence — pi session file is the source of truth; history re-fetched on (re)connect |
 | 7 | Server lifetime | Process-level: survives `/new`, `/resume`, `/fork`; dies when pi exits. `session_shutdown`/`session_start` re-point event forwarding only |
@@ -290,7 +290,7 @@ Client → server:
 
 | type | fields | effect |
 |------|--------|--------|
-| `hello` | `code`, `version` | Validate 6-digit code (exact match). Rate-limit: 5 failures per IP in 60 s → `error {code:"rate_limited"}` + close. OK → `hello_ok` + `state` + `history` (+ pending `question`). Bad → `error {code:"bad_code"}` + close |
+| `hello` | `code`, `version`, `token?` | Authenticate by **code OR registered token**: exact match of the 6-digit code, or (additive) the presented `token` exactly equals the currently registered push token (timing-safe compare). Rate-limit: 5 failures per IP in 60 s → `error {code:"rate_limited"}` + close — a bad token counts as a failed hello exactly like a bad code. OK → `hello_ok` + `state` + `history` (+ pending `question`). Bad → `error {code:"bad_code"}` + close. The token path exists because the code is re-randomized every `/rc` toggle-on: without it every session would force re-pairing of an already-paired device. First-time pairing (no token registered yet) still requires the code — registering a token requires an already-authenticated connection, so there is no chicken-and-egg |
 | `prompt` | `text` | Submit user message when idle. Error `not_idle` if streaming |
 | `steer` | `text` | Submit message during streaming (steer equivalent). If not streaming, treated as `prompt` (no error) |
 | `abort` | — | Current turn abort (Esc equivalent). No-op if not streaming |
