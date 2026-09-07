@@ -45,6 +45,24 @@ const INSPECT_FINAL_OUTPUT_CAP = 2000
 const LIST_ID_SHORT_CHARS = 8
 const LIST_TASK_PREVIEW_CHARS = 60
 
+// File-only diagnostics, opt-in via the same gate as rc/debug.ts (PI_RC_DEBUG=1
+// or PI_RC_DEBUG_FILE → ~/.pi/agent/rc-debug.log). console.* output lands in
+// the TUI, so even lifecycle-only logging must not use it.
+function subagentDebugLog(msg: string): void {
+    const fromEnv = process.env.PI_RC_DEBUG_FILE?.trim()
+    const target =
+        fromEnv ||
+        (process.env.PI_RC_DEBUG?.trim()
+            ? path.join(os.homedir(), '.pi', 'agent', 'rc-debug.log')
+            : null)
+    if (!target) return
+    try {
+        fs.appendFileSync(target, `[${new Date().toISOString()}] ${msg}\n`)
+    } catch {
+        // Diagnostics must never break a run
+    }
+}
+
 function formatTokens(count: number): string {
     if (count < 1000) return count.toString()
     if (count < 10000) return `${(count / 1000).toFixed(1)}k`
@@ -897,7 +915,7 @@ async function runSingleAgent(
         writeSubagentMetaFile(metaPath, spawnMeta)
 
         const tag = subagentId.slice(0, 8)
-        const debug = (msg: string) => console.error(`[subagent:${tag}] ${msg}`)
+        const debug = (msg: string) => subagentDebugLog(`[subagent:${tag}] ${msg}`)
 
         const exitCode = await new Promise<number>(resolve => {
             const invocation = getPiInvocation(args)
