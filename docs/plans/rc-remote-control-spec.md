@@ -295,6 +295,8 @@ the new context. Old `ctx` references are never used for session-bound work.
 version in `hello_ok`. If versions are incompatible, server sends
 `error {code:"version_mismatch"}` + close.
 
+> 2026-09-07 protocol collapse: two question kinds → one `ask_user_question` tool; we own both ends, no compat shims.
+
 Client → server:
 
 | type | fields | effect |
@@ -303,8 +305,7 @@ Client → server:
 | `prompt` | `text` | Submit user message when idle. Error `not_idle` if streaming |
 | `steer` | `text` | Submit message during streaming (steer equivalent). If not streaming, treated as `prompt` (no error) |
 | `abort` | — | Current turn abort (Esc equivalent). No-op if not streaming |
-| `answer` | `id`, `value`, `wasCustom`, `index?` | Resolve pending `question` (first wins). `value`: selected label or custom text. `wasCustom`: true if typed. `index`: 1-based option index (omit if custom) |
-| `answer_questionnaire` | `id`, `answers` | Resolve pending `questionnaire`. `answers` is `[{id, value, label, wasCustom, index?}]` — one entry per sub-question, matching the questionnaire's Answer shape |
+| `answer` | `id`, `answers` | Resolve pending `question` (first wins). `answers` is `[{id, value, label, wasCustom, index?}]` — one entry per question of the pending ask, `id` matching the question's id. `value`: selected value or custom text. `wasCustom`: true if typed. `index`: 1-based option index (omit if custom). One frame type for single- and multi-question asks alike (the old single-answer frame and `answer_questionnaire` are gone) |
 | `get_state` | — | Refresh `state` |
 | `get_history` | `cursor?` | Request a page of history (200 entries). Without cursor: latest 200. With cursor from a previous `history` response: the 200 entries before that cutoff |
 | `ping` | — | Client keepalive; server responds with `pong` |
@@ -318,9 +319,8 @@ Server → client:
 | `history` | `{sessionId, messages: [...], cursor?}` — see History format below |
 | `event` | `{sessionId, name, ...}` forwarded pi events. Client MUST ignore events whose `sessionId` doesn't match the last received `state.sessionId` (guards against stale events during session rebind) |
 | `streaming_buffer` | `{sessionId, content: ContentBlock[]}` — accumulated content of the in-progress assistant turn. Sent after `state`+`history` on reconnect when `isStreaming` is true. Omitted when not streaming |
-| `question` | `{sessionId, id, kind: "question", params: {question: string, options: QuestionOption[]}}` — see shapes below |
-| `questionnaire` | `{sessionId, id, kind: "questionnaire", params: {questions: SubQuestion[]}}` — see shapes below |
-| `question_resolved` | `{id, by: "client"|"cancelled", value?}` — `value` included when `by:"client"` so other clients can display what was answered |
+| `question` | `{sessionId, id, kind: "ask_user_question", params: {questions: SubQuestion[]}}` — ONE pending frame type for 1..N questions (the old `question`/`questionnaire` kinds and the `questionnaire` frame type are gone); see shape below. Wire defaults: question `label` absent → `id`; `allowOther` absent → true; option `value` absent → `label` |
+| `question_resolved` | `{id, by: "client"|"cancelled", value?}` — `value` included for single-question asks (the answer's value, so other clients can display what was answered); omitted for multi-question asks and cancellations |
 | `pong` | — |
 | `error` | `{code, message?}` |
 
@@ -328,14 +328,15 @@ Error codes: `bad_code`, `rate_limited`, `version_mismatch`, `invalid_message`,
 `not_idle` (prompt sent while streaming), `unknown_question` (answer for
 non-pending question).
 
-**Question/questionnaire param shapes** (from the extension source):
+**Question param shapes** (from the extension source):
 
 ```typescript
-type QuestionOption = { label: string; description?: string };
+type QuestionOption = { label: string; value?: string; description?: string };
+// option `value` absent → `label`
 
 type SubQuestion = {
   id: string;
-  label?: string;       // tab/page label, defaults to "Q1", "Q2", ...
+  label?: string;       // tab/page label, absent → `id`
   prompt: string;       // full question text
   options: QuestionOption[];
   allowOther?: boolean; // show "Type something..." option (default true)

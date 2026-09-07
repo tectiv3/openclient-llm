@@ -127,12 +127,12 @@ the session is connected (covers token arrival/refresh mid-session).
     `apns-collapse-id: rc-finished`: APNs discards the in-flight duplicates
     and only the latest is delivered. This is deliberate — the decision to
     collapse is explicit, not incidental.
-  - `ask()` creating a pending remote question/questionnaire → push "Agent
+  - `ask()` creating a pending remote question → push "Agent
     has a question — answer needed", payload carries `timeSensitive: true`,
-    collapse-id `rc-question`. (The question/questionnaire extensions gate on
-    the rc singleton's `askAvailable()` — serving AND (clients connected OR
-    push sendable) — so this fires exactly when the remote modal would show
-    or would be pushed to a locked phone.)
+    collapse-id `rc-question`. (The ask_user_question tool gates on the rc
+    singleton's `askAvailable()` — serving AND (clients connected OR push
+    sendable) — so this fires exactly when the remote modal would show or
+    would be pushed to a locked phone.)
 - **Payload** (minimal, < 4 KB, no secrets, no full paths). Bodies identify
   the session/task (user decision 2026-09-07 — supersedes v1's "bodies are
   fixed strings" rule; see the relaxation note below):
@@ -153,10 +153,10 @@ the session is connected (covers token arrival/refresh mid-session).
     falling back to the fixed string "Agent finished". Whitespace-collapsed,
     capped at 80 chars (hard truncate + ellipsis). Server-side metadata
     only — never agent output.
-  - Question push: title "Agent has a question". Body = the question's own
-    text (`params.question` for kind `question`, the first sub-question's
-    `prompt` for kind `questionnaire`), sanitized (control chars stripped,
-    whitespace runs collapsed to single spaces); ≤80 chars ships verbatim;
+  - Question push: title "Agent has a question". Body = the first question's
+    prompt (ALL asks — the 2026-09-07 protocol collapse left no per-kind
+    split), sanitized (control chars stripped, whitespace runs collapsed to
+    single spaces); ≤80 chars ships verbatim;
     longer text is shortened via one OpenRouter chat completion, and on ANY
     LLM failure or timeout the deterministic fallback hard-truncates the
     original (100-char cap including a trailing ellipsis). Plus

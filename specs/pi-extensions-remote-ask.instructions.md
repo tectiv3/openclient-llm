@@ -7,9 +7,19 @@ applyTo: "pi-extensions/**"
 
 ## Status
 
-Implementation plan, not yet applied. Bug mechanisms verified 2026-09-07 against pi 0.85.1
-(`../pi-mono` source) and the deployed extension layout (`~/.pi/agent/extensions/<name>` are
-directory symlinks into this repo's `pi-extensions/<name>`).
+**SUPERSEDED (2026-09-07).** Plan disposition:
+
+- **T1 (push mode-guard)** — landed (8df74bd).
+- **T2 (widened full-shape guard)** — landed in the merged ask-user-question extension
+  (41fcc98); the widened `rcRemote()` guard (requires BOTH `ask` AND `askAvailable`)
+  lives in `pi-extensions/ask-user-question/index.ts`.
+- **T3 (singleton shape-versioning)** — DROPPED by owner decision 2026-09-07: `/reload`
+  is being retired, and the widened guard covers the current call surface.
+- **T4 (APNs session unref)** — REMAINING optional hardening, not landed.
+
+The INV1–INV4 invariants below remain true and binding. The rest of this file is
+kept as the historical record of the bug mechanisms (verified 2026-09-07 against
+pi 0.85.1, `../pi-mono` source) and the original plan.
 
 ## Background
 
