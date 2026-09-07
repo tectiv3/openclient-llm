@@ -657,9 +657,8 @@ registerTest(11, "hello_five_bad_codes_triggers_rate_limit", async (ctx) => {
 // With --no-apns the child is spawned WITHOUT the PI_RC_APNS_* env; the
 // endpoint still runs as a traffic observer and every test asserts zero push
 // traffic while the surrounding RC behavior (settles, questions, get_state)
-// must keep working. (The disabled-case proof holds while this machine has no
-// ~/.pi/agent/rc-push.json; PI_RC_APNS_HOST is env-only, so a config file
-// would push to the real host, not the fake endpoint.)
+// must keep working. (The child's rc-push.json is isolated via
+// PI_RC_APNS_CONFIG, so file creds can never resolve in a run.)
 
 // The two registered tokens: token A is registered by the settled-turn test
 // and (unless dropped) persists into the persistence/replace test; token B
@@ -1334,7 +1333,16 @@ async function main() {
     process.exit(2);
   }
 
-  const childEnv = { ...process.env, PI_RC_BIND: RC_HOST, PI_RC_AUTH_FILE: authFile };
+  // PI_RC_APNS_CONFIG is the extension's config-path test seam: point the
+  // child at an (initially absent) file in the temp root so the user's real
+  // ~/.pi/agent/rc-push.json — including its persisted device token — can
+  // never leak into a run. Tests that need a file write one here explicitly.
+  const childEnv = {
+    ...process.env,
+    PI_RC_BIND: RC_HOST,
+    PI_RC_AUTH_FILE: authFile,
+    PI_RC_APNS_CONFIG: join(tmpRoot, "rc-push.json"),
+  };
   if (!opts.noApns) {
     // The harness owns the child environment: point the extension at the fake
     // endpoint and make its TLS layer trust the self-signed cert (no CA config

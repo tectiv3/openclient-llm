@@ -7,6 +7,9 @@ import {
     resolveApnsConfig,
     writeApnsConfig,
 } from './apns'
+
+// apns.ts's DEFAULT_HOST includes a port; the prompt shows the bare host.
+const DEFAULT_HOST_DISPLAY = 'api.sandbox.push.apple.com:443'
 import { dbgLog } from './debug'
 
 // Structural type mirrors the question extension's RcRemote: rc is
@@ -91,8 +94,11 @@ export async function runPushSetup(
         }
     }
 
+    const host = await promptHost(remote, ui)
+    if (host === null) return cancelled(ui)
+
     try {
-        writeApnsConfig(teamId, keyId, keyFile)
+        writeApnsConfig(teamId, keyId, keyFile, host)
     } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
         ui.notify(`apns push setup failed: could not write ${apnsConfigPath()}: ${detail}`, 'error')
@@ -100,7 +106,7 @@ export async function runPushSetup(
         return
     }
     ui.notify(
-        `apns push configured: teamId ${teamId}, keyId ${keyId}, keyFile ${keyFile} → ${apnsConfigPath()}`,
+        `apns push configured: teamId ${teamId}, keyId ${keyId}, keyFile ${keyFile}, host ${host} → ${apnsConfigPath()}`,
         'info'
     )
     remote.refreshStatus()
@@ -119,6 +125,27 @@ async function promptValidated(
         const problem = validate(raw)
         if (problem === null) return raw
         ui.notify(`${title.split(' (')[0]}: ${problem} — try again`, 'warning')
+    }
+}
+
+const HOST_PATTERN = /^[a-z0-9][a-z0-9.-]*(:[0-9]{1,5})?$/i
+
+async function promptHost(remote: RcRemoteLike, ui: ExtensionContext['ui']): Promise<string | null> {
+    // Empty answer takes the default host — the common case, so the prompt is
+    // skippable instead of a forced re-entry of a long hostname.
+    for (;;) {
+        const raw = await promptValue(
+            remote,
+            ui,
+            `APNs host:port (default ${DEFAULT_HOST_DISPLAY}, empty = default; sandbox is required for development builds)`
+        )
+        if (raw === null) return null
+        if (raw === '') return DEFAULT_HOST_DISPLAY
+        if (!HOST_PATTERN.test(raw)) {
+            ui.notify('host must look like api.sandbox.push.apple.com or host:port — try again', 'warning')
+            continue
+        }
+        return raw
     }
 }
 
@@ -148,7 +175,7 @@ async function promptConfirm(
 
 function cancelled(ui: ExtensionContext['ui']): void {
     ui.notify(
-        'apns push setup cancelled. /rc push-setup expects: APNs Team ID, APNs Key ID, and the file path to the .p8 key (Apple → Keys → "Apple Push Notifications" key). Nothing was written.',
+        'apns push setup cancelled. /rc push-setup expects: APNs Team ID, APNs Key ID, the file path to the .p8 key (Apple → Keys → "Apple Push Notifications" key), and optionally the APNs host. Nothing was written.',
         'info'
     )
     dbgLog('push-setup: cancelled')

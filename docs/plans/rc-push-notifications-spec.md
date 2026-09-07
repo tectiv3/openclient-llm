@@ -20,7 +20,7 @@ APNs push covers the suspended case.
 | 1 | Delivery path | APNs **direct from the pi rc server** (not a Casa/relay proxy). APNs is a public HTTPS/HTTP2 endpoint; the rc server needs only outbound egress, which it already has (LLM calls). Rejected: local notifications only (dead after the ~30 s background window — the case this feature targets); silent push (content-available) to wake the app (throttled by Apple for battery, unreliable); Casa proxy (extra hop, no benefit — Casa would only be for the app, not for pushing to the app) |
 | 2 | Trigger points | `agent_settled` → "Agent finished" (normal); `ask()` creating a remote question → "Agent has a question — answer needed" with `timeSensitive`. Push bodies are **fixed strings, chosen at send time by the server** — no LLM-generated or agent/user-controlled text in any push payload. Only when a token is registered |
 | 3 | Server impl | Node stdlib only (constraint preserved): `node:http2` + `node:tls` for APNs HTTP/2 over TLS, `node:crypto` for a per-send ES256 JWT (5-min TTL) from a P-256 key parsed out of a `.p8` PEM file |
-| 4 | Config | Env vars on the pi machine (`PI_RC_APNS_*`) or `~/.pi/agent/rc-push.json` (written by the `/rc push-setup` command, chmod 600, holds team id + key id + key path — never key contents); env overrides config file. Nothing committed. Push is **disabled** (no-op, single log line) unless key file + team id + key id are all set; all other RC features unaffected |
+| 4 | Config | Env vars on the pi machine (`PI_RC_APNS_*`) or `~/.pi/agent/rc-push.json` (written by the `/rc push-setup` command, chmod 600, holds team id + key id + key path + APNs host — never key contents; the singleton also maintains a runtime `token` field there); env overrides config file. Nothing committed. Push is **disabled** (no-op, single log line) unless key file + team id + key id are all set; all other RC features unaffected |
 | 5 | Protocol | Additive: one new client→server message `push_token`. **No new server→client messages** — pushes go via APNs, never over the WS |
 | 6 | Token lifetime | **Singleton-persistent**: the last-registered token wins and is kept on the pi-rc singleton (globalThis state, consistent with the existing RC singleton's `clients`/streaming state). Survives client disconnects and process-suspension churn on the phone. This is what makes pushes work for the **full phone-suspension lifetime**: by then the WS is dead and the client's reconnects may be exhausted, so a per-connection token would be long gone before the push is triggered. Accepted trade-off: a tailnet client running the current client code could register *its own* device token and replace the stored one — but APNs device tokens are per-device, so this **redirects pushes only** (and the payload carries no agent/user text, so there is nothing sensitive to leak) |
 | 7 | iOS app | Push capability + Time Sensitive Notifications entitlement; `registerForRemoteNotifications` at app init; notification authorization requested contextually on first RC connect (not at launch). Push registration code is `#if os(iOS)` — macOS target must compile, macOS gets no push |
@@ -100,8 +100,15 @@ the session is connected (covers token arrival/refresh mid-session).
   - `PI_RC_APNS_KEY_ID`
   - `PI_RC_APNS_TOPIC` — app bundle id, default `com.kinchaku.openclient-llm`
     (must match the app's `PRODUCT_BUNDLE_IDENTIFIER` exactly)
-  - `PI_RC_APNS_HOST` — default `api.push.apple.com:443`; overridable (e.g.
-    `127.0.0.1:8443`) for the test harness
+  - `PI_RC_APNS_HOST` — default `api.sandbox.push.apple.com:443`;
+    overridable (e.g. `127.0.0.1:8443`) for the test harness. Sandbox is
+    the default because this project's builds are development-signed:
+    their device tokens are sandbox tokens, and the production endpoint
+    rejects them (400 `BadDeviceToken`) while the sandbox endpoint
+    accepts both sandbox and production tokens. (Observed directly
+    against APNs, 2026-09-07: identical token → 400 on production, 200
+    + `apns-id` on sandbox; the rejection reason arrives in the JSON
+    response body `{"reason": ...}`, not only the `apns-reason` header.)
 - **Triggers** (only when the singleton holds a token):
   - `agent_settled` (inside `trackEvent`, which already toggles
     `isStreaming`) → push "Agent finished". **Firing frequency**: this fires
@@ -160,8 +167,9 @@ machine (env vars remain supported — see config precedence below).
   `args.trim() === 'push-setup'` → run the setup flow; any other args
   keep the existing toggle behavior (a bare `/rc` still toggles).
   Optional: `getArgumentCompletions` suggesting `push-setup`.
-- **What it collects** — three prompts, in order: (1) APNs Team ID,
-  (2) APNs Key ID, (3) the FILE PATH to the `.p8` private key.
+- **What it collects** — four prompts, in order: (1) APNs Team ID,
+  (2) APNs Key ID, (3) the FILE PATH to the `.p8` private key,
+  (4) the APNs `host:port` (empty answer takes the sandbox default).
   **Never prompt for key contents** — ask() answers transit the WS and
   land in the pi session transcript, so anything prompted for becomes
   session content; only IDs and a path are ever asked.
@@ -201,15 +209,21 @@ machine (env vars remain supported — see config precedence below).
   same directory, `rename` over the target — atomic, and only after
   all three values are validated):
 
-    { "teamId": "<TEAM_ID>", "keyId": "<KEYID>", "keyFile": "<path to AuthKey_<KEYID>.p8>" }
+    { "teamId": "<TEAM_ID>", "keyId": "<KEYID>", "keyFile": "<path to AuthKey_<KEYID>.p8>",
+      "host": "api.sandbox.push.apple.com:443" }
 
-  (placeholder values, not real IDs)
-- **Config precedence** (the APNs module reads config once at first
-  use / on `/rc` toggle-on): env vars `PI_RC_APNS_TEAM_ID` /
-  `PI_RC_APNS_KEY_ID` / `PI_RC_APNS_KEY_FILE` (when set) **override**
-  the config file, field by field. `PI_RC_APNS_HOST` stays env-only —
-  it is a test seam and is never read from or written to the config
-  file.
+  (placeholder values, not real IDs). The singleton also maintains a
+  `token` field in the same file at runtime: the last-registered device
+  token, written on registration (so a fresh pi session is push-ready
+  before the phone reconnects) and deleted on exact-token 410 — both via
+  the same atomic 0600 write, merge-preserving the other fields.
+- **Config precedence** (the APNs module resolves config on every use):
+  env vars `PI_RC_APNS_TEAM_ID` / `PI_RC_APNS_KEY_ID` /
+  `PI_RC_APNS_KEY_FILE` / `PI_RC_APNS_HOST` (when set) **override** the
+  config file, field by field; a missing host falls back to the sandbox
+  default. `PI_RC_APNS_CONFIG` overrides the config file path itself — a
+  test seam so the harness can isolate its child from the user's real
+  file (mirrors `PI_RC_AUTH_FILE`).
 - **Output**: a confirmation summarizing the effective source per
   value (env vs config file) and the validation results, or the
   precise failure reason. If push is already fully configured, report
@@ -315,6 +329,17 @@ machine (env vars remain supported — see config precedence below).
 
 ## Open items / risks
 
+- **Environment-declared push endpoint (follow-up, not implemented)**: the
+  `push_token` frame should carry the client's own aps environment
+  (`{ token, env: "development" | "production" }`, from the app's
+  `aps-environment`), stored alongside the token; the server would route
+  each push to `api.sandbox.push.apple.com` or `api.push.apple.com` to match
+  the token it holds, and the server-side host config becomes an
+  override/test seam only. This removes the endpoint/token mismatch class of
+  400 `BadDeviceToken` (the 2026-09-07 sandbox incident) by construction and
+  lets one pi machine serve dev builds and App Store builds. Additive and
+  backward-compatible: clients omitting `env` fall back to the configured
+  host.
 - **Token invalidation**: APNs `410` / `BadDeviceToken` response → drop the
   stored token from the singleton, log, keep serving; the client re-sends on
   next (re)connect or on token refresh. No retry/backoff.

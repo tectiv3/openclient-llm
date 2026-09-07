@@ -5,7 +5,10 @@ import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { dbgLog } from './debug'
 
-const DEFAULT_HOST = 'api.push.apple.com:443'
+// Sandbox by default: this project's builds use development signing, so their
+// device tokens are sandbox tokens — the production endpoint rejects them
+// (BadDeviceToken) while sandbox accepts both sandbox and production tokens.
+const DEFAULT_HOST = 'api.sandbox.push.apple.com:443'
 const DEFAULT_TOPIC = 'com.kinchaku.openclient-llm'
 const JWT_TTL_SECONDS = 300
 const SEND_TIMEOUT_MS = 15_000
@@ -42,6 +45,11 @@ export type PushOutcome =
 export type KeyValidation = { ok: true; key: KeyObject } | { ok: false; reason: string }
 
 export function apnsConfigPath(): string {
+    // Test seam (mirrors PI_RC_AUTH_FILE): lets the harness point the child at
+    // an isolated file so the user's real config — including the persisted
+    // device token — never leaks into a test run.
+    const fromEnv = process.env.PI_RC_APNS_CONFIG?.trim()
+    if (fromEnv) return fromEnv
     return join(homedir(), '.pi', 'agent', 'rc-push.json')
 }
 
@@ -79,10 +87,10 @@ function writeRawConfig(obj: JsonObject): void {
     renameSync(tempFile, path)
 }
 
-function readConfigFile(): { teamId?: string; keyId?: string; keyFile?: string } {
+function readConfigFile(): { teamId?: string; keyId?: string; keyFile?: string; host?: string } {
     const raw = readRawConfig()
-    const out: { teamId?: string; keyId?: string; keyFile?: string } = {}
-    for (const field of ['teamId', 'keyId', 'keyFile'] as const) {
+    const out: { teamId?: string; keyId?: string; keyFile?: string; host?: string } = {}
+    for (const field of ['teamId', 'keyId', 'keyFile', 'host'] as const) {
         const value = raw[field]
         if (typeof value === 'string' && value.length > 0) out[field] = value
     }
@@ -117,7 +125,7 @@ export function resolveApnsConfig(): ApnsConfig | null {
     const keyId = pick('PI_RC_APNS_KEY_ID', 'keyId')
     const keyFile = pick('PI_RC_APNS_KEY_FILE', 'keyFile')
     if (!teamId.value || !keyId.value || !keyFile.value) return null
-    const hostSpec = envValue('PI_RC_APNS_HOST') ?? DEFAULT_HOST
+    const hostSpec = envValue('PI_RC_APNS_HOST') ?? file.host ?? DEFAULT_HOST
     const [host, portPart] = hostSpec.split(':')
     const port = portPart ? Number.parseInt(portPart, 10) : 443
     if (!host || !Number.isInteger(port) || port <= 0) return null
@@ -152,9 +160,9 @@ export function missingConfigFields(): string {
     return `invalid PI_RC_APNS_HOST`
 }
 
-export function writeApnsConfig(teamId: string, keyId: string, keyFile: string): void {
+export function writeApnsConfig(teamId: string, keyId: string, keyFile: string, host: string): void {
     // Merge, not replace: a saved device token survives a push-setup rewrite.
-    writeRawConfig({ ...readRawConfig(), teamId, keyId, keyFile })
+    writeRawConfig({ ...readRawConfig(), teamId, keyId, keyFile, host })
 }
 
 export function loadApnsKey(keyFile: string): KeyValidation {
@@ -355,25 +363,41 @@ function postToApns(
         // No session-level 'error' listener here: the cached session is
         // shared across sends, so one listener per send would leak. Request
         // errors (including session death) surface on the request itself.
-        h2.request({
+        const req = h2.request({
             ':method': 'POST',
             ':path': `/3/device/${token}`,
             ':scheme': 'https',
             ':authority': authority,
             authorization: `Bearer ${signJwt(config, key)}`,
             'apns-topic': config.topic,
+            'apns-push-type': 'alert',
             'apns-priority': '5',
             'apns-timestamp': String(Math.floor(Date.now() / 1000)),
             'apns-collapse-id': collapseId,
             'content-type': 'application/json',
             'content-length': String(body.length),
         })
-            .on('error', error => finish(undefined, error))
-            .on('response', headers => {
-                const status = Number(headers[':status'] ?? 0)
-                const reason = typeof headers['apns-reason'] === 'string' ? headers['apns-reason'] : undefined
-                finish({ status, ...(reason ? { reason } : {}) })
-            })
-            .end(body)
+        let status = 0
+        let responseBody = ''
+        req.on('error', error => finish(undefined, error))
+        req.on('response', headers => {
+            status = Number(headers[':status'] ?? 0)
+        })
+        req.on('data', chunk => {
+            responseBody += chunk
+        })
+        req.on('end', () => {
+            let reason: string | undefined
+            if (responseBody.length > 0) {
+                try {
+                    const parsed = JSON.parse(responseBody)
+                    if (typeof parsed?.reason === 'string') reason = parsed.reason
+                } catch {
+                    // non-JSON body; ignore
+                }
+            }
+            finish({ status, ...(reason ? { reason } : {}) })
+        })
+        req.end(body)
     })
 }
