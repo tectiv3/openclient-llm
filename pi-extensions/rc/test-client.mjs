@@ -36,7 +36,10 @@ const RC_HOST = "127.0.0.1";
 const RC_PORT = 47800;
 const RC_FAST = true;
 const PI_COMMAND = "pi";
-const PI_ARGS = ["--mode", "rpc", "--provider", "openrouter", "--model", "qwen/qwen3.8-27b", "--approve", "--no-session"];
+// Cheap fast model (zai coding subscription): the harness only needs
+// exact-instruction following (test-project/AGENTS.md contracts), not
+// reasoning quality.
+const PI_ARGS = ["--mode", "rpc", "--provider", "zai", "--model", "glm-5.3-flash", "--approve", "--no-session"];
 const READINESS_TIMEOUT_MS = 20_000;
 const AUTH_POLL_INTERVAL_MS = 100;
 const AUTH_WAIT_TIMEOUT_MS = 10_000;
