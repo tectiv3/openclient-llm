@@ -655,6 +655,10 @@ function pushAllowed(state: RcSingleton): boolean {
 
 function fireFinishedPush(state: RcSingleton): void {
     if (!pushAllowed(state)) return
+    // Pushes follow the /rc toggle: finished pings are only useful while the
+    // remote-control session is live, matching the question-push gate (ask
+    // requires a serving server via askAvailable).
+    if (!state.isServing()) return
     const token = state.pushToken
     if (!token) return
     void sendApnsPush(token, FINISHED_COLLAPSE_ID, finishedPayload(sessionId(state)))
