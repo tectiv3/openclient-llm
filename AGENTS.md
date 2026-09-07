@@ -86,3 +86,24 @@ These run inside the pi process (Node/Bun). The Swift app's `Features/Code/` is 
 - Commit messages: imperative style ("Add chat streaming support").
 - After implementation: compile and commit (linter runs on commit hook).
 - Build both iOS and macOS after changing shared code.
+
+### Pre-commit Hook
+
+The git pre-commit hook automatically runs formatting and linting on staged files.
+**Do not duplicate these checks manually** — the hook handles them.
+
+**Swift files:**
+1. `swiftformat` — auto-formats and re-stages.
+2. `swiftlint --fix` — auto-fixes and re-stages.
+3. `swiftlint lint` — blocks on remaining errors.
+
+**TypeScript files (`pi-extensions/`):**
+1. `prettier --write` — auto-formats and re-stages.
+2. `eslint --fix` — auto-fixes and re-stages; blocks on remaining errors.
+3. `tsc --noEmit` — type-checks against a baseline (`pi-extensions/.tsc-baseline`). Only **new** errors (not in the baseline) block the commit.
+
+**Baseline rules:**
+- `pi-extensions/.tsc-baseline` lists known tsc errors from pre-existing type mismatches (stub-vs-runtime gaps). Checked into git.
+- If you fix a baseline error, regenerate the baseline: `cd pi-extensions && npx tsc --noEmit 2>&1 | grep "error TS" | sort > .tsc-baseline`
+- If you introduce a new tsc error, the commit is blocked. Fix it or update the baseline with justification.
+- Keep eslint warnings at zero — the hook blocks on any eslint output.

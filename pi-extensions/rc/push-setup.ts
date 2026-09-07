@@ -63,17 +63,27 @@ export async function runPushSetup(
             'info'
         )
     }
-    const teamId = await promptValidated(state, ui, 'APNs Team ID (10 alphanumeric characters)', value =>
-        ID_PATTERN.test(value) ? null : 'must be exactly 10 alphanumeric characters'
+    const teamId = await promptValidated(
+        state,
+        ui,
+        'APNs Team ID (10 alphanumeric characters)',
+        value => (ID_PATTERN.test(value) ? null : 'must be exactly 10 alphanumeric characters')
     )
     if (teamId === null) return cancelled(ui)
-    const keyId = await promptValidated(state, ui, 'APNs Key ID (10 alphanumeric characters)', value =>
-        ID_PATTERN.test(value) ? null : 'must be exactly 10 alphanumeric characters'
+    const keyId = await promptValidated(
+        state,
+        ui,
+        'APNs Key ID (10 alphanumeric characters)',
+        value => (ID_PATTERN.test(value) ? null : 'must be exactly 10 alphanumeric characters')
     )
     if (keyId === null) return cancelled(ui)
     let keyFile: string
     for (;;) {
-        const raw = await promptValue(state, ui, 'File path to the .p8 private key (never its contents)')
+        const raw = await promptValue(
+            state,
+            ui,
+            'File path to the .p8 private key (never its contents)'
+        )
         if (raw === null) return cancelled(ui)
         const validation = loadApnsKey(raw)
         if (validation.ok) {
@@ -104,7 +114,10 @@ export async function runPushSetup(
         writeApnsConfig(teamId, keyId, keyFile, host)
     } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
-        ui.notify(`apns push setup failed: could not write ${apnsConfigPath()}: ${detail}`, 'error')
+        ui.notify(
+            `apns push setup failed: could not write ${apnsConfigPath()}: ${detail}`,
+            'error'
+        )
         dbgLog('push-setup: config write failed:', detail)
         return
     }
@@ -113,7 +126,16 @@ export async function runPushSetup(
         'info'
     )
     state.refreshStatus()
-    dbgLog('push-setup: wrote config, teamId', teamId, 'keyId', keyId, 'keyFile', keyFile, 'sessionId', sessionId)
+    dbgLog(
+        'push-setup: wrote config, teamId',
+        teamId,
+        'keyId',
+        keyId,
+        'keyFile',
+        keyFile,
+        'sessionId',
+        sessionId
+    )
 }
 
 async function promptValidated(
@@ -133,7 +155,10 @@ async function promptValidated(
 
 const HOST_PATTERN = /^[a-z0-9][a-z0-9.-]*(:[0-9]{1,5})?$/i
 
-async function promptHost(state: RcRemoteLike, ui: ExtensionContext['ui']): Promise<string | null> {
+async function promptHost(
+    state: RcRemoteLike,
+    ui: ExtensionContext['ui']
+): Promise<string | null> {
     // Empty answer takes the default host — the common case, so the prompt is
     // skippable instead of a forced re-entry of a long hostname.
     for (;;) {
@@ -145,7 +170,10 @@ async function promptHost(state: RcRemoteLike, ui: ExtensionContext['ui']): Prom
         if (raw === null) return null
         if (raw === '') return DEFAULT_HOST_DISPLAY
         if (!HOST_PATTERN.test(raw)) {
-            ui.notify('host must look like api.sandbox.push.apple.com or host:port — try again', 'warning')
+            ui.notify(
+                'host must look like api.sandbox.push.apple.com or host:port — try again',
+                'warning'
+            )
             continue
         }
         return raw

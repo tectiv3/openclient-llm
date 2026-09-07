@@ -26,5 +26,9 @@ playground.xcworkspace
 .vscode/
 build
 
+# Node
+node_modules/
+.pnpm-store/
+
 # Serena — machine-specific memories (contain local IPs/paths)
 .serena/memories/tooling/machine_environment.md

@@ -2,7 +2,7 @@ import { createPrivateKey, sign, type KeyObject } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import * as http2 from 'node:http2'
 import { homedir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { dbgLog } from './debug'
 
 // Sandbox by default: this project's builds use development signing, so their
@@ -84,11 +84,19 @@ function writeRawConfig(obj: JsonObject): void {
     const dir = dirname(path)
     if (dir !== '.' && !existsSync(dir)) mkdirSync(dir, { recursive: true })
     const tempFile = `${path}.${process.pid}.${Date.now()}.tmp`
-    writeFileSync(tempFile, `${JSON.stringify(obj, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+    writeFileSync(tempFile, `${JSON.stringify(obj, null, 2)}\n`, {
+        encoding: 'utf8',
+        mode: 0o600,
+    })
     renameSync(tempFile, path)
 }
 
-function readConfigFile(): { teamId?: string; keyId?: string; keyFile?: string; host?: string } {
+function readConfigFile(): {
+    teamId?: string
+    keyId?: string
+    keyFile?: string
+    host?: string
+} {
     const raw = readRawConfig()
     const out: { teamId?: string; keyId?: string; keyFile?: string; host?: string } = {}
     for (const field of ['teamId', 'keyId', 'keyFile', 'host'] as const) {
@@ -161,7 +169,12 @@ export function missingConfigFields(): string {
     return `invalid PI_RC_APNS_HOST`
 }
 
-export function writeApnsConfig(teamId: string, keyId: string, keyFile: string, host: string): void {
+export function writeApnsConfig(
+    teamId: string,
+    keyId: string,
+    keyFile: string,
+    host: string
+): void {
     // Merge, not replace: a saved device token survives a push-setup rewrite.
     writeRawConfig({ ...readRawConfig(), teamId, keyId, keyFile, host })
 }
@@ -180,7 +193,10 @@ export function loadApnsKey(keyFile: string): KeyValidation {
     } catch (error) {
         return { ok: false, reason: `not a valid PKCS#8 PEM key: ${errorMessage(error)}` }
     }
-    if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
+    if (
+        key.asymmetricKeyType !== 'ec' ||
+        key.asymmetricKeyDetails?.namedCurve !== 'prime256v1'
+    ) {
         return { ok: false, reason: 'key is not a P-256 EC key' }
     }
     // Same ES256/IEEE-P1363 trap as the JWT path: Node's default DER encoding
@@ -192,7 +208,10 @@ export function loadApnsKey(keyFile: string): KeyValidation {
             dsaEncoding: 'ieee-p1363',
         })
         if (testSignature.length !== 64) {
-            return { ok: false, reason: `ES256 test signature is ${testSignature.length} bytes, expected 64` }
+            return {
+                ok: false,
+                reason: `ES256 test signature is ${testSignature.length} bytes, expected 64`,
+            }
         }
     } catch (error) {
         return { ok: false, reason: `ES256 test signature failed: ${errorMessage(error)}` }
@@ -283,7 +302,10 @@ export function finishedPayload(sessionId: string): JsonObject {
 export function questionPayload(sessionId: string): JsonObject {
     return {
         aps: {
-            alert: { title: 'Agent has a question', body: 'Agent has a question — answer needed' },
+            alert: {
+                title: 'Agent has a question',
+                body: 'Agent has a question — answer needed',
+            },
             sound: 'default',
             'thread-id': sessionId,
             timeSensitive: true,
@@ -329,10 +351,23 @@ export async function sendApnsPush(
         return { ok: 'error', detail }
     }
     if (result.status === 410 || result.reason === 'BadDeviceToken') {
-        dbgLog('apns push: device token invalid (status', result.status, 'reason', result.reason ?? '-', '— token dropped')
+        dbgLog(
+            'apns push: device token invalid (status',
+            result.status,
+            'reason',
+            result.reason ?? '-',
+            '— token dropped'
+        )
         return { ok: 'dropped', status: result.status, reason: result.reason }
     }
-    dbgLog('apns push sent: status', result.status, 'reason', result.reason ?? '-', 'collapseId', collapseId)
+    dbgLog(
+        'apns push sent: status',
+        result.status,
+        'reason',
+        result.reason ?? '-',
+        'collapseId',
+        collapseId
+    )
     return { ok: 'sent', status: result.status, reason: result.reason }
 }
 
@@ -356,7 +391,10 @@ function postToApns(
             else resolve(value)
         }
         const timeout = setTimeout(() => {
-            finish(undefined, new Error(`apns request timed out after ${SEND_TIMEOUT_MS}ms (${authority})`))
+            finish(
+                undefined,
+                new Error(`apns request timed out after ${SEND_TIMEOUT_MS}ms (${authority})`)
+            )
             closeApns()
         }, SEND_TIMEOUT_MS)
         // No session-level 'error' listener here: the cached session is

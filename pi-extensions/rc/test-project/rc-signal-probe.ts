@@ -28,7 +28,10 @@ export default function rcSignalProbe(pi: ExtensionAPI): void {
             const rc = (globalThis as unknown as Record<symbol, ProbeAsk | undefined>)[RC_KEY]
             const which = args.trim()
             if (!rc || (which !== 'aborted' && which !== 'pend')) {
-                ctx.ui.notify(`rcsignal: unsupported (rc=${rc ? 'yes' : 'no'}, args='${which}')`, 'warning')
+                ctx.ui.notify(
+                    `rcsignal: unsupported (rc=${rc ? 'yes' : 'no'}, args='${which}')`,
+                    'warning'
+                )
                 return
             }
             const controller = new AbortController()
@@ -50,7 +53,10 @@ export default function rcSignalProbe(pi: ExtensionAPI): void {
                 controller.abort()
             }
             const answer = await askPromise
-            ctx.ui.notify(`rcsignal ${which}: resolved ${answer === null ? 'null' : 'non-null'}`, 'info')
+            ctx.ui.notify(
+                `rcsignal ${which}: resolved ${answer === null ? 'null' : 'non-null'}`,
+                'info'
+            )
         },
     })
 }
