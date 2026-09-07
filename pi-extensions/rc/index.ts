@@ -523,7 +523,9 @@ function handleClientMessage(state: RcSingleton, client: RcClient, message: unkn
 function helloTokenMatches(state: RcSingleton, presented: string): boolean {
     const registered = state.pushToken
     if (registered === null || presented.length !== registered.length) return false
-    return timingSafeEqual(Buffer.from(presented), Buffer.from(registered))
+    // Tokens are stored lowercase (write-point normalization); lowercase the
+    // presented side too so casing differences never fail auto-auth.
+    return timingSafeEqual(Buffer.from(presented.toLowerCase()), Buffer.from(registered))
 }
 
 function handleHello(state: RcSingleton, client: RcClient, message: JsonObject): void {
@@ -626,9 +628,9 @@ function handlePushToken(state: RcSingleton, client: RcClient, message: JsonObje
         dbgLog('push_token ignored (invalid):', client.ip)
         return
     }
-    // Normalize at the single write point: readStoredDeviceToken also
-    // lowercases on read, and helloTokenMatches is case-sensitive, so an
-    // upper/mixed-case registration would otherwise fail auto-auth.
+    // Normalize at the single write point so the stored token is always
+    // lowercase (readStoredDeviceToken lowercases on read as well, and
+    // helloTokenMatches lowercases the presented side before comparing).
     token = token.toLowerCase()
     state.pushToken = token
     saveDeviceToken(token)

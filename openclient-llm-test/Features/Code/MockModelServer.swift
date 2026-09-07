@@ -40,7 +40,7 @@ final class MockModelServer: @unchecked Sendable {
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = in_port_t(0).bigEndian
-        addr.sin_addr = in_addr(s_addr: UInt32(0x7f000001).bigEndian)
+        addr.sin_addr = in_addr(s_addr: UInt32(0x7F00_0001).bigEndian)
         let bindResult = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
                 bind(socketFd, saPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
@@ -65,8 +65,8 @@ final class MockModelServer: @unchecked Sendable {
             close(socketFd)
             throw MockModelError.bindFailed
         }
-        self.port = Int(UInt16(bigEndian: boundAddr.sin_port))
-        self.serverFd = socketFd
+        port = Int(UInt16(bigEndian: boundAddr.sin_port))
+        serverFd = socketFd
         let thread = Thread { [self] in
             self.acceptLoop()
         }
@@ -112,7 +112,7 @@ final class MockModelServer: @unchecked Sendable {
         var buffer = Data()
         while true {
             let parsed = parseNextRequest(from: &buffer)
-            if case .request(let method, let path, let body) = parsed {
+            if case let .request(method, path, body) = parsed {
                 if method == "POST", let body {
                     stateLock.lock()
                     requestBodies.append(body)
@@ -126,10 +126,16 @@ final class MockModelServer: @unchecked Sendable {
                         alive = false
                         break
                     }
-                    if write.delay > 0 { usleep(useconds_t(write.delay)) }
+                    if write.delay > 0 {
+                        usleep(useconds_t(write.delay))
+                    }
                 }
-                if !alive { return }
-                if path.contains("chat/completions") { return }
+                if !alive {
+                    return
+                }
+                if path.contains("chat/completions") {
+                    return
+                }
                 continue
             }
             // Incomplete request: block until more data arrives.
@@ -142,10 +148,10 @@ final class MockModelServer: @unchecked Sendable {
     /// Blocks reading from the socket into `buffer`; `false` on EOF or
     /// error (client gone).
     private func readAvailable(into buffer: inout Data, from socketFd: Int32) -> Bool {
-        var chunk = [UInt8](repeating: 0, count: 65_536)
+        var chunk = [UInt8](repeating: 0, count: 65536)
         let count = read(socketFd, &chunk, chunk.count)
         guard count > 0 else { return false }
-        buffer.append(contentsOf: chunk[0..<count])
+        buffer.append(contentsOf: chunk[0 ..< count])
         return true
     }
 
@@ -165,7 +171,7 @@ final class MockModelServer: @unchecked Sendable {
             return data.isEmpty ? .eof : .needMore
         }
         let headerEndIndex = headerEnd.upperBound
-        let headerBytes = data.subdata(in: 0..<headerEndIndex)
+        let headerBytes = data.subdata(in: 0 ..< headerEndIndex)
         guard let headerText = String(data: headerBytes, encoding: .utf8) else {
             return .eof
         }
@@ -174,7 +180,8 @@ final class MockModelServer: @unchecked Sendable {
             let parts = line.components(separatedBy: ":")
             if parts.count == 2,
                parts[0].trimmingCharacters(in: .whitespaces).lowercased()
-               == "content-length" {
+               == "content-length"
+            {
                 contentLength = Int(
                     parts[1].trimmingCharacters(in: .whitespaces)
                 ) ?? 0
@@ -185,7 +192,7 @@ final class MockModelServer: @unchecked Sendable {
         var body = ""
         if contentLength > 0 {
             let bodyBytes = data.subdata(
-                in: headerEndIndex..<(headerEndIndex + contentLength)
+                in: headerEndIndex ..< (headerEndIndex + contentLength)
             )
             body = String(data: bodyBytes, encoding: .utf8) ?? ""
         }
@@ -208,7 +215,9 @@ final class MockModelServer: @unchecked Sendable {
                 guard let base = raw.baseAddress else { return 0 }
                 return write(socketFd, base.advanced(by: offset), raw.count - offset)
             }
-            if written <= 0 { return false }
+            if written <= 0 {
+                return false
+            }
             offset += written
         }
         return true
@@ -230,7 +239,8 @@ final class MockModelServer: @unchecked Sendable {
             return [(jsonResponse(body: json), 0)]
         }
         guard method == "POST", path.contains("chat/completions"),
-              let body else {
+              let body
+        else {
             return [(
                 jsonResponse(
                     body: #"{"error":"not found"}"#, status: "404 Not Found"
@@ -246,7 +256,7 @@ final class MockModelServer: @unchecked Sendable {
             + "Connection: close\r\n\r\n"
         let id = "chatcmpl-mock"
         switch scenario(forBody: body) {
-        case .text(let text):
+        case let .text(text):
             return [
                 (header, 0),
                 (sse(chunkJson(id, #"{"role":"assistant"}"#)), 0),
@@ -254,7 +264,7 @@ final class MockModelServer: @unchecked Sendable {
                 (sse(chunkJson(id, "{}", finish: "stop")), 0),
                 ("data: [DONE]\n\n", 0),
             ]
-        case .toolCall(let name, let arguments):
+        case let .toolCall(name, arguments):
             let toolCall = "{\"tool_calls\":[{\"index\":0,\"id\":\"call-mock\","
                 + "\"type\":\"function\",\"function\":{\"name\":\(jsonString(name)),"
                 + "\"arguments\":\(jsonString(arguments))}}]}"
@@ -269,7 +279,7 @@ final class MockModelServer: @unchecked Sendable {
         case .longStream:
             var writes: [(chunk: String, delay: Int)] = [(header, 0)]
             writes.append((sse(chunkJson(id, #"{"role":"assistant"}"#)), 0))
-            for chunk in 0..<25 {
+            for chunk in 0 ..< 25 {
                 writes.append((sse(chunkJson(id, #"{"content":"token \#(chunk) "}"#)), 100_000))
             }
             writes.append((sse(chunkJson(id, "{}", finish: "stop")), 0))
@@ -285,7 +295,7 @@ final class MockModelServer: @unchecked Sendable {
         guard
             let data = body.data(using: .utf8),
             let json = try? JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
+            as? [String: Any],
             let messages = json["messages"] as? [[String: Any]],
             !messages.isEmpty
         else {
@@ -297,10 +307,10 @@ final class MockModelServer: @unchecked Sendable {
         let lastUser = messages.last { ($0["role"] as? String) == "user" }
         let content = MockModelServer.messageContent(lastUser)
         if content.contains("ASKFORM") {
-            return .toolCall(name: "questionnaire", arguments: questionnaireArgs)
+            return .toolCall(name: "ask_user_question", arguments: askFormArgs)
         }
         if content.contains("ASK") {
-            return .toolCall(name: "question", arguments: questionArgs)
+            return .toolCall(name: "ask_user_question", arguments: askArgs)
         }
         if content.contains("PONG-E2E") {
             return .text("PONG-E2E")
@@ -315,20 +325,25 @@ final class MockModelServer: @unchecked Sendable {
     /// string or an array of content parts (`{"type":"text","text":...}`).
     static func messageContent(_ message: [String: Any]?) -> String {
         guard let message else { return "" }
-        if let text = message["content"] as? String { return text }
+        if let text = message["content"] as? String {
+            return text
+        }
         let parts = message["content"] as? [[String: Any]] ?? []
         return parts.compactMap { $0["text"] as? String }.joined()
     }
 
     static let modelId = "qwen3.8-27b"
 
-    /// Arguments for the `question` tool: a color question with three
-    /// options (the test asserts these shapes).
-    static let questionArgs =
-        "{\"question\":\"What is your favorite color?\""
-            + ",\"options\":[{\"label\":\"Red\"},{\"label\":\"Green\"},{\"label\":\"Blue\"}]}"
+    /// Arguments for the `ask_user_question` tool: one color question with
+    /// three options in the unified `questions` array (the test asserts
+    /// these shapes).
+    static let askArgs =
+        "{\"questions\":[{\"id\":\"q1\",\"prompt\":\"What is your favorite color?\""
+            + ",\"options\":[{\"label\":\"Red\"},{\"label\":\"Green\"},{\"label\":\"Blue\"}]}]}"
 
-    static let questionnaireArgs =
+    /// Two-question form: the old questionnaire content, reshaped into the
+    /// unified `questions` array.
+    static let askFormArgs =
         "{\"questions\":[{\"id\":\"q1\",\"prompt\":\"Which environment?\""
             + ",\"options\":[{\"value\":\"dev\",\"label\":\"Development\"},"
             + "{\"value\":\"staging\",\"label\":\"Staging\"}]}"

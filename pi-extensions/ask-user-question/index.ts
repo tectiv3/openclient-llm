@@ -217,7 +217,11 @@ export default function askUserQuestion(pi: ExtensionAPI) {
                         if (a.wasCustom) {
                             return `${qLabel}: user wrote: ${a.label}`
                         }
-                        return `${qLabel}: user selected: ${a.index}. ${a.label}`
+                        // value may intentionally differ from label (the schema
+                        // supports both); the model consumes this text, so
+                        // surface the value when they differ.
+                        const suffix = a.value !== a.label ? ` (value: ${a.value})` : ''
+                        return `${qLabel}: user selected: ${a.index}. ${a.label}${suffix}`
                     })
                     return {
                         content: [{ type: 'text', text: answerLines.join('\n') }],
@@ -578,7 +582,11 @@ export default function askUserQuestion(pi: ExtensionAPI) {
                 if (a.wasCustom) {
                     return `${qLabel}: user wrote: ${a.label}`
                 }
-                return `${qLabel}: user selected: ${a.index}. ${a.label}`
+                // value may intentionally differ from label (the schema
+                // supports both); the model consumes this text, so surface the
+                // value when they differ.
+                const suffix = a.value !== a.label ? ` (value: ${a.value})` : ''
+                return `${qLabel}: user selected: ${a.index}. ${a.label}${suffix}`
             })
 
             return {

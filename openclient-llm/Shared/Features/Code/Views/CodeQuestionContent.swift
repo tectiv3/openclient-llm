@@ -107,6 +107,14 @@ private struct SingleQuestionView: View {
                         .font(.body)
                         .foregroundStyle(.primary)
 
+                    // Nothing is preselected until a tap; the first option is
+                    // only visually marked as the recommended one.
+                    if index == 0 {
+                        Text(String(localized: "Recommended"))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
                     if let desc = option.description {
                         Text(desc)
                             .font(.caption)
@@ -114,22 +122,18 @@ private struct SingleQuestionView: View {
                     }
                 }
                 Spacer()
-                // The first option is the preselected default.
-                if index == 0 {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Color.appAccent)
-                } else {
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(option.label)
+        .accessibilityLabel(
+            index == 0 ? option.label + ", " + String(localized: "Recommended") : option.label
+        )
     }
 
     var customInputRow: some View {

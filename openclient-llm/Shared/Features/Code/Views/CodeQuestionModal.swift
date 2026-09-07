@@ -38,10 +38,7 @@ struct CodeQuestionModal: View {
                 }
             }
             .navigationTitle(title)
-            #if os(iOS)
-                .navigationBarTitleDisplayMode(.inline)
-            #endif
-                .accessibilityAddTraits(.isModal)
+            .accessibilityAddTraits(.isModal)
         }
     }
 }

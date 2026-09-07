@@ -60,7 +60,7 @@ export function finishedBody(state: TitleState): string {
     const cwd = sanitizeBodyText(manager?.getCwd?.() ?? '')
     if (cwd) {
         const dir = basename(cwd)
-        if (dir && dir !== '/' && dir !== '.') return hardTruncate(dir, SHORT_BODY_MAX)
+        if (dir) return hardTruncate(dir, SHORT_BODY_MAX)
     }
     return FINISHED_FALLBACK
 }
