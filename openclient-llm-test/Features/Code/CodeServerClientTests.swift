@@ -216,6 +216,46 @@ final class CodeServerClientTests: XCTestCase {
         XCTAssertEqual(frame?["token"] as? String, token)
     }
 
+    // MARK: - Tests — Frozen wire: hello token encoding
+
+    func test_send_helloWithToken_encodesTokenField() async throws {
+        // Given
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
+        let task = try XCTUnwrap(transport.lastTask)
+        let token = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+        // When
+        await sut.send(.hello(code: "c", token: token))
+
+        // Then
+        let frame = try? Self.decodeFrame(try XCTUnwrap(task.lastSentFrame))
+        XCTAssertEqual(frame?["type"] as? String, "hello")
+        XCTAssertEqual(frame?["code"] as? String, "c")
+        XCTAssertEqual(frame?["version"] as? Int, 1)
+        XCTAssertEqual(frame?["token"] as? String, token)
+    }
+
+    func test_send_helloWithoutToken_omitsTokenKey() async throws {
+        // Given
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
+        let task = try XCTUnwrap(transport.lastTask)
+
+        // When
+        await sut.send(.hello(code: "c"))
+
+        // Then — the frozen wire format omits the key, it never sends null.
+        let frame = try? Self.decodeFrame(try XCTUnwrap(task.lastSentFrame))
+        XCTAssertEqual(frame?["type"] as? String, "hello")
+        XCTAssertEqual(frame?["code"] as? String, "c")
+        XCTAssertNil(frame?["token"], "Nil token must omit the key entirely")
+    }
+
     // MARK: - Tests — Server -> Client framing
 
     func test_connect_helloOkJson_decodesHelloOkEvent() async throws {
@@ -433,7 +473,67 @@ final class CodeServerClientTests: XCTestCase {
                              "Lost connection must cancel the stale socket")
     }
 
+    // MARK: - Tests — Reconnect hello token
+
+    /// Internal re-hellos must present the registered device token, so the
+    /// client's own reconnect loop can auto-authenticate after a pi restart
+    /// (fresh pairing code, token still registered server-side).
+    func test_reconnectHello_withTokenProvider_carriesToken() async throws {
+        // Given — provider supplies the registered device token; the dead
+        // peer (no pongs) forces the client's internal reconnect loop.
+        let token = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        transport.autoPong = false
+        sut = CodeServerClient(
+            transport: transport,
+            pingIntervalSeconds: 1.0,
+            pongTimeoutSeconds: 1.0,
+            tokenProvider: { token }
+        )
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
+
+        // When — the pong deadline fires and the client reconnects.
+        try await Task.sleep(for: .seconds(3.0))
+
+        // Then — the re-hello on the fresh socket carries the token.
+        XCTAssertGreaterThanOrEqual(transport.tasks.count, 2)
+        let hello = try XCTUnwrap(
+            try Self.helloFrame(in: XCTUnwrap(transport.tasks[1])),
+            "Reconnect must re-send hello"
+        )
+        XCTAssertEqual(hello["code"] as? String, "c")
+        XCTAssertEqual(hello["token"] as? String, token)
+    }
+
+    func test_reconnectHello_withoutTokenProvider_omitsTokenKey() async throws {
+        // Given — default provider (no token); dead peer forces reconnect.
+        transport.autoPong = false
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        // Keep the stream alive for the duration of the test;
+        // releasing it would terminate the client's continuation.
+        defer { _ = stream }
+
+        // When — the pong deadline fires and the client reconnects.
+        try await Task.sleep(for: .seconds(3.0))
+
+        // Then — the re-hello omits the token key.
+        XCTAssertGreaterThanOrEqual(transport.tasks.count, 2)
+        let hello = try XCTUnwrap(
+            try Self.helloFrame(in: XCTUnwrap(transport.tasks[1])),
+            "Reconnect must re-send hello"
+        )
+        XCTAssertNil(hello["token"], "No token: the key must be omitted")
+    }
+
     // MARK: - Helpers
+
+    private static func helloFrame(in task: MockCodeWebSocketTask) -> [String: Any]? {
+        task.sentFrames.compactMap {
+            (try? decodeFrame($0))
+        }.first(where: { $0["type"] as? String == "hello" })
+    }
 
     private func nextEvent(from stream: AsyncStream<CodeEvent>) async throws -> CodeEvent {
         var iterator = stream.makeAsyncIterator()

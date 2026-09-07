@@ -122,6 +122,10 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
     private let transport: CodeWebSocketTransport
     private let pingIntervalSeconds: TimeInterval
     private let pongTimeoutSeconds: TimeInterval
+    /// Supplies the device token for internal re-hellos so the client's own
+    /// reconnect loop can auto-authenticate after a pi restart, like the
+    /// VM-initiated connect does. Defaults to no token.
+    private let tokenProvider: @Sendable () async -> String?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let state = Mutex(LockedState())
@@ -141,11 +145,13 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
         pingIntervalSeconds: TimeInterval =
             CodeServerClient.defaultPingIntervalSeconds,
         pongTimeoutSeconds: TimeInterval =
-            CodeServerClient.defaultPongTimeoutSeconds
+            CodeServerClient.defaultPongTimeoutSeconds,
+        tokenProvider: @escaping @Sendable () async -> String? = { nil }
     ) {
         self.transport = transport
         self.pingIntervalSeconds = pingIntervalSeconds
         self.pongTimeoutSeconds = pongTimeoutSeconds
+        self.tokenProvider = tokenProvider
     }
 
     // MARK: - Public
@@ -435,7 +441,9 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
             // any other bump means a new connect() or disconnect() intervened.
             let stillCurrent = self.state.withLock { $0.attemptGeneration }
             guard stillCurrent == capturedGen + 1 else { return }
-            await self.send(.hello(code: lost.code))
+            await self.send(
+                .hello(code: lost.code, token: await self.tokenProvider())
+            )
         }
     }
 

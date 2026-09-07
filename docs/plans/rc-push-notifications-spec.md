@@ -24,7 +24,7 @@ APNs push covers the suspended case.
 | 5 | Protocol | Additive: one new client→server message `push_token`. **No new server→client messages** — pushes go via APNs, never over the WS |
 | 6 | Token lifetime | **Singleton-persistent**: the last-registered token wins and is kept on the pi-rc singleton (globalThis state, consistent with the existing RC singleton's `clients`/streaming state). Survives client disconnects and process-suspension churn on the phone. This is what makes pushes work for the **full phone-suspension lifetime**: by then the WS is dead and the client's reconnects may be exhausted, so a per-connection token would be long gone before the push is triggered. Accepted trade-off: a tailnet client running the current client code could register *its own* device token and replace the stored one — but APNs device tokens are per-device, so this **redirects pushes only** (and the payload carries no agent/user text, so there is nothing sensitive to leak) |
 | 7 | iOS app | Push capability + Time Sensitive Notifications entitlement; `registerForRemoteNotifications` at app init; notification authorization requested contextually on first RC connect (not at launch). Push registration code is `#if os(iOS)` — macOS target must compile, macOS gets no push |
-| 8 | Foreground behavior | `UNUserNotificationCenterDelegate.willPresent` returns `[]` (suppress). The in-app UI already shows the question modal / settled state, so a foreground banner would be a duplicate |
+| 8 | Foreground behavior | `UNUserNotificationCenterDelegate.willPresent` returns `[]` (suppress) only while the RC session is `.connected` — the in-app UI already shows the question modal / settled state, so a foreground banner would be a duplicate. When the app is foregrounded but the session is down (`.failed`/`.disconnected`/`.connecting`), the in-app UI shows nothing, so it returns `[.banner]` instead of silently dropping a `timeSensitive` push |
 
 ## Wire protocol (additive)
 
@@ -264,8 +264,12 @@ machine (env vars remain supported — see config precedence below).
   first RC connect** (when the user taps Connect on the Code tab), not at
   launch — notifications are an RC feature.
 - `UNUserNotificationCenterDelegate` (app delegate):
-  - `willPresent` → return `[]` (suppress foreground banner; the in-app UI
-    already shows the question modal / settled state).
+  - `willPresent` → return `[]` (suppress) only while the Code VM state is
+    `.connected` (the session view already shows these events over the
+    WebSocket); return `[.banner]` otherwise — when the app is foregrounded
+    but the session is down (failed/disconnected screen), nothing in-app
+    indicates the push, so a silently dropped `timeSensitive` question push
+    would be invisible.
   - `didReceive` (responseAction / default open) → tap-to-reopen: the app
     **always initiates a reconnect via `lastConnect`**, regardless of
     `backgroundDisconnected`. This is required, not a nice-to-have —
@@ -283,6 +287,12 @@ machine (env vars remain supported — see config precedence below).
     background, `lastConnect` is gone (it is in-memory only) and the user
     re-enters the 6-digit code; the push still served its purpose of opening
     the app to the connect screen.
+    Implementation: the delegate sends `CodeViewModel.Event.notificationTapped`,
+    which bypasses the `.disconnected`/`backgroundDisconnected` guards of the
+    foregrounding pass and re-establishes from `lastConnect` (a no-op while
+    `.connected`/`.connecting`). If no VM exists yet (cold launch), the tap
+    is flagged pending and forwarded to the fresh VM, where it is a safe
+    no-op (no in-memory `lastConnect`).
 - Existing `LocalNotificationManager` (local notifications during the ~30 s
   background window) stays as-is; APNs push is a superset that also covers
   suspension.
@@ -320,9 +330,13 @@ machine (env vars remain supported — see config precedence below).
    assert `{"type":"push_token","token":...}` is sent (a) exactly once after
    each `hello_ok` when the token is already known (initial + reconnect),
    not before it, and (b) immediately when the token arrives/refreshes
-   while a session is connected. Delegate tests: `willPresent` returns `[]`;
-   `didReceive` action triggers a `lastConnect` reconnect even with
-   `backgroundDisconnected == false` and VM state `.failed`.
+   while a session is connected. The `UNUserNotificationCenterDelegate`
+   cannot be exercised in-process, so it is covered by VM-level tests of the
+   tap event the delegate forwards (`notificationTapped`): the tap triggers a
+   `lastConnect` reconnect even with `backgroundDisconnected == false` and
+   VM state `.failed` (the burn-out path), and is a no-op while `.connected`.
+   `willPresent` returns `[]` when the VM state is `.connected` and
+   `[.banner]` otherwise (VM state drives it; asserted at the VM level).
 3. **Real device** (final, manual): user supplies the real `.p8`, Team ID,
    and Key ID on the pi machine; lock phone, trigger agent finish + question
    from pi, verify banners arrive while suspended and tap → foreground →

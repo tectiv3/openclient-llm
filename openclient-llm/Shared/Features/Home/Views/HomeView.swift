@@ -42,6 +42,21 @@ struct HomeView: View {
         .task {
             viewModel.send(.viewAppeared)
         }
+        // Register the Code VM so AppDelegate's notification handlers can
+        // reach it, and forward a push tap that arrived before this view
+        // existed (cold launch).
+        .task {
+            CodeViewModel.shared = codeViewModel
+            if CodeViewModel.pendingNotificationTap {
+                CodeViewModel.pendingNotificationTap = false
+                codeViewModel.send(.notificationTapped)
+            }
+        }
+        .onDisappear {
+            if CodeViewModel.shared === codeViewModel {
+                CodeViewModel.shared = nil
+            }
+        }
         .onChange(of: viewModel.isPrivateChatRequested) { _, isRequested in
             guard isRequested else { return }
             #if os(iOS)

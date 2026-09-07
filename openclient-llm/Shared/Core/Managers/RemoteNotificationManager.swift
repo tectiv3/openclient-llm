@@ -14,7 +14,9 @@ import UserNotifications
 /// Owns the APNs device token for remote push. The token is kept in memory
 /// only: the app re-registers on every launch and the server treats
 /// registration as last-wins.
-protocol RemoteNotificationManagerProtocol {
+/// Safety: production is a `@MainActor` singleton; test mocks are
+/// `@unchecked Sendable` used only within serialized test methods.
+protocol RemoteNotificationManagerProtocol: Sendable {
     /// Current hex device token, if registration has succeeded.
     func getToken() -> String?
     /// Sets the observer fired on the main actor when a token arrives or

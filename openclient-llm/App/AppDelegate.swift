@@ -90,9 +90,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         willPresent _: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        // Suppress foreground banners: the live RC UI already shows these
-        // events over the WebSocket connection.
-        completionHandler([])
+        // Suppress foreground banners only while the RC UI is live: the
+        // session view already shows these events over the WebSocket.
+        // When the session is down (failed/disconnected screen) nothing in
+        // the app indicates the push, so surface a banner instead of
+        // silently dropping it.
+        let state = CodeViewModel.shared?.state ?? .disconnected
+        if case .connected = state {
+            completionHandler([])
+        } else {
+            completionHandler([.banner])
+        }
     }
 
     func userNotificationCenter(
@@ -100,8 +108,20 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         didReceive _: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        // The payload carries no deep-link data; foregrounding the app lets
-        // the Code feature's foreground auto-reconnect do the rest.
+        // The payload carries no deep-link data. Per the RC push spec the
+        // tap always initiates a reconnect via `lastConnect` — the plain
+        // foregrounding pass would not reconnect after reconnect burn-out
+        // (VM state `.failed` with `backgroundDisconnected == false`).
+        // HomeView forwards the tap to the Code VM when it appears, covering
+        // cold launches where no VM exists yet.
+        if let viewModel = CodeViewModel.shared {
+            viewModel.send(.notificationTapped)
+        } else {
+            // Cold launch: no VM yet. HomeView forwards the pending tap to
+            // the fresh VM it creates (where it is a safe no-op: the
+            // in-memory `lastConnect` is gone after a process death).
+            CodeViewModel.pendingNotificationTap = true
+        }
         completionHandler()
     }
 

@@ -33,6 +33,7 @@ final class CodeViewModel {
         case refreshState
         case appDidEnterBackground
         case appWillEnterForeground
+        case notificationTapped
         case retry
         case clearToast
     }
@@ -85,6 +86,16 @@ final class CodeViewModel {
     }
 
     // MARK: - Properties
+
+    /// Active VM instance, so app-level entry points (the notification
+    /// delegate in AppDelegate) can reach it; HomeView registers/unregisters.
+    @MainActor
+    weak static var shared: CodeViewModel?
+
+    /// Push tap that arrived before the Code VM existed (cold launch);
+    /// HomeView forwards it to the fresh VM it creates.
+    @MainActor
+    static var pendingNotificationTap = false
 
     private(set) var state: State
 
@@ -143,7 +154,7 @@ final class CodeViewModel {
     // MARK: - Init
 
     init(
-        client: CodeServerClientProtocol = CodeServerClient(),
+        client: CodeServerClientProtocol? = nil,
         settingsManager: SettingsManagerProtocol = SettingsManager(),
         backgroundUseCase: CodeBackgroundUseCaseProtocol = CodeBackgroundUseCase(),
         notificationManager: LocalNotificationManagerProtocol = LocalNotificationManager(),
@@ -159,6 +170,13 @@ final class CodeViewModel {
             hasSavedHost: hasSaved
         )
         state = .disconnected
+        // nil client → build the real one; its reconnect hellos carry the
+        // live device token, so they auto-authenticate like a VM connect.
+        let client = client ?? CodeServerClient(
+            tokenProvider: { [manager = remoteNotificationManager] in
+                await manager.getToken()
+            }
+        )
         self.client = client
         self.settingsManager = settingsManager
         self.backgroundUseCase = backgroundUseCase
@@ -202,6 +220,8 @@ final class CodeViewModel {
             handleAppDidEnterBackground()
         case .appWillEnterForeground:
             handleAppWillEnterForeground()
+        case .notificationTapped:
+            handleNotificationTapped()
         case .clearToast:
             transientToast = nil
         }
@@ -263,6 +283,23 @@ private extension CodeViewModel {
     func handleRetry() {
         guard let last = lastConnect else {
             handleDisconnect()
+            return
+        }
+        establishConnection(host: last.host, port: last.port, code: last.code)
+    }
+
+    /// Notification tap (APNs push): always reconnect via `lastConnect`,
+    /// bypassing the foregrounding pass's guards — the burn-out case where
+    /// the VM sits in `.failed` and that pass would never reconnect.
+    func handleNotificationTapped() {
+        // Consume the flag so the foregrounding pass cannot double-connect
+        // when it runs after this handler.
+        backgroundDisconnected = false
+        guard let last = lastConnect else { return }
+        if case .connected = state {
+            return
+        }
+        if case .connecting = state {
             return
         }
         establishConnection(host: last.host, port: last.port, code: last.code)
@@ -387,7 +424,10 @@ extension CodeViewModel {
     private func sendPushTokenIfNeeded(_ token: String? = nil) {
         let tokenToSend = token ?? remoteNotificationManager.getToken()
         guard let tokenToSend, case .connected = state else {
-            LogManager.info("Push token skipped: hasToken=\(token != nil || remoteNotificationManager.getToken() != nil)")
+            let reason = tokenToSend == nil
+                ? "no token registered"
+                : "not connected"
+            LogManager.info("Push token skipped: \(reason)")
             return
         }
         LogManager.info("Sending push token (\(tokenToSend.prefix(8))…)")
