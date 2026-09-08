@@ -10,6 +10,11 @@ declare module '@earendil-works/pi-coding-agent' {
         fn: () => Promise<T>
     ): Promise<T>
 
+    export interface EventBus {
+        emit(channel: string, data: unknown): void
+        on(channel: string, handler: (data: unknown) => void): () => void
+    }
+
     export interface ExtensionAPI {
         registerTool(tool: ToolDefinition): void
         registerCommand(
@@ -24,6 +29,7 @@ declare module '@earendil-works/pi-coding-agent' {
         ): void
         on(event: string, handler: (event: any, ctx: any) => void): void
         sendUserMessage(text: string, opts?: { deliverAs?: string }): void
+        events: EventBus
     }
 
     export interface ExtensionContext {

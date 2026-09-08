@@ -25,6 +25,7 @@ import type { Message } from '@earendil-works/pi-ai'
 import { StringEnum, uuidv7 } from '@earendil-works/pi-ai'
 import {
     CONFIG_DIR_NAME,
+    type EventBus,
     type ExtensionAPI,
     getAgentDir,
     getMarkdownTheme,
@@ -74,6 +75,11 @@ interface ActiveSubagent {
 
 const activeSubagents = new Map<string, ActiveSubagent>()
 
+// Global cross-extension bus, handed over by the extension host in the
+// default export; processLine runs in child callbacks that can only reach it
+// through module scope.
+let eventBus: EventBus | undefined
+
 function registerActiveSubagent(entry: ActiveSubagent): void {
     activeSubagents.set(entry.id, entry)
 }
@@ -84,7 +90,7 @@ function unregisterActiveSubagent(id: string): void {
 
 // Ring-buffer push: cap retained events so long-running children cannot grow
 // memory unboundedly while still keeping recent history for late-attach replay.
-export function pushSubagentEvent(entry: ActiveSubagent, event: SubagentStreamEvent): void {
+function pushSubagentEvent(entry: ActiveSubagent, event: SubagentStreamEvent): void {
     entry.events.push(event)
     if (entry.events.length > RING_BUFFER_MAX_EVENTS) {
         entry.events.splice(0, entry.events.length - RING_BUFFER_MAX_EVENTS)
@@ -1155,6 +1161,15 @@ async function runSingleAgent(
                 eventCount++
                 lastEventType = type
 
+                // Forward before the dispatch chain so events that also hit
+                // message_end / tool_result_end are forwarded too. Everything
+                // non-control is transcript, including high-frequency
+                // *_update frames the attach view streams; the ring-buffer
+                // cap bounds memory.
+                pushSubagentEvent(entry, event)
+                entry.eventEmitter.emit('event', event)
+                eventBus?.emit('subagent:event', { subagentId, agent: agentName, event })
+
                 if (type === 'agent_settled') {
                     // Normal lifecycle end, never an error. Closing stdin makes
                     // the rpc child exit via its stdin-'end' → shutdown() path;
@@ -1400,6 +1415,8 @@ const SubagentInspectParams = Type.Object({
 })
 
 export default function (pi: ExtensionAPI) {
+    eventBus = pi.events
+
     pi.registerTool({
         name: 'subagent',
         label: 'Subagent',
