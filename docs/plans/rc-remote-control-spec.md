@@ -406,8 +406,13 @@ when non-empty — additive, no protocol version bump: old clients ignore unknow
 fields, new clients tolerate its absence):
 
 - **Enqueue**: in `handleSteer`, only on the streaming branch, immediately after
-  a successful `sendUserMessage(text, {deliverAs: "steer"})`. The idle branch
-  (plain prompt) is NOT tracked — the message is persisted immediately.
+  `sendUserMessage(text, {deliverAs: "steer"})`. The push is unconditional — the
+  extension API's `sendUserMessage` is a void wrapper that swallows async
+  failures, so send success/failure is unobservable and the mirror is
+  fire-and-forget: a failed send (the realistic case: the
+  compaction-in-progress race) leaves a phantom entry, bounded by the
+  `agent_settled` reconcile below. The idle branch (plain prompt) is NOT
+  tracked — the message is persisted immediately.
 - **Remove on delivery**: on `message_start` with `role: "user"` (the delivery
   signal — pi emits `message_start`+`message_end` for the delivered steer and
   persists it on `message_end`), remove the FIRST entry whose text equals the
@@ -422,10 +427,11 @@ fields, new clients tolerate its absence):
   `_handlePostAgentRun` sees `hasQueuedMessages()` and auto-continues
   (`agent.continue()`), so the steer is delivered within ms of the abort and
   the only `agent_settled` fires after delivery, queue already drained. The
-  reconcile is the safety net for the residual cases: a steer that arrives
-  after the post-run check (narrow race), TUI `clearQueue` (not mirrored),
-  and follow-up queue messages — any of which leaves pi's queue non-empty at
-  settle time and is caught on the next settle.
+  reconcile is the safety net for the residual cases: it keeps the mirror when
+  pi's queue is still non-empty at settle (a steer that arrives after the
+  post-run check — narrow race — TUI `clearQueue` (not mirrored), or follow-up
+  queue messages), and it clears phantoms pi never queued because the send
+  failed (Enqueue) — both resolve by the next settle.
 - **Not cleared on `/rc` toggle-off / `stop()`**: toggling off does not clear
   pi's in-memory queue, so a toggle-on snapshot must still report the steers.
   Process death is the real reset.
