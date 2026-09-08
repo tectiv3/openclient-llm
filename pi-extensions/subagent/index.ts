@@ -12,11 +12,13 @@
  * Uses JSON mode to capture structured output from subagents.
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import type { EventEmitter } from 'node:events'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import type { Writable } from 'node:stream'
 import type { AgentToolResult, ThinkingLevel } from '@earendil-works/pi-agent-core'
 import type { Message } from '@earendil-works/pi-ai'
 import { StringEnum, uuidv7 } from '@earendil-works/pi-ai'
@@ -48,6 +50,56 @@ const INSPECT_ENTRY_PREVIEW_CHARS = 100
 const INSPECT_FINAL_OUTPUT_CAP = 2000
 const LIST_ID_SHORT_CHARS = 8
 const LIST_TASK_PREVIEW_CHARS = 60
+
+// Registry of live subagent children, keyed by subagent id. Populated on
+// spawn, consumed by /subagents attach (live view + ring-buffer replay).
+const RING_BUFFER_MAX_EVENTS = 500
+
+type SubagentStreamEvent = { type: string; [key: string]: unknown }
+
+interface ActiveSubagent {
+    id: string
+    agent: string
+    task: string
+    proc: ChildProcess
+    stdin: Writable
+    eventEmitter: EventEmitter
+    settled: boolean
+    events: SubagentStreamEvent[]
+}
+
+const activeSubagents = new Map<string, ActiveSubagent>()
+
+export function registerActiveSubagent(entry: ActiveSubagent): void {
+    activeSubagents.set(entry.id, entry)
+}
+
+export function unregisterActiveSubagent(id: string): void {
+    activeSubagents.delete(id)
+}
+
+// Ring-buffer push: cap retained events so long-running children cannot grow
+// memory unboundedly while still keeping recent history for late-attach replay.
+export function pushSubagentEvent(entry: ActiveSubagent, event: SubagentStreamEvent): void {
+    entry.events.push(event)
+    if (entry.events.length > RING_BUFFER_MAX_EVENTS) {
+        entry.events.splice(0, entry.events.length - RING_BUFFER_MAX_EVENTS)
+    }
+}
+
+// Zombie prevention: the parent must not leave orphaned children behind when
+// it exits, so SIGTERM every live subagent. Only a best-effort signal is
+// possible here — the event loop stops once 'exit' handlers return, so no
+// SIGKILL escalation sweep can follow.
+process.on('exit', () => {
+    for (const entry of activeSubagents.values()) {
+        try {
+            entry.proc.kill('SIGTERM')
+        } catch {
+            /* already dead */
+        }
+    }
+})
 
 // File-only diagnostics, opt-in via the same gate as rc/debug.ts (PI_RC_DEBUG=1
 // or PI_RC_DEBUG_FILE → ~/.pi/agent/rc-debug.log). console.* output lands in
