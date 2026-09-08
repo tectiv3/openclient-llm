@@ -397,13 +397,24 @@ private extension CodeSessionView {
         } action: { _, newValue in
             scrollEdgeMetrics = newValue
         }
+        .onScrollPhaseChange { oldPhase, newPhase in
+            if newPhase == .interacting {
+                shouldAutoScroll = false
+                isManuallyScrolling = true
+            } else if newPhase == .idle {
+                if oldPhase != .animating {
+                    shouldAutoScroll = scrollEdgeMetrics.isAtBottom
+                }
+                isManuallyScrolling = false
+            }
+        }
     }
 
     var jumpToBottomButton: some View {
         Button {
             shouldAutoScroll = true
-            if let lastId = session.items.last?.id {
-                scrollToMessageId = lastId
+            withAnimation(.easeInOut(duration: 0.35)) {
+                scrollPosition.scrollTo(edge: .bottom)
             }
         } label: {
             Image(systemName: "arrow.down.circle.fill")

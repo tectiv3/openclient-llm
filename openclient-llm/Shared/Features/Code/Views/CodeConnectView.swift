@@ -240,7 +240,7 @@ private extension CodeConnectView {
 
 #Preview("Connecting") {
     CodeConnectView(
-        form: .constant(.init(host: "mac.ts.net", port: 47800, code: "1A2B3C", hasSavedHost: true)),
+        form: .constant(.init(host: "mac.ts.net", port: 47800, code: "152312", hasSavedHost: true)),
         isConnecting: true
     ) { _, _, _ in }
 }

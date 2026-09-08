@@ -173,6 +173,19 @@ private extension CodeView {
         )
     }
 
+    /// Busy mode: `isStreaming` flips the input bar to "Steer pi..." +
+    /// Stop, and the trailing assistant bubble renders as streaming.
+    var previewStreamingSession: CodeViewModel.SessionState {
+        var session = previewSession
+        session.isStreaming = true
+        session.items.append(.assistant(
+            id: UUID(),
+            content: [.text("Investigating the streaming buffer…")],
+            isStreaming: true
+        ))
+        return session
+    }
+
     #Preview("Disconnected") {
         CodeView(viewModel: CodeViewModel())
     }
@@ -193,6 +206,14 @@ private extension CodeView {
 
     #Preview("Connected") {
         CodeView(viewModel: previewViewModel(.connected(previewSession)))
+    }
+
+    #Preview("Connected (streaming)") {
+        CodeView(
+            viewModel: previewViewModel(
+                .connected(previewStreamingSession)
+            )
+        )
     }
 
     #Preview("Reconnecting") {

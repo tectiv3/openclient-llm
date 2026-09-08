@@ -48,12 +48,7 @@ struct CodeInputBarView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
         }
-        .glassEffect(
-            isStreaming
-                ? .regular.tint(Color.appAccent.opacity(0.3))
-                : .regular,
-            in: .rect(cornerRadius: 25)
-        )
+        .glassEffect(.regular, in: .rect(cornerRadius: 25))
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
         .opacity(isDisabled ? 0.5 : 1.0)
