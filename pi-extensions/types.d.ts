@@ -151,6 +151,7 @@ declare module '@earendil-works/pi-tui' {
     export const Key: {
         escape: string
         enter: string
+        backspace: string
         up: string
         down: string
         left: string
@@ -163,6 +164,7 @@ declare module '@earendil-works/pi-tui' {
         shift(key: string): string
     }
     export function matchesKey(data: string, key: string): boolean
+    export function decodeKittyPrintable(data: string): string | undefined
     export function visibleWidth(text: string): number
     export function wrapTextWithAnsi(text: string, width: number): string[]
 }

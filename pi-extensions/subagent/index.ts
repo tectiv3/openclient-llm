@@ -35,11 +35,13 @@ import {
 import {
     type Component,
     Container,
+    decodeKittyPrintable,
     Key,
     Markdown,
     matchesKey,
     Spacer,
     Text,
+    visibleWidth,
 } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.ts'
@@ -69,8 +71,12 @@ const LIST_TASK_PREVIEW_CHARS = 60
 const ATTACH_TASK_PREVIEW_CHARS = 60
 const ATTACH_THINKING_PREVIEW_CHARS = 200
 const ATTACH_TOOL_OUTPUT_PREVIEW_CHARS = 200
+const ATTACH_STEER_PREVIEW_CHARS = 200
 const ATTACH_RESERVED_TERMINAL_ROWS = 6
 const ATTACH_MIN_VIEWPORT_LINES = 3
+// The always-visible steer input row (blank separator + input line) is fixed
+// height outside the scrolling transcript window.
+const ATTACH_STEER_ROW_HEIGHT = 2
 
 // Registry of live subagent children, keyed by subagent id. Populated on
 // spawn, consumed by /subagents attach (live view + ring-buffer replay).
@@ -647,9 +653,30 @@ function resolveAttachTarget(id?: string): ActiveSubagent | string {
     ].join('\n')
 }
 
+// Steer text extraction from raw terminal input. Legacy mode delivers
+// printable text as-is; kitty-protocol terminals encode it in CSI-u
+// sequences (decodeKittyPrintable). Anything with an escape prefix or
+// control codes is not steer input.
+function decodeSteerText(data: string): string | undefined {
+    const decoded = decodeKittyPrintable(data)
+    if (decoded) return decoded
+    if (data.length === 0 || data.startsWith('\x1b')) return undefined
+    // Multi-char strings are pastes: embedded \r/\n/\t become spaces so a
+    // pasted paragraph is not rejected wholesale. Lone keys stay strict.
+    const text = data.length > 1 ? data.replace(/[\r\n\t]+/g, ' ') : data
+    for (const ch of text) {
+        const code = ch.codePointAt(0) ?? 0
+        if (code < 0x20 || code === 0x7f) return undefined
+    }
+    return text
+}
+
 // Transcript items for the attach view. Only *_end events render: the ring
 // buffer also keeps message_update frames, but streaming those would rebuild
-// the view per token — the completed message_end supersedes them.
+// the view per token — the completed message_end supersedes them. User-role
+// message_end frames (the initial task prompt and steered messages) render as
+// ‹you› marker lines; the child emits them when it accepts the message, so no
+// parent-side echo is needed.
 function buildAttachItems(
     events: SubagentStreamEvent[],
     themeFg: (color: any, text: string) => string
@@ -680,6 +707,22 @@ function buildAttachItems(
         if (!msg) continue
         if (msg.role === 'toolResult') {
             pushToolResult(msg)
+        } else if (msg.role === 'user') {
+            for (const part of msg.content) {
+                if (part.type === 'text' && part.text.trim()) {
+                    items.push(
+                        new Text(
+                            themeFg('muted', '‹you› ') +
+                                themeFg(
+                                    'dim',
+                                    previewText(part.text, ATTACH_STEER_PREVIEW_CHARS)
+                                ),
+                            0,
+                            0
+                        )
+                    )
+                }
+            }
         } else if (msg.role === 'assistant') {
             for (const part of msg.content) {
                 if (part.type === 'text' && part.text.trim()) {
@@ -720,6 +763,7 @@ async function attachToSubagent(ctx: ExtensionContext, entry: ActiveSubagent): P
         let scrollTop = 0
         let cachedWidth = -1
         let cachedLines: string[] | undefined
+        let steerBuffer = ''
 
         // The custom component lives in the editor dock, outside the layout
         // engine's reach — a nested ScrollView cannot scroll there (no
@@ -730,7 +774,7 @@ async function attachToSubagent(ctx: ExtensionContext, entry: ActiveSubagent): P
         const maxViewportLines = () =>
             Math.max(
                 ATTACH_MIN_VIEWPORT_LINES,
-                tui.terminal.rows - ATTACH_RESERVED_TERMINAL_ROWS
+                tui.terminal.rows - ATTACH_RESERVED_TERMINAL_ROWS - ATTACH_STEER_ROW_HEIGHT
             )
 
         function rebuild(width: number): string[] {
@@ -782,15 +826,68 @@ async function attachToSubagent(ctx: ExtensionContext, entry: ActiveSubagent): P
                     theme.fg('muted', ` ${shortId}`),
                 theme.fg('dim', previewText(entry.task, ATTACH_TASK_PREVIEW_CHARS)),
                 followEnd
-                    ? theme.fg('dim', 'Esc detach · live')
+                    ? theme.fg('dim', 'type to steer · Esc detach · live')
                     : theme.fg('dim', `↑${scrollTop} above · End → live · Esc detach`),
             ]
-            return [...header, '', ...lines.slice(scrollTop, scrollTop + viewportHeight)]
+            // Single-line input row: when the buffer outgrows the row, keep
+            // its tail so the caret stays visible (terminal-input behavior).
+            const prompt = '› '
+            const caret = '▌'
+            const budget = Math.max(0, width - visibleWidth(prompt) - visibleWidth(caret))
+            const chars = Array.from(steerBuffer)
+            let start = chars.length
+            let used = 0
+            while (start > 0) {
+                const charWidth = visibleWidth(chars[start - 1])
+                if (used + charWidth > budget) break
+                used += charWidth
+                start--
+            }
+            const steerRow =
+                theme.fg('dim', prompt) +
+                theme.fg('muted', chars.slice(start).join('')) +
+                theme.fg('dim', caret)
+            return [
+                ...header,
+                '',
+                ...lines.slice(scrollTop, scrollTop + viewportHeight),
+                '',
+                steerRow,
+            ]
         }
 
         function handleInput(data: string): void {
             if (matchesKey(data, Key.escape)) {
                 finish()
+                return
+            }
+            // Steering input is consumed before the scroll keys so printable
+            // characters never scroll the view. Enter on an empty buffer and
+            // backspace on an empty buffer are no-ops, still consumed.
+            if (matchesKey(data, Key.enter)) {
+                if (steerBuffer.length > 0) {
+                    const message = steerBuffer
+                    steerBuffer = ''
+                    entry.steer?.(message)
+                    // The ‹you› echo arrives when the child forwards its
+                    // user-role message_end; jump to live so the follow-up
+                    // response is visible as it streams.
+                    followEnd = true
+                    tui.requestRender()
+                }
+                return
+            }
+            if (matchesKey(data, Key.backspace)) {
+                if (steerBuffer.length > 0) {
+                    steerBuffer = Array.from(steerBuffer).slice(0, -1).join('')
+                    tui.requestRender()
+                }
+                return
+            }
+            const steerText = decodeSteerText(data)
+            if (steerText !== undefined) {
+                steerBuffer += steerText
+                tui.requestRender()
                 return
             }
             if (!cachedLines) return

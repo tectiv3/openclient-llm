@@ -194,9 +194,15 @@ tool calls formatted like the parent TUI, tool output truncated (200 chars). Str
   `message_update` frames are not rendered — the completed message supersedes them.
 - **Scrolling**: `↑/↓`, `PageUp/PageDown`, `Home/End`. The view follows the newest output
   and suspends the pin while you scroll up (`End` jumps back to live).
+- **Steering**: anything you type goes into the `› ▌` input row at the bottom of the view.
+  `Enter` sends the line to the subagent as a steering message (it lands in the child's next
+  turn); `Backspace` edits the line. The sent line shows up in the transcript as a muted
+  `‹you› ...` marker once the child accepts it. Scroll keys are unaffected — arrow keys
+  still scroll, printable keys never do.
 - **Detach**: `Esc` returns to the parent editor; the subagent keeps running.
 - **Auto-detach**: the view closes by itself when the subagent finishes
-  (`agent_settled`) or its process exits (watchdog kill, crash).
+  (`agent_settled`) or its process exits (watchdog kill, crash, abort — the parent's abort
+  path SIGTERMs the child, which fires the same process-exit detach).
 - Requires an interactive session (`attach` is unavailable in print mode).
 - **Single subagent only**: parallel/chain runs spawn through the same registry but
   `attach` is designed for the single mode view for now.
