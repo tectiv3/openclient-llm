@@ -9,12 +9,13 @@
  *   - Parallel: { tasks: [{ agent: "name", task: "..." }, ...] }
  *   - Chain: { chain: [{ agent: "name", task: "... {previous} ..." }, ...] }
  *
- * Uses JSON mode to capture structured output from subagents.
+ * Runs children in RPC mode: stdout streams structured events while stdin
+ * accepts JSON-line commands (initial task, steer, abort).
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import type { EventEmitter } from 'node:events'
+import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -66,15 +67,18 @@ interface ActiveSubagent {
     eventEmitter: EventEmitter
     settled: boolean
     events: SubagentStreamEvent[]
+    // Steer handle for a new LLM turn; wired at spawn so the attach view can
+    // reach it later (the field also justifies keeping the closure unexported).
+    steer?: (message: string) => void
 }
 
 const activeSubagents = new Map<string, ActiveSubagent>()
 
-export function registerActiveSubagent(entry: ActiveSubagent): void {
+function registerActiveSubagent(entry: ActiveSubagent): void {
     activeSubagents.set(entry.id, entry)
 }
 
-export function unregisterActiveSubagent(id: string): void {
+function unregisterActiveSubagent(id: string): void {
     activeSubagents.delete(id)
 }
 
@@ -883,7 +887,7 @@ async function runSingleAgent(
         }
     }
 
-    const args: string[] = ['--mode', 'json', '-p', '--session', sessionPath]
+    const args: string[] = ['--mode', 'rpc', '--session', sessionPath]
     // Resumes re-pass the recorded model/thinking because they reflect the original run;
     // continuity matters more than the current dispatch defaults.
     let model: string | undefined
@@ -955,7 +959,6 @@ async function runSingleAgent(
             args.push('--append-system-prompt', tmpPromptPath)
         }
 
-        args.push(`Task: ${task}`)
         let wasAborted = false
 
         ensureSubagentsDir()
@@ -979,7 +982,7 @@ async function runSingleAgent(
             const proc = spawn(invocation.command, invocation.args, {
                 cwd: cwd ?? defaultCwd,
                 shell: false,
-                stdio: ['ignore', 'pipe', 'pipe'],
+                stdio: ['pipe', 'pipe', 'pipe'],
             })
             debug(`pid: ${proc.pid ?? 'none'}`)
             if (proc.pid !== undefined) {
@@ -997,6 +1000,7 @@ async function runSingleAgent(
             let lastActivityTime = Date.now()
             let eventCount = 0
             let lastEventType = ''
+            let stdinClosed = false
 
             const safeResolve = (code: number, source: string) => {
                 if (resolved) {
@@ -1023,14 +1027,10 @@ async function runSingleAgent(
             // rpc-mode children take newline-terminated JSON commands on stdin.
             // Writes return false when the kernel buffer is full — Node still
             // queues them, so a false return is logged, not treated as failure
-            // (steers are small/rare). With current stdio (Task 3 makes it a
-            // pipe) spawn's tuple overload types proc.stdin as literal null;
-            // widening to Writable | null keeps this compiling in both states
-            // and the ?. makes the null case an inert no-op.
+            // (steers are small/rare).
             const writeChildStdin = (command: Record<string, unknown>) => {
                 try {
-                    const stdin = proc.stdin as Writable | null
-                    const ok = stdin?.write(`${JSON.stringify(command)}\n`)
+                    const ok = proc.stdin.write(`${JSON.stringify(command)}\n`)
                     if (ok === false)
                         debug(`stdin backpressure after ${String(command.type)} write`)
                 } catch (err) {
@@ -1099,6 +1099,31 @@ async function runSingleAgent(
                 }
             }
 
+            // A steer starts a new LLM turn that can be legitimately silent
+            // for longer than the stall timeout during prefill; resetting the
+            // activity timer keeps the watchdog from killing a healthy child.
+            const steerFn = (message: string) => {
+                writeChildStdin({ type: 'steer', message })
+                lastActivityTime = Date.now()
+            }
+
+            // rpc mode ignores positional CLI args, so the task travels as the
+            // first stdin prompt.
+            writeChildStdin({ type: 'prompt', message: `Task: ${task}` })
+
+            const entry: ActiveSubagent = {
+                id: subagentId,
+                agent: agentName,
+                task,
+                proc,
+                stdin: proc.stdin,
+                eventEmitter: new EventEmitter(),
+                settled: false,
+                events: [],
+                steer: steerFn,
+            }
+            registerActiveSubagent(entry)
+
             const processLine = (line: string) => {
                 if (!line.trim()) return
                 let event: any
@@ -1130,7 +1155,21 @@ async function runSingleAgent(
                 eventCount++
                 lastEventType = type
 
-                if (event.type === 'message_end' && event.message) {
+                if (type === 'agent_settled') {
+                    // Normal lifecycle end, never an error. Closing stdin makes
+                    // the rpc child exit via its stdin-'end' → shutdown() path;
+                    // guarded so the first frame is the only close attempt.
+                    entry.settled = true
+                    if (!stdinClosed) {
+                        stdinClosed = true
+                        try {
+                            proc.stdin.end()
+                        } catch {
+                            /* stream already destroyed */
+                        }
+                        debug('agent_settled: stdin closed for clean child shutdown')
+                    }
+                } else if (event.type === 'message_end' && event.message) {
                     const msg = event.message as Message
                     currentResult.messages.push(msg)
                     debug(`message_end: role=${msg.role} stopReason=${msg.stopReason ?? '-'}`)
@@ -1183,6 +1222,10 @@ async function runSingleAgent(
 
             proc.on('close', (code, killSignal) => {
                 debug(`close: code=${code} signal=${killSignal ?? '-'}`)
+                // 'close' fires after 'exit' and also after 'error' (spawn
+                // failures emit 'error' then 'close'), so this single
+                // unregister point covers every exit path.
+                unregisterActiveSubagent(subagentId)
                 drainBuffer()
                 safeResolve(killSignal ? 1 : (code ?? 0), 'close')
             })
