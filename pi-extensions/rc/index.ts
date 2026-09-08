@@ -104,6 +104,7 @@ type RcSingleton = {
     isStreaming: boolean
     currentTurnBuffer: ContentBlock[]
     pendingAsk: PendingAsk | null
+    pendingSteers: string[]
     quitAuthWritten: boolean
     processHooksRegistered: boolean
     handleUpgrade(req: IncomingMessage, socket: RcSocket, head: Buffer): void
@@ -142,6 +143,7 @@ function singleton(): RcSingleton {
         isStreaming: false,
         currentTurnBuffer: [],
         pendingAsk: null,
+        pendingSteers: [],
         quitAuthWritten: false,
         processHooksRegistered: false,
         handleUpgrade(req, socket, head) {
@@ -209,6 +211,9 @@ function singleton(): RcSingleton {
             this.code = null
             this.isStreaming = false
             this.currentTurnBuffer = []
+            // pendingSteers is intentionally NOT reset here: toggling /rc off
+            // does not clear pi's in-memory steering queue, so a toggle-on
+            // snapshot must still report it. Process death is the real reset.
             safeSetStatus(this.binding?.ctx, undefined)
             if (reason === 'quit') writeQuitStoppedAuth(this, detail)
             else writeStoppedAuth(reason, detail)
@@ -792,8 +797,17 @@ function handleSteer(state: RcSingleton, client: RcClient, message: JsonObject):
         return
     }
     try {
-        if (binding.ctx.isIdle()) binding.pi.sendUserMessage(message.text)
-        else binding.pi.sendUserMessage(message.text, { deliverAs: 'steer' })
+        if (binding.ctx.isIdle()) {
+            // Idle: sent as a plain prompt and persisted immediately — nothing to track.
+            binding.pi.sendUserMessage(message.text)
+        } else {
+            // Queued in pi's in-memory steering queue: invisible to the session
+            // branch until the agent loop delivers it, so mirror it in
+            // pendingSteers (removed on delivery in trackEvent, surfaced as the
+            // optional `pending` field on history frames).
+            binding.pi.sendUserMessage(message.text, { deliverAs: 'steer' })
+            state.pendingSteers.push(message.text)
+        }
     } catch (error) {
         writeJson(client, { type: 'error', code: 'send_failed', message: errorMessage(error) })
     }
@@ -851,6 +865,10 @@ function buildHistory(state: RcSingleton, cursor?: string): JsonObject {
         sessionId: sessionId(state),
         messages: messages.slice(start, end),
         ...(start > 0 ? { cursor: String(start) } : {}),
+        // Queued-but-undelivered steers are not in the branch yet; the optional
+        // field (absent when empty) keeps them visible to (re)connecting clients
+        // without a protocol version bump.
+        ...(state.pendingSteers.length > 0 ? { pending: [...state.pendingSteers] } : {}),
     }
 }
 
@@ -968,13 +986,28 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
         })
         if (name === 'session_start') broadcastSessionSnapshot(state)
     }
-    pi.on('session_start', (event, ctx) => forward('session_start', event, ctx))
+    pi.on('session_start', (event, ctx) => {
+        // New session = new agent = empty steering queue. Clear BEFORE the
+        // forwarded session_start triggers broadcastSessionSnapshot, which must
+        // not carry stale entries from the old session.
+        state.pendingSteers.length = 0
+        forward('session_start', event, ctx)
+    })
     pi.on('session_shutdown', async (event, ctx) => {
         state.bind(pi, ctx)
         if (event.reason === 'quit') await state.stop('quit', 'pi shutdown')
     })
     pi.on('agent_start', (event, ctx) => forward('agent_start', event, ctx))
-    pi.on('agent_settled', (event, ctx) => forward('agent_settled', event, ctx))
+    pi.on('agent_settled', (event, ctx) => {
+        // Reconcile against pi's live queue before forwarding the settle. An
+        // aborted run with a queued steer auto-continues and drains the queue
+        // BEFORE this settle, so a non-empty queue here means a residual steer
+        // (arrived after the post-run check), a TUI clearQueue, or follow-ups —
+        // clear exactly when pi reports nothing pending, keep the list when it
+        // does (delivered steers were already removed on their message_start).
+        if (!ctx.hasPendingMessages()) state.pendingSteers.length = 0
+        forward('agent_settled', event, ctx)
+    })
     pi.on('turn_end', (event, ctx) => forward('turn_end', event, ctx))
     pi.on('message_start', (event, ctx) => forward('message_start', event, ctx))
     pi.on('message_update', (event, ctx) => forward('message_update', event, ctx))
@@ -1019,6 +1052,19 @@ function trackEvent(state: RcSingleton, name: string, event: unknown): void {
         event.message.role === 'assistant'
     ) {
         state.currentTurnBuffer = []
+    }
+    if (
+        name === 'message_start' &&
+        isObject(event) &&
+        isObject(event.message) &&
+        event.message.role === 'user'
+    ) {
+        // message_start is the steer-delivery signal: the steer has left pi's
+        // queue (it lands in the branch on the paired message_end). Remove only
+        // the FIRST match so duplicate steer texts stay consistent.
+        const text = textFromMessage(event.message)
+        const index = state.pendingSteers.indexOf(text)
+        if (index !== -1) state.pendingSteers.splice(index, 1)
     }
     if (name === 'message_update' && isObject(event))
         appendAssistantDelta(state, event.assistantMessageEvent)

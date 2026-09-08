@@ -42,11 +42,12 @@ final class CodeMessageMapperTests: XCTestCase {
 
         // Then
         XCTAssertEqual(items.count, 1)
-        guard case let .user(_, text, failed) = items[0] else {
+        guard case let .user(_, text, failed, pending) = items[0] else {
             return XCTFail("Expected user item, got \(items[0])")
         }
         XCTAssertEqual(text, "hi")
         XCTAssertFalse(failed, "History user items never fail")
+        XCTAssertFalse(pending, "History user items are delivered")
     }
 
     func test_mapHistoryToItems_assistantText_returnsAssistantItem() throws {

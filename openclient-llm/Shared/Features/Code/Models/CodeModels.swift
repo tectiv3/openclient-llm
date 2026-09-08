@@ -40,6 +40,10 @@ struct CodeHistory: Equatable, Sendable, Codable {
     let sessionId: String
     let messages: [CodeHistoryMessage]
     let cursor: String?
+    /// Steers queued in pi's in-memory steering queue but not yet delivered
+    /// to a turn, so absent from `messages`; server omits the field when
+    /// empty (older servers too, hence optional).
+    let pending: [String]?
 }
 
 // MARK: - Content Blocks

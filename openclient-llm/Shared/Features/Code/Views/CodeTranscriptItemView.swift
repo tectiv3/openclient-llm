@@ -16,8 +16,8 @@ struct CodeTranscriptItemView: View {
 
     var body: some View {
         switch item {
-        case let .user(id, text, failed):
-            userBubble(id: id, text: text, failed: failed)
+        case let .user(id, text, failed, pending):
+            userBubble(id: id, text: text, failed: failed, pending: pending)
 
         case let .assistant(_, content, isStreaming):
             assistantBubble(content, isStreaming: isStreaming)
@@ -54,7 +54,8 @@ private extension CodeTranscriptItemView {
     func userBubble(
         id: UUID,
         text: String,
-        failed: Bool
+        failed: Bool,
+        pending: Bool
     ) -> some View {
         HStack {
             Spacer(minLength: 60)
@@ -64,9 +65,7 @@ private extension CodeTranscriptItemView {
                 .padding(.vertical, 12)
                 .foregroundStyle(.white)
                 .glassEffect(
-                    failed
-                        ? .regular.tint(Color.red.opacity(0.45))
-                        : .regular.tint(Color.appAccent),
+                    userBubbleTint(failed: failed, pending: pending),
                     in: .rect(cornerRadius: 18)
                 )
                 .overlay(alignment: .bottom) {
@@ -74,15 +73,59 @@ private extension CodeTranscriptItemView {
                         retryBadgeButton(id: id)
                     }
                 }
+                .overlay(alignment: .bottom) {
+                    if pending, !failed {
+                        queuedCaption()
+                    }
+                }
                 // Keep the prompt text in the label so VoiceOver users
                 // don't lose the content; the retry itself is an explicit
                 // action on the badge below, not part of the label.
-                .accessibilityLabel(
-                    failed
-                        ? String(localized: "\(text) — failed to send")
-                        : text
-                )
+                .accessibilityLabel(userBubbleAccessibilityLabel(
+                    text: text,
+                    failed: failed,
+                    pending: pending
+                ))
         }
+    }
+
+    func userBubbleTint(failed: Bool, pending: Bool) -> Glass {
+        if failed {
+            return .regular.tint(Color.red.opacity(0.45))
+        }
+        if pending {
+            return .regular.tint(Color.appAccent.opacity(0.4))
+        }
+        return .regular.tint(Color.appAccent)
+    }
+
+    func userBubbleAccessibilityLabel(
+        text: String,
+        failed: Bool,
+        pending: Bool
+    ) -> String {
+        if failed {
+            return String(localized: "\(text) — failed to send")
+        }
+        if pending {
+            return String(
+                localized: "\(text) — queued, will be delivered during this run"
+            )
+        }
+        return text
+    }
+
+    /// Dimmed "Queued" caption for a steer still sitting in pi's steering
+    /// queue; the full explanation lives in the accessibility label.
+    func queuedCaption() -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "hourglass")
+                .font(.caption2)
+            Text(String(localized: "Queued"))
+                .font(.caption2)
+        }
+        .foregroundStyle(.white.opacity(0.7))
+        .padding(.bottom, 4)
     }
 
     /// Retry affordance on a failed bubble. A Button rather than a tap
@@ -363,10 +406,16 @@ extension [CodeContentBlock] {
 #Preview {
     VStack(spacing: 16) {
         CodeTranscriptItemView(item: .user(
-            id: UUID(), text: "Fix the tests", failed: false
+            id: UUID(), text: "Fix the tests",
+            failed: false, pending: false
         ))
         CodeTranscriptItemView(item: .user(
-            id: UUID(), text: "This one failed", failed: true
+            id: UUID(), text: "This one failed",
+            failed: true, pending: false
+        ))
+        CodeTranscriptItemView(item: .user(
+            id: UUID(), text: "Use the blue theme",
+            failed: false, pending: true
         ))
         CodeTranscriptItemView(item: .assistant(
             id: UUID(),

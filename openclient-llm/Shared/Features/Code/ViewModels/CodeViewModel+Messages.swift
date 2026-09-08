@@ -10,7 +10,7 @@ import Foundation
 // MARK: - CodeTranscriptItem
 
 enum CodeTranscriptItem: Equatable, Identifiable {
-    case user(id: UUID, text: String, failed: Bool)
+    case user(id: UUID, text: String, failed: Bool, pending: Bool)
     case assistant(
         id: UUID,
         content: [CodeContentBlock],
@@ -34,7 +34,7 @@ enum CodeTranscriptItem: Equatable, Identifiable {
 
     var id: UUID {
         switch self {
-        case let .user(id, _, _),
+        case let .user(id, _, _, _),
              let .assistant(id, _, _),
              let .toolStep(id, _, _, _, _, _),
              let .resolvedQuestion(id, _, _, _),
@@ -56,7 +56,7 @@ extension CodeViewModel {
             switch message {
             case let .user(text):
                 items.append(.user(
-                    id: UUID(), text: text, failed: false
+                    id: UUID(), text: text, failed: false, pending: false
                 ))
 
             case let .assistant(content):
@@ -122,7 +122,11 @@ extension CodeViewModel {
                     ))
                 case "user":
                     if let text = userText(fromMessage: message) {
-                        appendUserItem(text, to: &session)
+                        // A steer's delivery signal: flip the queued echo
+                        // instead of appending a duplicate user item.
+                        if !markPendingUserDelivered(text, in: &session) {
+                            appendUserItem(text, to: &session)
+                        }
                     }
                 default:
                     break
@@ -179,17 +183,17 @@ extension CodeViewModel {
     func handleRetryPrompt(id: UUID) {
         guard case var .connected(session) = state,
               let index = session.items.firstIndex(where: {
-                  if case let .user(itemId, _, _) = $0 {
+                  if case let .user(itemId, _, _, _) = $0 {
                       return itemId == id
                   }
                   return false
               }),
-              case let .user(_, text, failed) = session.items[index],
+              case let .user(_, text, failed, _) = session.items[index],
               failed
         else { return }
 
         let echo = CodeTranscriptItem.user(
-            id: id, text: text, failed: false
+            id: id, text: text, failed: false, pending: false
         )
         session.items[index] = echo
         updateSession(session)
@@ -199,7 +203,7 @@ extension CodeViewModel {
     func handleSendSteer(_ text: String) {
         guard case var .connected(session) = state,
               session.isStreaming else { return }
-        let echo = appendLocalEcho(text, to: &session)
+        let echo = appendLocalEcho(text, to: &session, pending: true)
         updateSession(session)
         Task {
             let sent = await client.send(.steer(text: text))
@@ -230,16 +234,16 @@ private extension CodeViewModel {
     func markLocalEchoFailed(_ id: UUID) {
         guard var session = currentSession,
               let index = session.items.firstIndex(where: {
-                  if case let .user(itemId, _, _) = $0 {
+                  if case let .user(itemId, _, _, _) = $0 {
                       return itemId == id
                   }
                   return false
               })
         else { return }
 
-        if case let .user(itemId, text, _) = session.items[index] {
+        if case let .user(itemId, text, _, _) = session.items[index] {
             session.items[index] = .user(
-                id: itemId, text: text, failed: true
+                id: itemId, text: text, failed: true, pending: false
             )
             updateSession(session)
         }
@@ -249,12 +253,15 @@ private extension CodeViewModel {
     /// the next server history sync. Deduped against a trailing identical
     /// user item, which can only exist if the same text was already synced
     /// from the server history. Returns the trailing user item (existing or
-    /// new) so the caller can correlate later send failures with it.
+    /// new) so the caller can correlate later send failures with it. Steers
+    /// echo as `pending: true` because they stay queued in pi until the
+    /// next turn boundary delivers them.
     func appendLocalEcho(
         _ text: String,
-        to session: inout SessionState
+        to session: inout SessionState,
+        pending: Bool = false
     ) -> CodeTranscriptItem {
-        appendUserItem(text, to: &session)
+        appendUserItem(text, to: &session, pending: pending)
     }
 
     /// Shared user-item append, deduped against a trailing identical user
@@ -262,24 +269,50 @@ private extension CodeViewModel {
     /// entry regardless of arrival order.
     func appendUserItem(
         _ text: String,
-        to session: inout SessionState
+        to session: inout SessionState,
+        pending: Bool = false
     ) -> CodeTranscriptItem {
-        if case let .user(id, lastText, _)? = session.items.last,
+        if case let .user(id, lastText, _, _)? = session.items.last,
            lastText == text
         {
-            // Reusing the existing item also resets its failed flag, so a
-            // re-send of the same text (type-again or retry) starts clean.
+            // Reusing the existing item also resets its failed and pending
+            // flags, so a re-send of the same text (type-again or retry) and
+            // the server's delivery twin start clean.
             let item = CodeTranscriptItem.user(
-                id: id, text: lastText, failed: false
+                id: id, text: lastText, failed: false, pending: false
             )
             session.items[session.items.count - 1] = item
             return item
         }
         let item = CodeTranscriptItem.user(
-            id: UUID(), text: text, failed: false
+            id: UUID(), text: text, failed: false, pending: pending
         )
         session.items.append(item)
         return item
+    }
+
+    /// Converts the first queued steer echo matching `text` into a delivered
+    /// item when pi delivers it (user-role message_start). Returns true when
+    /// a match was flipped, so the caller skips the append that would
+    /// duplicate the transcript entry.
+    func markPendingUserDelivered(
+        _ text: String,
+        in session: inout SessionState
+    ) -> Bool {
+        guard let index = session.items.firstIndex(where: {
+            if case let .user(_, itemText, _, pending) = $0, pending {
+                return itemText == text
+            }
+            return false
+        }) else { return false }
+
+        if case let .user(id, itemText, failed, _) = session.items[index] {
+            session.items[index] = .user(
+                id: id, text: itemText, failed: failed, pending: false
+            )
+            return true
+        }
+        return false
     }
 }
 

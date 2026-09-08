@@ -452,7 +452,23 @@ extension CodeViewModel {
         // The transcript is replaced wholesale, so local-echo UUIDs are
         // gone: a failure mark arriving for one is a safe no-op.
         pendingPromptEchoes.removeAll()
-        let items = mapHistoryToItems(history.messages)
+        var items = mapHistoryToItems(history.messages)
+        // Steers queued in pi are absent from `messages`, so a plain history
+        // resync would wipe their local echoes. Re-create them from the
+        // server's queue (source of truth); a text already in `messages`
+        // was delivered and maps from history instead.
+        let existingTexts = Set(items.compactMap {
+            if case let .user(_, text, _, _) = $0 {
+                text
+            } else {
+                nil
+            }
+        })
+        for pendingText in history.pending ?? [] where !existingTexts.contains(pendingText) {
+            items.append(.user(
+                id: UUID(), text: pendingText, failed: false, pending: true
+            ))
+        }
         session.items = items
         updateSession(session)
     }
@@ -493,7 +509,7 @@ extension CodeViewModel {
 
         let id = pendingPromptEchoes.removeLast()
         guard let index = session.items.firstIndex(where: {
-            if case let .user(itemId, _, _) = $0 {
+            if case let .user(itemId, _, _, _) = $0 {
                 return itemId == id
             }
             return false
@@ -504,9 +520,9 @@ extension CodeViewModel {
             return
         }
 
-        if case let .user(itemId, text, _) = session.items[index] {
+        if case let .user(itemId, text, _, _) = session.items[index] {
             session.items[index] = .user(
-                id: itemId, text: text, failed: true
+                id: itemId, text: text, failed: true, pending: false
             )
             updateSession(session)
         }

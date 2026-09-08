@@ -1641,6 +1641,122 @@ registerTest(12, "push_token_uppercase_registration_auto_auths_lowercase", async
   a.close();
 });
 
+// --- group 13: pending steers (A4 "Pending steers") -----------------------------
+// The server mirrors pi's in-memory steering queue in state.pendingSteers and
+// surfaces it as the OPTIONAL `pending` field on history frames (absent when
+// empty). A steer queued during a live run is not in the branch until the
+// agent loop delivers it at the next turn boundary; LONG (1..400 generation)
+// keeps the window open for seconds, so a late client connecting mid-run must
+// see the steer in `pending`.
+// Steer-then-abort does NOT hold a steer pending: pi auto-continues the
+// aborted run to drain the steering queue (_handlePostAgentRun ->
+// hasQueuedMessages -> agent.continue), so the steer is delivered within ms
+// of the abort and the only agent_settled fires after delivery, with the
+// queue already drained.
+// The three tests share one session's accumulated history and run in locked
+// ascending order (T1 -> T2 -> T3). Unique markers keep the assertions from
+// bleeding across the shared history.
+
+// T1: a steer queued during a live run must be visible to a LATE client.
+// A (the group's working client) runs LONG and steers mid-stream; the steer
+// sits in pi's queue (and the mirror) until the run's turn boundary. A late
+// client B connecting while LONG is still generating must see the steer in
+// its connect-burst history frame's `pending`.
+registerTest(13, "steer_pending_visible_to_late_client_during_run", async (ctx) => {
+  const a = await connectAndVerifyConnectTime(ctx); // client A
+  try {
+    a.ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+    // Wait for a streamed update, not just agent_start: the run is actively
+    // generating, so it cannot end before B's snapshot is built (same
+    // assumption as group 3's mid-stream steer test).
+    await waitForEventByName(a.next, "message_update", 20_000);
+    a.ws.send(JSON.stringify({ type: "steer", text: "RC-STEER-PENDING-13a" }));
+    // Late client B: read the CONNECT-BURST history frame itself (the
+    // hello-snapshot under test), in burst order hello_ok, state, history.
+    // The agent is mid-stream, so a streaming_buffer frame follows the
+    // history; only the history frame is needed for the assertion.
+    const late = await handshake(ctx);
+    assertHelloOk(late.result); // handshake consumed hello_ok
+    try {
+      const state = await late.next();
+      assertValidStateShape(state);
+      const history = await late.next();
+      check(
+        history?.type === "history" && history.sessionId === state.sessionId,
+        `expected the connect-burst history frame, got ${JSON.stringify(history ?? null).slice(0, 200)}`,
+      );
+      check(Array.isArray(history.pending), `history.pending must be an array, got ${JSON.stringify(history.pending)}`);
+      check(
+        history.pending.includes("RC-STEER-PENDING-13a"),
+        `connect-burst history.pending must contain the queued steer, got ${JSON.stringify(history.pending)}`,
+      );
+    } finally {
+      late.close();
+    }
+    // The steer is still queued (delivery waits for the run's turn boundary),
+    // and pi auto-continues the ended run to drain it; wait for the settle on
+    // A's own stream so the group leaves the agent idle before T2.
+    await waitForEventByName(a.next, "agent_settled", 60_000);
+  } finally {
+    a.close(); // A was the group's working client; the late client is ephemeral
+  }
+});
+
+// T2 (continuation of T1, locked state dependence): the queued steer must be
+// delivered as a user message into the branch and removed from the mirror —
+// so a fresh snapshot has NO `pending` field and the steer text is a user
+// message in history.
+registerTest(13, "steer_pending_cleared_and_delivered_on_next_run", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    // The run start drains pi's queue: RC-STEER-PENDING-13a is delivered as a
+    // user message before the PING-13b reply, and the mirror entry is removed.
+    ws.send(JSON.stringify({ type: "prompt", text: "Reply with exactly: PING-13b" }));
+    await waitForEventByName(next, "agent_settled", 60_000);
+    ws.send(JSON.stringify({ type: "get_history" }));
+    const history = await waitForMessage(next, (m) => m?.type === "history", 10_000, "history after drain run");
+    check(history.pending === undefined, `pending must be ABSENT after the drain run, got ${JSON.stringify(history.pending)}`);
+    // buildHistory maps user entries to {role:'user', text} — exact match.
+    check(
+      (history.messages ?? []).some((m) => m?.role === "user" && m.text === "RC-STEER-PENDING-13a"),
+      "RC-STEER-PENDING-13a must be a user message in history (steer not delivered)",
+    );
+  });
+});
+
+// T3: the rebind snapshot must carry no `pending` (the session_start clear
+// runs before broadcastSessionSnapshot). The steer below is queued like T1's;
+// pi auto-continues the aborted run to drain it before settle, so the mirror
+// is already empty at rebind time — the assertion guards the rebind snapshot
+// path against stale entries (the mid-run rebind race is what the clear is
+// really for; it self-heals via the next settle reconcile even if lost).
+registerTest(13, "steer_pending_cleared_on_new_session", async (ctx) => {
+  requireAuth(ctx);
+  const a = await connectAndVerifyConnectTime(ctx); // client A (working client)
+  const oldId = ctx.lastState?.sessionId;
+  check(nonEmptyString(oldId), "no prior sessionId to rebind from");
+  try {
+    a.ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+    await waitForEventByName(a.next, "agent_start", 20_000);
+    a.ws.send(JSON.stringify({ type: "steer", text: "RC-STEER-PENDING-13c" }));
+    a.ws.send(JSON.stringify({ type: "abort" }));
+    // 13c is drained by pi's auto-continue (see T1); the settle lands after.
+    await waitForEventByName(a.next, "agent_settled", 60_000);
+    await sleep(1000); // drain any in-flight events from the settle burst
+    const resp = await withTimeout(ctx.client.sendCommand({ type: "new_session" }), 10_000, "new_session RPC timed out");
+    check(resp.success !== false, `new_session RPC failed: ${JSON.stringify(resp)}`);
+    // The server re-sends state+history on the session_start rebind; we must
+    // see a NEW sessionId (fresh history may be empty).
+    const newState = await waitForMessage(a.next, (m) => m?.type === "state" && nonEmptyString(m.sessionId) && m.sessionId !== oldId, 10_000, "new state (rebind)");
+    assertValidStateShape(newState);
+    const newHistory = await waitForMessage(a.next, (m) => m?.type === "history" && m.sessionId === newState.sessionId, 10_000, "new history (rebind)");
+    assertHistoryShape(newHistory, newState.sessionId); // messages may be empty for a fresh session
+    check(newHistory.pending === undefined, `rebind snapshot must carry no pending (session_start cleared the mirror), got ${JSON.stringify(newHistory.pending)}`);
+    ctx.lastState = newState; // keep the state fresh, like group 9
+  } finally {
+    a.close(); // group ends here; the agent settled idle above
+  }
+});
+
 // --- groups 5, 6, 7, 8, 9 -------------------------------------------------------
 
 // Group 5: Questions. LLM-dependent: test-project AGENTS.md forces the ask_user_question tool for the exact prompts ASK/ASKFORM

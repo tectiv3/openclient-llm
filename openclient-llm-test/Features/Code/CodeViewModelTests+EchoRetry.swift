@@ -8,6 +8,16 @@
 @testable import openclient_llm
 import XCTest
 
+/// A user transcript item's fields, projected for assertions.
+/// A struct rather than a tuple: a 4-member tuple trips the
+/// `large_tuple` error threshold.
+struct UserItemSnapshot {
+    let id: UUID
+    let text: String
+    let failed: Bool
+    let pending: Bool
+}
+
 // MARK: - CodeViewModelTests — Echo failure and retry
 
 extension CodeViewModelTests {
@@ -88,7 +98,7 @@ extension CodeViewModelTests {
         }
         XCTAssertFalse(
             items.contains { item in
-                if case .user(_, _, true) = item {
+                if case .user(_, _, true, _) = item {
                     return true
                 }
                 return false
@@ -128,7 +138,8 @@ extension CodeViewModelTests {
         mockClient.emit(.history(CodeHistory(
             sessionId: "s1",
             messages: [.user(text: "hi")],
-            cursor: nil
+            cursor: nil,
+            pending: nil
         )))
         try await waitUntil {
             (self.currentSession()?.items.count ?? 0) == 1
@@ -277,7 +288,7 @@ extension CodeViewModelTests {
         let items = try XCTUnwrap(currentSession()?.items)
         XCTAssertEqual(items.count, 1)
         XCTAssertFalse(items.contains {
-            if case .user(_, _, true) = $0 {
+            if case .user(_, _, true, _) = $0 {
                 return true
             }
             return false
@@ -331,7 +342,8 @@ extension CodeViewModelTests {
         mockClient.emit(.history(CodeHistory(
             sessionId: "s1",
             messages: [.user(text: "hi")],
-            cursor: nil
+            cursor: nil,
+            pending: nil
         )))
         try await waitUntil {
             (self.currentSession()?.items.count ?? 0) == 1
@@ -349,7 +361,8 @@ extension CodeViewModelTests {
         mockClient.emit(.history(CodeHistory(
             sessionId: "s1",
             messages: [.user(text: "hi")],
-            cursor: nil
+            cursor: nil,
+            pending: nil
         )))
         try await waitUntil {
             (self.currentSession()?.items.first?.id != staleId)
@@ -364,31 +377,142 @@ extension CodeViewModelTests {
         // Then — no crash, the replacement item is untouched
         let items = try XCTUnwrap(currentSession()?.items)
         XCTAssertEqual(items.count, 1)
-        guard case let .user(id, text, failed) = items[0] else {
+        guard case let .user(id, text, failed, pending) = items[0] else {
             return XCTFail("Expected user item, got \(items[0])")
         }
         XCTAssertNotEqual(id, staleId)
         XCTAssertEqual(text, "hi")
         XCTAssertFalse(failed)
+        XCTAssertFalse(pending)
+    }
+
+    // MARK: - Tests — Pending steer echoes
+
+    func test_sendSteer_connectedStreaming_localEchoMarkedPending()
+        async throws
+    {
+        // Given
+        try await connectAndEstablish(isStreaming: true)
+
+        // When
+        sut.send(.sendSteer(text: "be brief"))
+
+        // Then — queued in pi until the next turn boundary delivers it
+        let item = try XCTUnwrap(lastUserItem())
+        XCTAssertEqual(item.text, "be brief")
+        XCTAssertFalse(item.failed)
+        XCTAssertTrue(item.pending)
+    }
+
+    func test_sendPrompt_connectedIdle_localEchoNotPending() async throws {
+        // Given
+        try await connectAndEstablish()
+
+        // When
+        sut.send(.sendPrompt(text: "hi"))
+
+        // Then — a prompt is accepted or rejected, never queued
+        let item = try XCTUnwrap(lastUserItem())
+        XCTAssertEqual(item.text, "hi")
+        XCTAssertFalse(item.failed)
+        XCTAssertFalse(item.pending)
+    }
+
+    func test_sendSteer_sendFails_echoFailedNotPending() async throws {
+        // Given — the transport rejects the steer before pi can queue it
+        try await connectAndEstablish(isStreaming: true)
+        mockClient.sendResult = false
+
+        // When
+        sut.send(.sendSteer(text: "be brief"))
+
+        // Then — failed, and pending was never set (mutually exclusive)
+        try await waitUntil { self.lastUserItem()?.failed == true }
+        let item = try XCTUnwrap(lastUserItem())
+        XCTAssertTrue(item.failed)
+        XCTAssertFalse(item.pending)
+    }
+
+    func test_historyResync_steerInPendingList_survivesAsQueuedItem()
+        async throws
+    {
+        // Given — a steer echo that pi still has queued
+        try await connectAndEstablish(isStreaming: true)
+        sut.send(.sendSteer(text: "be brief"))
+        try await waitUntil { self.lastUserItem() != nil }
+
+        // When — the snapshot lacks the steer in messages but carries it
+        // in the server-side pending queue
+        mockClient.emit(.history(CodeHistory(
+            sessionId: "s1",
+            messages: [.user(text: "hi")],
+            cursor: nil,
+            pending: ["be brief"]
+        )))
+        try await waitUntil {
+            self.currentSession()?.items.count == 2
+        }
+
+        // Then — the steer survives the resync exactly once, as queued
+        let items = userItems()
+        XCTAssertEqual(items.count, 2)
+        let steers = items.filter { $0.text == "be brief" }
+        XCTAssertEqual(steers.count, 1, "no duplicate steer item")
+        XCTAssertTrue(steers.first?.pending ?? false)
+        XCTAssertFalse(steers.first?.failed ?? true)
+    }
+
+    func test_historyResync_steerDeliveredInMessages_singleDeliveredItem()
+        async throws
+    {
+        // Given — a steer echo that pi delivered while the snapshot was
+        // in flight
+        try await connectAndEstablish(isStreaming: true)
+        sut.send(.sendSteer(text: "be brief"))
+        try await waitUntil { self.lastUserItem() != nil }
+        let echoId = try XCTUnwrap(lastUserItem()).id
+
+        // When — the snapshot holds the steer in messages, not pending
+        mockClient.emit(.history(CodeHistory(
+            sessionId: "s1",
+            messages: [.user(text: "be brief")],
+            cursor: nil,
+            pending: nil
+        )))
+        // The resync replaces the transcript wholesale with a new UUID.
+        try await waitUntil {
+            self.currentSession()?.items.first?.id != echoId
+        }
+
+        // Then — exactly one item, delivered
+        let items = userItems()
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items.first?.text, "be brief")
+        XCTAssertFalse(items.first?.failed ?? true)
+        XCTAssertFalse(items.first?.pending ?? true)
     }
 
     // MARK: - Helpers
 
-    func userItems() -> [(id: UUID, text: String, failed: Bool)] {
+    func userItems() -> [UserItemSnapshot] {
         (currentSession()?.items ?? []).compactMap {
-            if case let .user(id, text, failed) = $0 {
-                return (id, text, failed)
+            if case let .user(id, text, failed, pending) = $0 {
+                return UserItemSnapshot(
+                    id: id, text: text, failed: failed, pending: pending
+                )
             }
             return nil
         }
     }
 
-    func lastUserItem() -> (id: UUID, text: String, failed: Bool)? {
+    func lastUserItem() -> UserItemSnapshot? {
         guard let items = currentSession()?.items,
-              case let .user(id, text, failed)? = items.last
+              case let .user(id, text, failed, pending)? = items.last
         else {
             return nil
         }
-        return (id, text, failed)
+        return UserItemSnapshot(
+            id: id, text: text, failed: failed, pending: pending
+        )
     }
 }

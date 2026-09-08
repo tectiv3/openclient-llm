@@ -272,7 +272,8 @@ final class CodeViewModelTests: XCTestCase {
                 .user(text: "hi"),
                 .assistant(content: [.text("yo")]),
             ],
-            cursor: nil
+            cursor: nil,
+            pending: nil
         )))
         try await waitUntil {
             (self.currentSession()?.items.count ?? 0) == 2
@@ -280,11 +281,12 @@ final class CodeViewModelTests: XCTestCase {
 
         // Then
         let items = try XCTUnwrap(currentSession()?.items)
-        guard case let .user(_, text, failed) = items[0] else {
+        guard case let .user(_, text, failed, pending) = items[0] else {
             return XCTFail("Expected user item, got \(items[0])")
         }
         XCTAssertEqual(text, "hi")
         XCTAssertFalse(failed)
+        XCTAssertFalse(pending)
         guard case .assistant = items[1] else {
             return XCTFail("Expected assistant item, got \(items[1])")
         }
@@ -298,7 +300,8 @@ final class CodeViewModelTests: XCTestCase {
         mockClient.emit(.history(CodeHistory(
             sessionId: "other",
             messages: [.user(text: "hi")],
-            cursor: nil
+            cursor: nil,
+            pending: nil
         )))
         try await Task.sleep(for: .milliseconds(100))
 

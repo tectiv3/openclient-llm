@@ -20,11 +20,12 @@ extension CodeViewModelTests {
 
         // Then
         let items = try XCTUnwrap(currentSession()?.items)
-        guard case let .user(_, text, failed)? = items.last else {
+        guard case let .user(_, text, failed, pending)? = items.last else {
             return XCTFail("Expected user echo, got \(items.last)")
         }
         XCTAssertEqual(text, "hi")
         XCTAssertFalse(failed)
+        XCTAssertFalse(pending)
     }
 
     func test_sendPrompt_sameTextAlreadyInHistory_doesNotDuplicate() async throws {
@@ -33,7 +34,8 @@ extension CodeViewModelTests {
         mockClient.emit(.history(CodeHistory(
             sessionId: "s1",
             messages: [.user(text: "hi")],
-            cursor: nil
+            cursor: nil,
+            pending: nil
         )))
         try await waitUntil {
             (self.currentSession()?.items.count ?? 0) == 1
@@ -73,13 +75,14 @@ extension CodeViewModelTests {
             }) == 1
         }
 
-        // Then — steer also gets a local echo
+        // Then — steer also gets a local echo, marked queued in pi
         let items = try XCTUnwrap(currentSession()?.items)
-        guard case let .user(_, text, failed)? = items.last else {
+        guard case let .user(_, text, failed, pending)? = items.last else {
             return XCTFail("Expected user echo, got \(items.last)")
         }
         XCTAssertEqual(text, "be brief")
         XCTAssertFalse(failed)
+        XCTAssertTrue(pending)
     }
 
     func test_messageUpdate_replacesAssistantContentFromMessageSnapshot() async throws {
@@ -320,6 +323,55 @@ extension CodeViewModelTests {
         let last = try XCTUnwrap(lastUserItem())
         XCTAssertEqual(last.text, "typed in the tui")
         XCTAssertFalse(last.failed)
+    }
+
+    func test_messageStart_userRoleMatchesPendingSteer_flipsToDelivered()
+        async throws
+    {
+        // Given — a steer echo queued in pi
+        try await connectAndEstablish(isStreaming: true)
+        sut.send(.sendSteer(text: "be brief"))
+        try await waitUntil { self.lastUserItem() != nil }
+
+        // When — pi delivers the steer at the turn boundary
+        mockClient.emit(.event(messageStartEvent(
+            role: "user",
+            content: .array([.object([
+                "type": .string("text"),
+                "text": .string("be brief"),
+            ])])
+        )))
+        try await waitUntil { self.lastUserItem()?.pending == false }
+
+        // Then — the queued item flipped to delivered, no duplicate
+        XCTAssertEqual(currentSession()?.items.count, 1)
+        let item = try XCTUnwrap(lastUserItem())
+        XCTAssertEqual(item.text, "be brief")
+        XCTAssertFalse(item.failed)
+        XCTAssertFalse(item.pending)
+    }
+
+    func test_messageStart_userRoleNoPendingMatch_appendsDeliveredItem()
+        async throws
+    {
+        // Given — no queued steer in the transcript
+        try await connectAndEstablish()
+
+        // When — a TUI-typed prompt arrives as a forwarded user frame
+        mockClient.emit(.event(messageStartEvent(
+            role: "user",
+            content: .array([.object([
+                "type": .string("text"),
+                "text": .string("typed in the tui"),
+            ])])
+        )))
+
+        // Then — a plain delivered item is appended
+        try await waitUntil { self.currentSession()?.items.count == 1 }
+        let item = try XCTUnwrap(lastUserItem())
+        XCTAssertEqual(item.text, "typed in the tui")
+        XCTAssertFalse(item.failed)
+        XCTAssertFalse(item.pending)
     }
 
     func test_messageStart_userRoleFrame_afterLocalEcho_dedupesToOneItem() async throws {

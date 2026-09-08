@@ -33,6 +33,7 @@ declare module '@earendil-works/pi-coding-agent' {
         thinkingLevel?: string
         hasUI?: boolean
         isIdle(): boolean
+        hasPendingMessages(): boolean
         abort(): void
         isProjectTrusted(): boolean
         getContextUsage(): {

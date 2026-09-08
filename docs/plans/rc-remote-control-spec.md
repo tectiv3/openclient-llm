@@ -1,6 +1,6 @@
 # Plan: Remote control of pi (Code tab)
 
-Status: revised (round 3) — pending implementation.
+Status: implemented (round 3 revision; pending steers landed 2026-09-08).
 Date: 2026-09-05 (round 3 revision; original 2026-07-09)
 
 ## Goal
@@ -303,7 +303,7 @@ Client → server:
 |------|--------|--------|
 | `hello` | `code`, `version`, `token?` | Authenticate by **code OR registered token**: exact match of the 6-digit code, or (additive) the presented `token` exactly equals the currently registered push token (timing-safe compare). Rate-limit: 5 failures per IP in 60 s → `error {code:"rate_limited"}` + close — a bad token counts as a failed hello exactly like a bad code. OK → `hello_ok` + `state` + `history` (+ pending `question`). Bad → `error {code:"bad_code"}` + close. The token path exists because the code is re-randomized every `/rc` toggle-on: without it every session would force re-pairing of an already-paired device. First-time pairing (no token registered yet) still requires the code — registering a token requires an already-authenticated connection, so there is no chicken-and-egg |
 | `prompt` | `text` | Submit user message when idle. Error `not_idle` if streaming |
-| `steer` | `text` | Submit message during streaming (steer equivalent). If not streaming, treated as `prompt` (no error) |
+| `steer` | `text` | Submit message during streaming (steer equivalent) — while streaming it is queued in pi's steering queue and mirrored server-side until delivered (see A4, "Pending steers"). If not streaming, treated as `prompt` (no error) |
 | `abort` | — | Current turn abort (Esc equivalent). No-op if not streaming |
 | `answer` | `id`, `answers` | Resolve pending `question` (first wins). `answers` is `[{id, value, label, wasCustom, index?}]` — one entry per question of the pending ask, `id` matching the question's id. `value`: selected value or custom text. `wasCustom`: true if typed. `index`: 1-based option index (omit if custom). One frame type for single- and multi-question asks alike (the old single-answer frame and `answer_questionnaire` are gone) |
 | `get_state` | — | Refresh `state` |
@@ -316,7 +316,7 @@ Server → client:
 |------|---------|
 | `hello_ok` | `{version: 1}` |
 | `state` | `{sessionId, cwd, sessionName, model: {provider, id}, thinkingLevel, isStreaming, contextUsage?}` |
-| `history` | `{sessionId, messages: [...], cursor?}` — see History format below |
+| `history` | `{sessionId, messages: [...], cursor?, pending?}` — see History format below. `pending: string[]` lists steers queued in pi but not yet delivered (present only when non-empty; additive, no version bump) |
 | `event` | `{sessionId, name, ...}` forwarded pi events. Client MUST ignore events whose `sessionId` doesn't match the last received `state.sessionId` (guards against stale events during session rebind) |
 | `streaming_buffer` | `{sessionId, content: ContentBlock[]}` — accumulated content of the in-progress assistant turn. Sent after `state`+`history` on reconnect when `isStreaming` is true. Omitted when not streaming |
 | `question` | `{sessionId, id, kind: "ask_user_question", params: {questions: SubQuestion[]}}` — ONE pending frame type for 1..N questions (the old `question`/`questionnaire` kinds and the `questionnaire` frame type are gone); see shape below. Wire defaults: question `label` absent → `id`; `allowOther` absent → true; option `value` absent → `label` |
@@ -395,6 +395,40 @@ The buffer represents a single assistant message in progress. Multi-message turn
 (message → tool → message) reset on each new `message_start`. On client
 (re)connect while `isStreaming` is true, send a `streaming_buffer` message after
 `state`+`history` so the client can render the in-progress turn immediately.
+
+**Pending steers**: a steer submitted while the agent is streaming
+(`sendUserMessage(text, {deliverAs: "steer"})`) lives only in pi's in-memory
+steering queue until the agent loop delivers it at the next turn boundary —
+until then it is NOT in `getBranch()`, so it is invisible to history frames.
+The server mirrors the queue in `state.pendingSteers: string[]` and surfaces it
+as the optional `pending: string[]` field on the `history` frame (present only
+when non-empty — additive, no protocol version bump: old clients ignore unknown
+fields, new clients tolerate its absence):
+
+- **Enqueue**: in `handleSteer`, only on the streaming branch, immediately after
+  a successful `sendUserMessage(text, {deliverAs: "steer"})`. The idle branch
+  (plain prompt) is NOT tracked — the message is persisted immediately.
+- **Remove on delivery**: on `message_start` with `role: "user"` (the delivery
+  signal — pi emits `message_start`+`message_end` for the delivered steer and
+  persists it on `message_end`), remove the FIRST entry whose text equals the
+  message text (`textFromMessage`); first-match-only keeps duplicate steer texts
+  consistent.
+- **Clear on `session_start`**: before the forwarded `session_start` triggers
+  `broadcastSessionSnapshot` — a new session is a new agent with an empty queue,
+  so the rebind snapshot must not carry stale entries.
+- **Reconcile on `agent_settled`**: before forwarding, clear the list when
+  `ctx.hasPendingMessages()` is false. Verified against pi source (2026-09-08):
+  an aborted run with a queued steer does NOT settle with the queue intact —
+  `_handlePostAgentRun` sees `hasQueuedMessages()` and auto-continues
+  (`agent.continue()`), so the steer is delivered within ms of the abort and
+  the only `agent_settled` fires after delivery, queue already drained. The
+  reconcile is the safety net for the residual cases: a steer that arrives
+  after the post-run check (narrow race), TUI `clearQueue` (not mirrored),
+  and follow-up queue messages — any of which leaves pi's queue non-empty at
+  settle time and is caught on the next settle.
+- **Not cleared on `/rc` toggle-off / `stop()`**: toggling off does not clear
+  pi's in-memory queue, so a toggle-on snapshot must still report the steers.
+  Process death is the real reset.
 
 ### A5. Remote-aware questions
 
@@ -909,6 +943,17 @@ Test suite:
   10. Streaming buffer
       - Connect while agent is mid-stream → receive streaming_buffer with content
       - streaming_buffer content matches what has been streamed so far
+
+  13. Steer pending (A4 "Pending steers")
+      - Steer queued during a live run (LONG still generating) → a second
+        client connecting mid-run has its hello-snapshot history frame carry
+        `pending` with the steer text. (A steer queued across an ABORTED run
+        is unobservable: pi auto-continues the aborted run to drain the queue
+        before any settle — see A4 reconcile note.)
+      - Fresh prompt → the queued steer is delivered: a fresh snapshot has no
+        `pending` and the steer text is a user message in history
+      - New session (rebind) → the rebind snapshot has no `pending`
+        (session_start clear)
 ```
 
 Each test: connect → action → assert → disconnect. Script exits 0 on all pass,

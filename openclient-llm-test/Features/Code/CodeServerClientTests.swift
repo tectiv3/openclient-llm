@@ -342,6 +342,29 @@ final class CodeServerClientTests: XCTestCase {
         XCTAssertEqual(history.sessionId, "s1")
         XCTAssertEqual(history.cursor, "c1")
         XCTAssertEqual(history.messages.count, 1)
+        XCTAssertNil(history.pending, "absent pending decodes to nil")
+    }
+
+    func test_connect_historyJsonWithPending_decodesPendingSteers()
+        async throws
+    {
+        // Given — a snapshot carrying steers still queued in pi
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        let json = #"""
+        {"type":"history","sessionId":"s1","cursor":null,
+         "messages":[],
+         "pending":["be brief","then stop"]}
+        """#
+        try XCTUnwrap(transport.lastTask).enqueue(json)
+
+        // When
+        let event = try await nextEvent(from: stream)
+
+        // Then
+        guard case let .history(history) = event else {
+            return XCTFail("Expected history, got \(String(describing: event))")
+        }
+        XCTAssertEqual(history.pending, ["be brief", "then stop"])
     }
 
     func test_connect_streamingBufferJson_decodesStreamingBufferEvent() async throws {
