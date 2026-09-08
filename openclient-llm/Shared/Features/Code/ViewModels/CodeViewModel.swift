@@ -178,6 +178,13 @@ final class CodeViewModel {
         }
     }
 
+    #if DEBUG
+        /// Preview-only seam: force a state without a live connection.
+        func previewSetState(_ state: State) {
+            self.state = state
+        }
+    #endif
+
     func send(_ event: Event) {
         switch event {
         case .viewAppeared:
@@ -514,9 +521,7 @@ extension CodeViewModel {
             }
             return false
         }) else {
-            LogManager.warning(
-                "Code not_idle: pending prompt echo not found"
-            )
+            LogManager.warning("Code not_idle: pending prompt echo not found")
             return
         }
 
@@ -533,11 +538,7 @@ extension CodeViewModel {
         case let .connected(session):
             state = .reconnecting(session)
         case .connecting:
-            state = .failed(
-                errorMessage: String(
-                    localized: "Connection lost"
-                )
-            )
+            state = .failed(errorMessage: String(localized: "Connection lost"))
         default:
             break
         }
@@ -546,17 +547,11 @@ extension CodeViewModel {
     func authErrorMessage(_ error: CodeServerError) -> String {
         switch error.code {
         case "bad_code":
-            return String(
-                localized: "Invalid code — check the code shown in pi"
-            )
+            return String(localized: "Invalid code — check the code shown in pi")
         case "rate_limited":
-            return String(
-                localized: "Too many attempts — wait 60s"
-            )
+            return String(localized: "Too many attempts — wait 60s")
         default:
-            return error.message ?? String(
-                localized: "Authentication failed"
-            )
+            return error.message ?? String(localized: "Authentication failed")
         }
     }
 

@@ -36,10 +36,6 @@ Each spec uses `.instructions.md` suffix with YAML front matter. Update this tab
 xcodebuild build -project openclient-llm.xcodeproj -scheme openclient-llm \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max'
 
-# Build macOS
-xcodebuild build -project openclient-llm.xcodeproj -scheme openclient-llm-macOS \
-  -destination 'platform=macOS'
-
 # Test (iOS)
 xcodebuild test -project openclient-llm.xcodeproj -scheme openclient-llm \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' \
@@ -56,6 +52,8 @@ xcodebuild test -project openclient-llm.xcodeproj -scheme openclient-llm \
 - Use `.xcodeproj` (not `.xcworkspace`). SPM packages: SwiftLintPlugins, ConfettiSwiftUI.
 - CI skips signing: append `CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO`.
 - VS Code + XcodeBuildMCP config at `.xcodebuildmcp/config.yaml`.
+- The macOS target (`openclient-llm-macOS`) is low priority — the owner does not use
+  the macOS app. Do not build or test it unless explicitly asked.
 
 ### CLI Build Workarounds
 
@@ -96,7 +94,7 @@ These run inside the pi process (Node/Bun). The Swift app's `Features/Code/` is 
 - Work directly on `main`.
 - Commit messages: imperative style ("Add chat streaming support").
 - After implementation: compile and commit (linter runs on commit hook).
-- Build both iOS and macOS after changing shared code.
+- Build iOS after changing code. The macOS target is low priority — see Build & Test.
 
 ### Pre-commit Hook
 

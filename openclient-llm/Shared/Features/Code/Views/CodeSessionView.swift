@@ -374,6 +374,7 @@ private extension CodeSessionView {
             .frame(maxWidth: .infinity)
         }
         .scrollPosition($scrollPosition)
+        .scrollDismissesKeyboard(.interactively)
         .modifier(ScrollTriggerModifier(
             scrollPosition: $scrollPosition,
             scrollToMessageId: $scrollToMessageId,

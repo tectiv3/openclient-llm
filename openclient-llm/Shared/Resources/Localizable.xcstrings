@@ -43,6 +43,9 @@
     "%@ — failed to send" : {
 
     },
+    "%@ — queued, will be delivered during this run" : {
+
+    },
     "%@ tokens, %lld percent" : {
       "localizations" : {
         "de" : {
@@ -21299,6 +21302,9 @@
           }
         }
       }
+    },
+    "Recommended" : {
+
     },
     "Reconnected" : {
 

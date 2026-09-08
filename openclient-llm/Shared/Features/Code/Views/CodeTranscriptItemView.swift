@@ -13,11 +13,16 @@ struct CodeTranscriptItemView: View {
 
     @State private var isCompactionExpanded = false
     @State private var reasoningDisclosureState = ReasoningDisclosureState()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         switch item {
         case let .user(id, text, failed, pending):
             userBubble(id: id, text: text, failed: failed, pending: pending)
+                .animation(
+                    reduceMotion ? nil : .easeInOut(duration: 0.25),
+                    value: pending
+                )
 
         case let .assistant(_, content, isStreaming):
             assistantBubble(content, isStreaming: isStreaming)
@@ -57,35 +62,52 @@ private extension CodeTranscriptItemView {
         failed: Bool,
         pending: Bool
     ) -> some View {
-        HStack {
+        HStack(spacing: 8) {
             Spacer(minLength: 60)
-            Text(text)
-                .textSelection(.enabled)
+            bubbleContent(text: text, pending: pending && !failed)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
-                .foregroundStyle(.white)
+                .foregroundStyle(
+                    pending && !failed
+                        ? Color.primary.opacity(0.55)
+                        : Color.white
+                )
                 .glassEffect(
                     userBubbleTint(failed: failed, pending: pending),
                     in: .rect(cornerRadius: 18)
                 )
-                .overlay(alignment: .bottom) {
-                    if failed {
-                        retryBadgeButton(id: id)
-                    }
-                }
-                .overlay(alignment: .bottom) {
-                    if pending, !failed {
-                        queuedCaption()
-                    }
-                }
                 // Keep the prompt text in the label so VoiceOver users
-                // don't lose the content; the retry itself is an explicit
-                // action on the badge below, not part of the label.
+                // don't lose the content; the retry is an explicit action
+                // on the pill beside the bubble, not part of the label.
                 .accessibilityLabel(userBubbleAccessibilityLabel(
                     text: text,
                     failed: failed,
                     pending: pending
                 ))
+
+            if failed {
+                retryPillButton(id: id)
+            }
+        }
+    }
+
+    /// WHY: a leading icon (not a trailing caption) signals "waiting in pi's
+    /// queue" without overlapping multi-line text — the caption version
+    /// rendered over the last line and was rejected (owner, 2026-09-08).
+    @ViewBuilder
+    func bubbleContent(text: String, pending: Bool) -> some View {
+        if pending {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "hourglass")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text(text)
+                    .italic()
+                    .textSelection(.enabled)
+            }
+        } else {
+            Text(text)
+                .textSelection(.enabled)
         }
     }
 
@@ -94,7 +116,10 @@ private extension CodeTranscriptItemView {
             return .regular.tint(Color.red.opacity(0.45))
         }
         if pending {
-            return .regular.tint(Color.appAccent.opacity(0.4))
+            // WHY: a queued steer is an unconfirmed echo, not a delivered
+            // user message — untinted glass keeps it out of the accent
+            // family until pi delivers it (owner design decision 2026-09-08).
+            return .regular
         }
         return .regular.tint(Color.appAccent)
     }
@@ -115,34 +140,17 @@ private extension CodeTranscriptItemView {
         return text
     }
 
-    /// Dimmed "Queued" caption for a steer still sitting in pi's steering
-    /// queue; the full explanation lives in the accessibility label.
-    func queuedCaption() -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: "hourglass")
-                .font(.caption2)
-            Text(String(localized: "Queued"))
-                .font(.caption2)
-        }
-        .foregroundStyle(.white.opacity(0.7))
-        .padding(.bottom, 4)
-    }
-
-    /// Retry affordance on a failed bubble. A Button rather than a tap
-    /// gesture on the selectable text, so the hit is reliable and
-    /// VoiceOver exposes it as a discrete "Retry" action.
-    func retryBadgeButton(id: UUID) -> some View {
+    /// Standalone retry pill beside a failed bubble — the old bottom
+    /// overlay rendered over the last text line and misaligned.
+    func retryPillButton(id: UUID) -> some View {
         Button {
             onRetry(id)
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "exclamationmark.circle.fill")
-                    .font(.caption2)
-                Text(String(localized: "Retry"))
-                    .font(.caption2)
-            }
-            .foregroundStyle(Color.red.opacity(0.9))
-            .padding(.bottom, 6)
+            Image(systemName: "arrow.clockwise")
+                .font(.footnote)
+                .foregroundStyle(.red)
+                .frame(width: 32, height: 32)
+                .glassEffect(.regular, in: .circle)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(String(localized: "Retry"))
@@ -405,6 +413,25 @@ extension [CodeContentBlock] {
 
 #Preview {
     VStack(spacing: 16) {
+        CodeTranscriptItemView(item: .assistant(
+            id: UUID(),
+            content: [
+                .text("Launching the code review on commit 89de90a."),
+            ],
+            isStreaming: false
+        ))
+
+        // Queued steers: single-line and multi-line — multi-line was the
+        // layout case that broke the old in-bubble caption.
+        CodeTranscriptItemView(item: .user(
+            id: UUID(), text: "Use the blue theme",
+            failed: false, pending: true
+        ))
+        CodeTranscriptItemView(item: .user(
+            id: UUID(),
+            text: "Trying steering now. Ignore this message entirely and keep working on the original task",
+            failed: false, pending: true
+        ))
         CodeTranscriptItemView(item: .user(
             id: UUID(), text: "Fix the tests",
             failed: false, pending: false
@@ -413,20 +440,29 @@ extension [CodeContentBlock] {
             id: UUID(), text: "This one failed",
             failed: true, pending: false
         ))
-        CodeTranscriptItemView(item: .user(
-            id: UUID(), text: "Use the blue theme",
-            failed: false, pending: true
-        ))
         CodeTranscriptItemView(item: .assistant(
             id: UUID(),
-            content: [.text("I'll fix the failing tests.")],
+            content: [
+                .thinking("Let me check the failing tests first."),
+                .text("I'll fix the failing tests."),
+            ],
             isStreaming: false
+        ))
+        CodeTranscriptItemView(item: .toolStep(
+            id: UUID(),
+            toolName: "bash", toolCallId: "tc-1",
+            args: ["command": .string("swift test")],
+            output: nil, isComplete: false
         ))
         CodeTranscriptItemView(item: .resolvedQuestion(
             id: UUID(),
             questionText: "Which file?",
             answerText: "src/main.ts",
             wasCustom: false
+        ))
+        CodeTranscriptItemView(item: .compaction(
+            id: UUID(),
+            summary: "Compacted 12 messages: review scope, memory load, critic launch."
         ))
     }
     .padding()
