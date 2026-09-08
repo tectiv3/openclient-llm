@@ -180,6 +180,27 @@ List-only: short id (first 8 characters), agent, status, session size, and a tas
 with a footer showing the inspect/resume/delete hints. There is no interactive delete — by
 design, `subagent_inspect` covers the model and `rm` covers the user.
 
+### Live view: `/subagents attach [id]`
+
+Attaches to a **running** subagent and takes over the editor region with a live transcript
+replayed from the subagent's in-memory ring buffer (last 500 events), so late-attaching
+shows recent history.
+
+- **Resolution**: with an id, exact or unique-prefix match against running subagents
+  (ambiguous prefixes list the matches). Without an id, attaches when exactly one
+  subagent is running; otherwise lists the running short ids.
+- **View**: assistant text as Markdown, thinking blocks dimmed and truncated (200 chars),
+tool calls formatted like the parent TUI, tool output truncated (200 chars). Streaming
+  `message_update` frames are not rendered — the completed message supersedes them.
+- **Scrolling**: `↑/↓`, `PageUp/PageDown`, `Home/End`. The view follows the newest output
+  and suspends the pin while you scroll up (`End` jumps back to live).
+- **Detach**: `Esc` returns to the parent editor; the subagent keeps running.
+- **Auto-detach**: the view closes by itself when the subagent finishes
+  (`agent_settled`) or its process exits (watchdog kill, crash).
+- Requires an interactive session (`attach` is unavailable in print mode).
+- **Single subagent only**: parallel/chain runs spawn through the same registry but
+  `attach` is designed for the single mode view for now.
+
 ## Output Display
 
 **Collapsed view** (default):

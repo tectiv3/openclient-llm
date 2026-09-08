@@ -27,11 +27,20 @@ import {
     CONFIG_DIR_NAME,
     type EventBus,
     type ExtensionAPI,
+    type ExtensionContext,
     getAgentDir,
     getMarkdownTheme,
     withFileMutationQueue,
 } from '@earendil-works/pi-coding-agent'
-import { Container, Markdown, Spacer, Text } from '@earendil-works/pi-tui'
+import {
+    type Component,
+    Container,
+    Key,
+    Markdown,
+    matchesKey,
+    Spacer,
+    Text,
+} from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.ts'
 
@@ -52,6 +61,16 @@ const INSPECT_ENTRY_PREVIEW_CHARS = 100
 const INSPECT_FINAL_OUTPUT_CAP = 2000
 const LIST_ID_SHORT_CHARS = 8
 const LIST_TASK_PREVIEW_CHARS = 60
+
+// /subagents attach live-view sizing and preview caps. The reserved-rows
+// constant leaves room for the dock around the custom component (status,
+// editor chrome, footer, margin) so the view never starves the parent
+// transcript.
+const ATTACH_TASK_PREVIEW_CHARS = 60
+const ATTACH_THINKING_PREVIEW_CHARS = 200
+const ATTACH_TOOL_OUTPUT_PREVIEW_CHARS = 200
+const ATTACH_RESERVED_TERMINAL_ROWS = 6
+const ATTACH_MIN_VIEWPORT_LINES = 3
 
 // Registry of live subagent children, keyed by subagent id. Populated on
 // spawn, consumed by /subagents attach (live view + ring-buffer replay).
@@ -575,6 +594,244 @@ function buildSubagentsListReport(): string {
         `${entries.length} persisted subagent session${entries.length === 1 ? '' : 's'} in ${dir}`,
         `inspect: subagent_inspect <id>; resume: subagent {agent, task, resume}; delete: rm ${dir}/<id>.*`,
     ].join('\n')
+}
+
+function formatRunningSubagentsList(entries: ActiveSubagent[]): string[] {
+    return entries.map(
+        entry =>
+            `- ${entry.id.slice(0, LIST_ID_SHORT_CHARS)} — agent: ${entry.agent}, task: ${previewText(
+                entry.task,
+                LIST_TASK_PREVIEW_CHARS
+            )}`
+    )
+}
+
+function resolveAttachTarget(id?: string): ActiveSubagent | string {
+    // Settled children are on their way out of the registry (proc 'close'
+    // removes them); attaching would auto-detach instantly, so they are not
+    // offered as targets.
+    const running = [...activeSubagents.values()].filter(entry => !entry.settled)
+
+    if (id) {
+        const exact = running.find(entry => entry.id === id)
+        if (exact) return exact
+        const matches = running.filter(entry => entry.id.startsWith(id))
+        if (matches.length === 1) return matches[0]
+        if (matches.length > 1) {
+            return [
+                `Ambiguous subagent id "${id}" matches ${matches.length} running subagents:`,
+                ...formatRunningSubagentsList(matches),
+                'Use more characters or the full id.',
+            ].join('\n')
+        }
+        if (running.length === 0) {
+            return `No running subagent matches "${id}". Start one with the subagent tool first.`
+        }
+        return [
+            `No running subagent matches "${id}". Running subagents:`,
+            ...formatRunningSubagentsList(running),
+        ].join('\n')
+    }
+
+    if (running.length === 0) {
+        return (
+            'No running subagents. Delegate a task with the subagent tool and run ' +
+            '/subagents attach while it is still running.'
+        )
+    }
+    if (running.length === 1) return running[0]
+    return [
+        `${running.length} subagents are running:`,
+        ...formatRunningSubagentsList(running),
+        'Attach with: /subagents attach <id>',
+    ].join('\n')
+}
+
+// Transcript items for the attach view. Only *_end events render: the ring
+// buffer also keeps message_update frames, but streaming those would rebuild
+// the view per token — the completed message_end supersedes them.
+function buildAttachItems(
+    events: SubagentStreamEvent[],
+    themeFg: (color: any, text: string) => string
+): Component[] {
+    const items: Component[] = []
+
+    const pushToolResult = (msg: Message) => {
+        for (const part of msg.content) {
+            if (part.type === 'text' && part.text.trim()) {
+                items.push(
+                    new Text(
+                        themeFg(
+                            'toolOutput',
+                            previewText(part.text, ATTACH_TOOL_OUTPUT_PREVIEW_CHARS)
+                        ),
+                        0,
+                        0
+                    )
+                )
+                return
+            }
+        }
+    }
+
+    for (const event of events) {
+        if (event.type !== 'message_end' && event.type !== 'tool_result_end') continue
+        const msg = event.message as Message | undefined
+        if (!msg) continue
+        if (msg.role === 'toolResult') {
+            pushToolResult(msg)
+        } else if (msg.role === 'assistant') {
+            for (const part of msg.content) {
+                if (part.type === 'text' && part.text.trim()) {
+                    items.push(new Markdown(part.text, 0, 0, getMarkdownTheme()))
+                } else if (part.type === 'thinking' && part.thinking.trim()) {
+                    items.push(
+                        new Text(
+                            themeFg(
+                                'dim',
+                                previewText(part.thinking, ATTACH_THINKING_PREVIEW_CHARS)
+                            ),
+                            0,
+                            0
+                        )
+                    )
+                } else if (part.type === 'toolCall') {
+                    items.push(
+                        new Text(
+                            themeFg('muted', '→ ') +
+                                formatToolCall(part.name, part.arguments, themeFg),
+                            0,
+                            0
+                        )
+                    )
+                }
+            }
+        }
+    }
+    return items
+}
+
+async function attachToSubagent(ctx: ExtensionContext, entry: ActiveSubagent): Promise<void> {
+    const shortId = entry.id.slice(0, LIST_ID_SHORT_CHARS)
+
+    await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+        let finished = false
+        let followEnd = true
+        let scrollTop = 0
+        let cachedWidth = -1
+        let cachedLines: string[] | undefined
+
+        // The custom component lives in the editor dock, outside the layout
+        // engine's reach — a nested ScrollView cannot scroll there (no
+        // bounded viewport, no scroll translation; verified against
+        // pi-tui's layout walk). Scrolling is manual: render every
+        // transcript line, slice a window, and clamp the total height so the
+        // dock never starves the parent transcript.
+        const maxViewportLines = () =>
+            Math.max(
+                ATTACH_MIN_VIEWPORT_LINES,
+                tui.terminal.rows - ATTACH_RESERVED_TERMINAL_ROWS
+            )
+
+        function rebuild(width: number): string[] {
+            if (cachedLines && cachedWidth === width) return cachedLines
+            const items = buildAttachItems(entry.events, theme.fg.bind(theme))
+            const lines: string[] = []
+            for (let i = 0; i < items.length; i++) {
+                if (i > 0) lines.push('')
+                lines.push(...items[i].render(width))
+            }
+            cachedLines = lines
+            cachedWidth = width
+            return lines
+        }
+
+        function finish(): void {
+            if (finished) return
+            finished = true
+            entry.eventEmitter.off('event', onEvent)
+            entry.proc.removeListener('close', finish)
+            done()
+        }
+
+        function onEvent(event: SubagentStreamEvent): void {
+            if (event.type === 'agent_settled') {
+                finish()
+                return
+            }
+            cachedLines = undefined
+            tui.requestRender()
+        }
+
+        entry.eventEmitter.on('event', onEvent)
+        // Safety net: the child can die without an agent_settled frame
+        // (watchdog kill, crash) — detach instead of showing a frozen view.
+        entry.proc.once('close', finish)
+
+        function render(width: number): string[] {
+            const lines = rebuild(width)
+            const viewportHeight = Math.min(lines.length, maxViewportLines())
+            const maxScrollTop = Math.max(0, lines.length - viewportHeight)
+            // followEnd pins the window to the newest output; scrolling up
+            // suspends the pin until the user jumps back with End.
+            scrollTop = followEnd ? maxScrollTop : Math.min(scrollTop, maxScrollTop)
+
+            const header = [
+                theme.fg('toolTitle', theme.bold('attach ')) +
+                    theme.fg('accent', entry.agent) +
+                    theme.fg('muted', ` ${shortId}`),
+                theme.fg('dim', previewText(entry.task, ATTACH_TASK_PREVIEW_CHARS)),
+                followEnd
+                    ? theme.fg('dim', 'Esc detach · live')
+                    : theme.fg('dim', `↑${scrollTop} above · End → live · Esc detach`),
+            ]
+            return [...header, '', ...lines.slice(scrollTop, scrollTop + viewportHeight)]
+        }
+
+        function handleInput(data: string): void {
+            if (matchesKey(data, Key.escape)) {
+                finish()
+                return
+            }
+            if (!cachedLines) return
+            const viewportHeight = Math.min(cachedLines.length, maxViewportLines())
+            const maxScrollTop = Math.max(0, cachedLines.length - viewportHeight)
+            if (matchesKey(data, Key.up)) {
+                scrollTop = Math.max(0, scrollTop - 1)
+                followEnd = false
+            } else if (matchesKey(data, Key.down)) {
+                scrollTop = Math.min(maxScrollTop, scrollTop + 1)
+                followEnd = scrollTop >= maxScrollTop
+            } else if (matchesKey(data, Key.pageUp)) {
+                scrollTop = Math.max(0, scrollTop - viewportHeight)
+                followEnd = false
+            } else if (matchesKey(data, Key.pageDown)) {
+                scrollTop = Math.min(maxScrollTop, scrollTop + viewportHeight)
+                followEnd = scrollTop >= maxScrollTop
+            } else if (matchesKey(data, Key.home)) {
+                scrollTop = 0
+                followEnd = false
+            } else if (matchesKey(data, Key.end)) {
+                followEnd = true
+            } else {
+                return
+            }
+            tui.requestRender()
+        }
+
+        return {
+            render,
+            invalidate: () => {
+                cachedLines = undefined
+            },
+            handleInput,
+            dispose: () => finish(),
+        }
+    })
+
+    // custom() resolving means finish() ran (Esc, settled, or proc close)
+    // and the parent editor is restored — a notify is safe here.
+    ctx.ui.notify(`Detached from subagent ${shortId}.`, 'info')
 }
 
 function resolveResumeTarget(
@@ -2192,8 +2449,26 @@ export default function (pi: ExtensionAPI) {
     })
 
     pi.registerCommand('subagents', {
-        description: 'List persisted subagent sessions (running, aborted, or failed runs)',
-        handler: async (_args, ctx) => {
+        description:
+            'List persisted subagent sessions (running, aborted, or failed runs), or attach to a running one: /subagents attach [id]',
+        handler: async (args, ctx) => {
+            const [sub, ...rest] = args.trim().split(/\s+/)
+            if (sub === 'attach') {
+                const resolved = resolveAttachTarget(rest[0])
+                if (typeof resolved === 'string') {
+                    if (ctx.mode === 'print') console.log(resolved)
+                    else ctx.ui.notify(resolved, 'warning')
+                    return
+                }
+                if (ctx.mode !== 'tui') {
+                    const message = 'attach requires an interactive session'
+                    if (ctx.mode === 'print') console.log(message)
+                    else ctx.ui.notify(message, 'warning')
+                    return
+                }
+                await attachToSubagent(ctx, resolved)
+                return
+            }
             const report = buildSubagentsListReport()
             // ctx.ui.notify is a no-op without a UI (pi -p / --mode json); print mode writes to stdout instead.
             if (ctx.mode === 'print') console.log(report)

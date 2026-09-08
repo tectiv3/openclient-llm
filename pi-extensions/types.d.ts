@@ -63,6 +63,7 @@ declare module '@earendil-works/pi-coding-agent' {
                     render: (width: number) => string[]
                     invalidate: () => void
                     handleInput: (data: string) => void
+                    dispose?(): void
                 }
             ): Promise<T>
             confirm(title: string, message: string): Promise<boolean>
@@ -74,6 +75,7 @@ declare module '@earendil-works/pi-coding-agent' {
 
     interface TuiHandle {
         requestRender(): void
+        readonly terminal: { readonly rows: number }
     }
 
     interface Theme {
@@ -110,14 +112,21 @@ declare module '@earendil-works/pi-coding-agent' {
 }
 
 declare module '@earendil-works/pi-tui' {
+    export interface Component {
+        render(width: number): string[]
+        invalidate?(): void
+        handleInput?(data: string): void
+    }
     export class Text {
         constructor(text: string, x: number, y: number)
+        render(width: number): string[]
     }
     export class Container {
         addChild(child: unknown): void
     }
     export class Markdown {
         constructor(text: string, x: number, y: number, theme: unknown)
+        render(width: number): string[]
     }
     export class Spacer {
         constructor(lines: number)
@@ -147,6 +156,10 @@ declare module '@earendil-works/pi-tui' {
         left: string
         right: string
         tab: string
+        home: string
+        end: string
+        pageUp: string
+        pageDown: string
         shift(key: string): string
     }
     export function matchesKey(data: string, key: string): boolean
@@ -174,6 +187,7 @@ declare module '@earendil-works/pi-ai' {
         content: Array<{
             type: string
             text?: string
+            thinking?: string
             name?: string
             arguments?: Record<string, unknown>
             [key: string]: unknown
