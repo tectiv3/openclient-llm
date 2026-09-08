@@ -1020,6 +1020,85 @@ async function runSingleAgent(
                 buffer = ''
             }
 
+            // rpc-mode children take newline-terminated JSON commands on stdin.
+            // Writes return false when the kernel buffer is full — Node still
+            // queues them, so a false return is logged, not treated as failure
+            // (steers are small/rare). With current stdio (Task 3 makes it a
+            // pipe) spawn's tuple overload types proc.stdin as literal null;
+            // widening to Writable | null keeps this compiling in both states
+            // and the ?. makes the null case an inert no-op.
+            const writeChildStdin = (command: Record<string, unknown>) => {
+                try {
+                    const stdin = proc.stdin as Writable | null
+                    const ok = stdin?.write(`${JSON.stringify(command)}\n`)
+                    if (ok === false)
+                        debug(`stdin backpressure after ${String(command.type)} write`)
+                } catch (err) {
+                    debug(
+                        `stdin write failed (${String(command.type)}): ${
+                            err instanceof Error ? err.message : String(err)
+                        }`
+                    )
+                }
+            }
+
+            // Auto-responder for extension UI dialogs raised inside the child:
+            // children run headless, so confirm/select/input/editor requests
+            // hang forever without a reply. Reply with conservative defaults
+            // (deny confirms, cancel the rest) instead of hanging — forwarding
+            // dialogs to the attached user is future work (spec §5).
+            const handleExtensionUiRequest = (event: any) => {
+                const method = String(event.method ?? '')
+                const id = event.id
+                switch (method) {
+                    case 'confirm':
+                        // Deny — never auto-approve destructive operations.
+                        writeChildStdin({
+                            type: 'extension_ui_response',
+                            id,
+                            confirmed: false,
+                        })
+                        debug('extension_ui: confirm → denied')
+                        break
+                    case 'select': {
+                        const options = Array.isArray(event.options) ? event.options : []
+                        if (options.length > 0) {
+                            writeChildStdin({
+                                type: 'extension_ui_response',
+                                id,
+                                value: options[0],
+                            })
+                            debug(`extension_ui: select → first of ${options.length} options`)
+                        } else {
+                            writeChildStdin({
+                                type: 'extension_ui_response',
+                                id,
+                                cancelled: true,
+                            })
+                            debug('extension_ui: select → cancelled (no options)')
+                        }
+                        break
+                    }
+                    case 'input':
+                    case 'editor':
+                        // rpc mode awaits a reply for these (pendingExtensionRequests);
+                        // cancelling prevents an indefinite hang.
+                        writeChildStdin({ type: 'extension_ui_response', id, cancelled: true })
+                        debug(`extension_ui: ${method} → cancelled`)
+                        break
+                    case 'notify':
+                    case 'setStatus':
+                    case 'setWidget':
+                    case 'setTitle':
+                    case 'set_editor_text':
+                        // Fire-and-forget methods — rpc mode expects no reply.
+                        debug(`extension_ui: ${method} → fire-and-forget`)
+                        break
+                    default:
+                        debug(`extension_ui: unknown method "${method}" → no reply`)
+                }
+            }
+
             const processLine = (line: string) => {
                 if (!line.trim()) return
                 let event: any
@@ -1029,8 +1108,26 @@ async function runSingleAgent(
                     return
                 }
                 lastActivityTime = Date.now()
-                eventCount++
                 const type = event.type ?? 'unknown'
+
+                // rpc-mode-only frames (verified against
+                // packages/coding-agent/src/modes/rpc/rpc-mode.ts). They sit
+                // after the watchdog reset so a frame flood counts as genuine
+                // stdout activity, but before eventCount so command acks and
+                // control frames stay out of transcript accounting.
+                if (type === 'response') return // command ack, not a transcript event
+                if (type === 'extension_error') {
+                    debug(
+                        `extension_error: ${String(event.extensionPath ?? '?')} ${String(event.error ?? '')}`
+                    )
+                    return
+                }
+                if (type === 'extension_ui_request') {
+                    handleExtensionUiRequest(event)
+                    return
+                }
+
+                eventCount++
                 lastEventType = type
 
                 if (event.type === 'message_end' && event.message) {
