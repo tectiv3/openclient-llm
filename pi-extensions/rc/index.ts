@@ -3,7 +3,11 @@ import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { execFileSync } from 'node:child_process'
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import type {
+    ExtensionAPI,
+    ExtensionCommandContext,
+    ExtensionContext,
+} from '@earendil-works/pi-coding-agent'
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import { dbgLog } from './debug'
@@ -114,6 +118,7 @@ type RcSingleton = {
     pendingAsk: PendingAsk | null
     pendingSteers: string[]
     compacting: CompactingInfo | null
+    commandCtx: ExtensionCommandContext | null
     quitAuthWritten: boolean
     processHooksRegistered: boolean
     handleUpgrade(req: IncomingMessage, socket: RcSocket, head: Buffer): void
@@ -154,6 +159,7 @@ function singleton(): RcSingleton {
         pendingAsk: null,
         pendingSteers: [],
         compacting: null,
+        commandCtx: null,
         quitAuthWritten: false,
         processHooksRegistered: false,
         handleUpgrade(req, socket, head) {
@@ -541,6 +547,9 @@ function handleClientMessage(state: RcSingleton, client: RcClient, message: unkn
         case 'push_token':
             handlePushToken(state, client, message)
             break
+        case 'command':
+            void handleCommand(state, client, message)
+            break
         default:
             writeJson(client, { type: 'error', code: 'invalid_message' })
     }
@@ -787,11 +796,7 @@ function handlePrompt(state: RcSingleton, client: RcClient, message: JsonObject)
     }
     const binding = state.binding
     if (!binding) {
-        writeJson(client, {
-            type: 'error',
-            code: 'invalid_message',
-            message: 'no active pi session',
-        })
+        writeJson(client, { type: 'error', code: 'not_ready' })
         return
     }
     if (!binding.ctx.isIdle()) {
@@ -812,11 +817,7 @@ function handleSteer(state: RcSingleton, client: RcClient, message: JsonObject):
     }
     const binding = state.binding
     if (!binding) {
-        writeJson(client, {
-            type: 'error',
-            code: 'invalid_message',
-            message: 'no active pi session',
-        })
+        writeJson(client, { type: 'error', code: 'not_ready' })
         return
     }
     try {
@@ -836,6 +837,129 @@ function handleSteer(state: RcSingleton, client: RcClient, message: JsonObject):
     }
 }
 
+// ── Remote commands (spec: rc-commands-spec.md) ─────────────────────
+
+let commandInFlight = false
+
+async function handleCommand(
+    state: RcSingleton,
+    client: RcClient,
+    message: JsonObject
+): Promise<void> {
+    const command = stringFrom(message.command as string)
+    if (!command) {
+        writeJson(client, { type: 'error', code: 'unknown_command' })
+        return
+    }
+    const binding = state.binding
+    if (!binding) {
+        writeJson(client, { type: 'error', code: 'not_ready' })
+        return
+    }
+    if (commandInFlight) {
+        writeJson(client, { type: 'error', code: 'not_ready' })
+        return
+    }
+    try {
+        switch (command) {
+            case 'new':
+                await handleCommandNew(state, client)
+                break
+            case 'set_model':
+                await handleCommandSetModel(state, client, binding, message)
+                break
+            case 'compact':
+                handleCommandCompact(binding, message)
+                break
+            case 'name':
+                handleCommandName(binding, client, message)
+                break
+            default:
+                writeJson(client, { type: 'error', code: 'unknown_command' })
+        }
+    } catch (error) {
+        const msg = errorMessage(error)
+        if (msg.includes('stale')) {
+            writeJson(client, {
+                type: 'error',
+                code: 'stale_session',
+                message: 'Session replaced outside rc — run /rc in the terminal to recover',
+            })
+        } else {
+            writeJson(client, {
+                type: 'error',
+                code: 'command_failed',
+                message: msg.slice(0, 200),
+            })
+        }
+    }
+}
+
+async function handleCommandNew(state: RcSingleton, client: RcClient): Promise<void> {
+    const cmdCtx = state.commandCtx
+    if (!cmdCtx || typeof cmdCtx.newSession !== 'function') {
+        writeJson(client, {
+            type: 'error',
+            code: 'stale_session',
+            message: 'Session replaced outside rc — run /rc in the terminal to recover',
+        })
+        return
+    }
+    commandInFlight = true
+    try {
+        await cmdCtx.newSession({
+            withSession: fresh => {
+                state.commandCtx = fresh
+            },
+        })
+    } finally {
+        commandInFlight = false
+    }
+}
+
+async function handleCommandSetModel(
+    state: RcSingleton,
+    client: RcClient,
+    binding: Binding,
+    message: JsonObject
+): Promise<void> {
+    const provider = stringFrom(message.provider as string)
+    const modelId = stringFrom(message.modelId as string)
+    if (!provider || !modelId) {
+        writeJson(client, { type: 'error', code: 'unknown_command' })
+        return
+    }
+    const model = binding.ctx.modelRegistry?.find?.(provider, modelId)
+    if (!model) {
+        writeJson(client, { type: 'error', code: 'model_not_found' })
+        return
+    }
+    const ok = await binding.pi.setModel(model)
+    if (!ok) {
+        writeJson(client, { type: 'error', code: 'model_not_set' })
+    }
+}
+
+function handleCommandCompact(binding: Binding, message: JsonObject): void {
+    const raw = message.instructions
+    const instructions = typeof raw === 'string' ? raw.trim() : undefined
+    binding.ctx.compact(instructions ? { customInstructions: instructions } : undefined)
+}
+
+function handleCommandName(binding: Binding, client: RcClient, message: JsonObject): void {
+    const raw = message.name
+    if (typeof raw !== 'string') {
+        writeJson(client, { type: 'error', code: 'unknown_command' })
+        return
+    }
+    const trimmed = raw.trim()
+    if (trimmed.length === 0) {
+        writeJson(client, { type: 'error', code: 'unknown_command' })
+        return
+    }
+    binding.pi.setSessionName(trimmed)
+}
+
 function buildState(state: RcSingleton): JsonObject {
     const ctx = state.binding?.ctx
     const model = ctx?.model as JsonObject | undefined
@@ -850,6 +974,19 @@ function buildState(state: RcSingleton): JsonObject {
         stringFrom(model?.name) ??
         'unknown'
     const usage = ctx?.getContextUsage()
+    const scopedModels = safeArray(ctx?.scopedModels)
+    const catalogModels =
+        scopedModels.length > 0
+            ? scopedModels
+            : safeArray(ctx?.modelRegistry?.getAvailable?.())
+    const models = catalogModels.filter(isObject).map(m => ({
+        provider:
+            stringFrom(m.provider) ??
+            stringFrom(m.providerId) ??
+            stringFrom(m.providerName) ??
+            'unknown',
+        id: stringFrom(m.id) ?? stringFrom(m.model) ?? stringFrom(m.name) ?? 'unknown',
+    }))
     return {
         type: 'state',
         sessionId: sessionId(state),
@@ -871,6 +1008,7 @@ function buildState(state: RcSingleton): JsonObject {
                   },
               }
             : {}),
+        ...(models.length > 0 ? { models } : {}),
     }
 }
 
@@ -1020,9 +1158,16 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
         forward('session_start', event, ctx)
     })
     pi.on('session_shutdown', async (event, ctx) => {
-        state.bind(pi, ctx)
         state.compacting = null
-        if (event.reason === 'quit') await state.stop('quit', 'pi shutdown')
+        if (event.reason === 'quit') {
+            state.bind(pi, ctx)
+            await state.stop('quit', 'pi shutdown')
+        } else {
+            // Non-quit (new/resume/fork): the old ctx is about to be
+            // invalidated; null the binding so handlers return not_ready
+            // instead of dereferencing a stale ctx.
+            state.binding = null
+        }
     })
     pi.on('agent_start', (event, ctx) => forward('agent_start', event, ctx))
     pi.on('agent_settled', (event, ctx) => {
@@ -1088,6 +1233,14 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
         // clearing above is the feedback, no error frame. A genuine failure
         // additionally surfaces as an error frame for the phone toast.
         if (!aborted) state.broadcast({ type: 'error', code: 'compaction_failed', message })
+    })
+    pi.on('model_select', (_event, ctx) => {
+        state.bind(pi, ctx)
+        state.broadcast(buildState(state))
+    })
+    pi.on('session_info_changed', (_event, ctx) => {
+        state.bind(pi, ctx)
+        state.broadcast(buildState(state))
     })
 }
 
@@ -1459,6 +1612,7 @@ export default function rc(pi: ExtensionAPI): void {
         handler: async (args, ctx) => {
             dbgLog('command /rc invoked')
             state.bind(pi, ctx)
+            state.commandCtx = ctx
             if (args.trim() === 'push-setup') {
                 dbgLog('command /rc push-setup invoked')
                 await runPushSetup(state, ctx.ui, sessionId(state))

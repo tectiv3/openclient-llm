@@ -24,11 +24,14 @@ declare module '@earendil-works/pi-coding-agent' {
                 getArgumentCompletions?: (
                     argumentPrefix: string
                 ) => Array<{ value: string; label: string; description: string }>
-                handler: (args: string, ctx: ExtensionContext) => Promise<void>
+                handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>
             }
         ): void
         on(event: string, handler: (event: any, ctx: any) => void): void
         sendUserMessage(text: string, opts?: { deliverAs?: string }): void
+        setModel(model: unknown): Promise<boolean>
+        setSessionName(name: string): void
+        getSessionName(): string | undefined
         events: EventBus
     }
 
@@ -53,6 +56,11 @@ declare module '@earendil-works/pi-coding-agent' {
             contextWindow: number | null
             percent: number | null
         } | null
+        scopedModels?: unknown[]
+        modelRegistry?: {
+            find?(provider: string, modelId: string): unknown
+            getAvailable?(): unknown[]
+        }
         sessionManager: {
             getBranch(): unknown[]
             getSessionId?(): string
@@ -77,6 +85,12 @@ declare module '@earendil-works/pi-coding-agent' {
             notify(message: string, severity: string): void
             setStatus?(key: string, text: string | undefined): void
         }
+    }
+
+    export interface ExtensionCommandContext extends ExtensionContext {
+        newSession(opts: {
+            withSession?: (ctx: ExtensionCommandContext) => void
+        }): Promise<{ cancelled?: boolean }>
     }
 
     interface TuiHandle {

@@ -20,6 +20,8 @@
  * the child without the PI_RC_APNS_* env and re-runs group 12 as the
  * "push disabled" case (zero push traffic, all other RC behavior intact).
  * Group 12 waits out group 11's 60 s rate-limit lockout before connecting.
+ * Group 14 covers remote commands (spec: docs/plans/rc-commands-spec.md):
+ * new, set_model, compact, name, error codes, stale_session.
  * Group 15 covers compaction visibility (spec:
  * docs/plans/rc-compaction-visibility-spec.md): the in-flight compaction
  * window is held open by a ~3 s delay in the test-only probe extension's
@@ -468,8 +470,8 @@ async function connectAndVerifyConnectTime(ctx) {
 
 const tests = [];
 
-function registerTest(group, name, run) {
-  tests.push({ group, name, run });
+function registerTest(group, name, run, { timeout } = {}) {
+  tests.push({ group, name, run, timeout });
 }
 
 const skip = (reason) => new Skip(reason);
@@ -1763,6 +1765,298 @@ registerTest(13, "steer_pending_cleared_on_new_session", async (ctx) => {
   }
 });
 
+// --- group 14: remote commands (spec: docs/plans/rc-commands-spec.md) -----------
+// Tests the `command` client→server frame: new, set_model, compact, name.
+// Shared session, locked ascending order: T1-T10 must run before T11 (stale
+// poison). Unique RC-CMD-14x markers.
+
+// T1: command new while idle → session_start + snapshot with new sessionId.
+registerTest(14, "command_new_idle", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    const oldId = ctx.lastState?.sessionId;
+    check(nonEmptyString(oldId), "no prior sessionId");
+    ws.send(JSON.stringify({ type: "command", command: "new" }));
+    const newState = await waitForMessage(
+      next,
+      (m) => m?.type === "state" && nonEmptyString(m.sessionId) && m.sessionId !== oldId,
+      30_000,
+      "new state after command new",
+    );
+    assertValidStateShape(newState);
+    check(newState.sessionId !== oldId, "sessionId must change after command new");
+    ctx.lastState = newState;
+  });
+});
+
+// T2: command new while streaming → aborted-run tail before session_start.
+registerTest(14, "command_new_streaming", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    const oldId = ctx.lastState?.sessionId;
+    ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+    await waitForEventByName(next, "message_update", 45_000);
+    ws.send(JSON.stringify({ type: "command", command: "new" }));
+    // Must see turn_end before session_start.
+    const events = await readMessages(
+      next,
+      (m) => m?.type === "state" && nonEmptyString(m.sessionId) && m.sessionId !== oldId,
+      60_000,
+      "new state after mid-stream command new",
+    );
+    const turnEnd = events.find((m) => m?.type === "event" && m.name === "turn_end");
+    check(turnEnd !== undefined, "must see turn_end (aborted-run tail) before the new session");
+    const newState = events.at(-1);
+    assertValidStateShape(newState);
+    check(newState.sessionId !== oldId, "sessionId must change");
+    ctx.lastState = newState;
+  });
+}, { timeout: 90_000 });
+
+// T3: chained command new (withSession stash) — both succeed.
+registerTest(14, "command_new_chained", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    const id1 = ctx.lastState?.sessionId;
+    ws.send(JSON.stringify({ type: "command", command: "new" }));
+    const state1 = await waitForMessage(
+      next,
+      (m) => m?.type === "state" && nonEmptyString(m.sessionId) && m.sessionId !== id1,
+      30_000,
+      "first chained new",
+    );
+    assertValidStateShape(state1);
+    // Wait for the history frame that follows the state snapshot.
+    await waitForMessage(next, (m) => m?.type === "history", 10_000, "history after first new");
+    ws.send(JSON.stringify({ type: "command", command: "new" }));
+    const state2 = await waitForMessage(
+      next,
+      (m) => m?.type === "state" && nonEmptyString(m.sessionId) && m.sessionId !== state1.sessionId,
+      30_000,
+      "second chained new",
+    );
+    assertValidStateShape(state2);
+    check(state2.sessionId !== state1.sessionId, "second new must produce a different sessionId");
+    ctx.lastState = state2;
+  });
+}, { timeout: 90_000 });
+
+// T4: command set_model — env-conditioned (needs ≥ 2 models in catalog).
+registerTest(14, "command_set_model", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    const models = ctx.lastState?.models;
+    if (!Array.isArray(models) || models.length < 2) {
+      throw skip("fewer than 2 models in catalog — cannot test set_model positive path");
+    }
+    const current = ctx.lastState?.model;
+    const other = models.find(
+      (m) => m.provider !== current?.provider || m.id !== current?.id,
+    );
+    check(other !== undefined, "must find a model different from current");
+    ws.send(JSON.stringify({ type: "command", command: "set_model", provider: other.provider, modelId: other.id }));
+    const state = await waitForMessage(
+      next,
+      (m) => m?.type === "state" && m.model?.id === other.id && m.model?.provider === other.provider,
+      15_000,
+      "state with new model after set_model",
+    );
+    assertValidStateShape(state);
+    ctx.lastState = state;
+  });
+});
+
+// T4b: set_model with unknown ref → model_not_found.
+registerTest(14, "command_set_model_not_found", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    ws.send(JSON.stringify({ type: "command", command: "set_model", provider: "nonexistent", modelId: "no-such-model" }));
+    await waitForMessage(
+      next,
+      (m) => m?.type === "error" && m.code === "model_not_found",
+      10_000,
+      "model_not_found error",
+    );
+  });
+});
+
+// T5: command compact (seeded session).
+registerTest(14, "command_compact_seeded", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    // Seed the session with enough content for compaction.
+    for (const marker of ["RC-CMD-SEED-14a", "RC-CMD-SEED-14b"]) {
+      ws.send(JSON.stringify({ type: "prompt", text: `Reply with exactly: ${marker}` }));
+      await waitForEventByName(next, "agent_settled", 60_000);
+    }
+    ws.send(JSON.stringify({ type: "command", command: "compact" }));
+    // Compaction is fire-and-forget; the side effect arrives via
+    // session_before_compact (state with compacting) → session_compact
+    // (state + history snapshot).
+    const doneState = await waitForMessage(
+      next,
+      (m) => m?.type === "state" && m.compacting === undefined,
+      120_000,
+      "state without compacting (compact done)",
+    );
+    assertValidStateShape(doneState);
+    // History snapshot includes the compaction entry.
+    const history = await waitForMessage(next, (m) => m?.type === "history", 10_000, "history after compact");
+    check(
+      (history.messages ?? []).some((m) => m?.role === "compaction"),
+      "history must contain a role:compaction entry after compact command",
+    );
+    ctx.lastState = doneState;
+  });
+}, { timeout: 180_000 });
+
+// T6: command name + empty name rejection.
+registerTest(14, "command_name", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    ws.send(JSON.stringify({ type: "command", command: "name", name: "RC-RENAMED-14" }));
+    const state = await waitForMessage(
+      next,
+      (m) => m?.type === "state" && m.sessionName === "RC-RENAMED-14",
+      10_000,
+      "state with new sessionName",
+    );
+    assertValidStateShape(state);
+    ctx.lastState = state;
+    // Empty name → unknown_command.
+    ws.send(JSON.stringify({ type: "command", command: "name", name: "" }));
+    await waitForMessage(
+      next,
+      (m) => m?.type === "error" && m.code === "unknown_command",
+      5_000,
+      "unknown_command for empty name",
+    );
+  });
+});
+
+// T7: unknown command name → unknown_command.
+registerTest(14, "command_unknown", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    ws.send(JSON.stringify({ type: "command", command: "nonexistent" }));
+    await waitForMessage(
+      next,
+      (m) => m?.type === "error" && m.code === "unknown_command",
+      5_000,
+      "unknown_command error",
+    );
+  });
+});
+
+// T8: second command new while first in-flight → not_ready.
+registerTest(14, "command_new_concurrent_rejected", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+    await waitForEventByName(next, "message_update", 45_000);
+    // Fire first new (don't await completion).
+    ws.send(JSON.stringify({ type: "command", command: "new" }));
+    // Immediately fire second new.
+    ws.send(JSON.stringify({ type: "command", command: "new" }));
+    // One of these must be not_ready.
+    const events = await readMessages(
+      next,
+      (m) => m?.type === "error" && m.code === "not_ready",
+      30_000,
+      "not_ready for concurrent command new",
+    );
+    check(
+      events.some((m) => m?.type === "error" && m.code === "not_ready"),
+      "second concurrent command new must get not_ready",
+    );
+    // Drain until the new session settles.
+    await waitForMessage(
+      next,
+      (m) => m?.type === "state" && nonEmptyString(m.sessionId),
+      30_000,
+      "state after concurrent new resolves",
+    );
+    // Drain history.
+    await waitForMessage(next, (m) => m?.type === "history", 10_000, "history after concurrent new");
+  });
+}, { timeout: 90_000 });
+
+// T9: near-empty compact → command_failed (or compaction_failed error).
+registerTest(14, "command_compact_empty_fails", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    // Get a fresh near-empty session.
+    const oldId = ctx.lastState?.sessionId;
+    ws.send(JSON.stringify({ type: "command", command: "new" }));
+    await waitForMessage(
+      next,
+      (m) => m?.type === "state" && nonEmptyString(m.sessionId) && m.sessionId !== oldId,
+      30_000,
+      "fresh session for empty compact test",
+    );
+    await waitForMessage(next, (m) => m?.type === "history", 10_000, "history after fresh session");
+    ws.send(JSON.stringify({ type: "command", command: "compact" }));
+    // The compact fires asynchronously; a near-empty branch triggers
+    // session_compact_failed → error compaction_failed (reason=manual gate).
+    await waitForMessage(
+      next,
+      (m) => m?.type === "error" && (m.code === "compaction_failed" || m.code === "command_failed"),
+      30_000,
+      "compaction failure error on near-empty session",
+    );
+  });
+}, { timeout: 90_000 });
+
+// T10: abort while remote question pending → question_resolved cancelled.
+registerTest(14, "abort_cancels_pending_question", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    ws.send(JSON.stringify({ type: "prompt", text: "ASK" }));
+    const q = await waitForMessage(
+      next,
+      (m) => m?.type === "question",
+      60_000,
+      "question frame",
+    );
+    check(q.kind === "ask_user_question", `expected ask_user_question, got ${JSON.stringify(q.kind)}`);
+    ws.send(JSON.stringify({ type: "abort" }));
+    const resolved = await waitForMessage(
+      next,
+      (m) => m?.type === "question_resolved" && m.id === q.id,
+      10_000,
+      "question_resolved after abort",
+    );
+    check(
+      resolved.by === "cancelled",
+      `expected by cancelled, got ${JSON.stringify(resolved.by)}`,
+    );
+    await waitForEventByName(next, "agent_settled", 60_000);
+  });
+}, { timeout: 120_000 });
+
+// T11: stale_session after RPC new_session. MUST run LAST — poisons commandCtx.
+registerTest(14, "command_new_stale_after_rpc_replacement", async (ctx) => {
+  requireAuth(ctx);
+  const a = await connectAndVerifyConnectTime(ctx);
+  const oldId = ctx.lastState?.sessionId;
+  try {
+    // RPC new_session (non-rc path) — stale-poisons commandCtx.
+    const resp = await withTimeout(
+      ctx.client.sendCommand({ type: "new_session" }),
+      10_000,
+      "new_session RPC timed out",
+    );
+    check(resp.success !== false, `new_session RPC failed: ${JSON.stringify(resp)}`);
+    // Wait for the new session's state on the WS.
+    await waitForMessage(
+      a.next,
+      (m) => m?.type === "state" && nonEmptyString(m.sessionId) && m.sessionId !== oldId,
+      10_000,
+      "state after RPC new_session",
+    );
+    await waitForMessage(a.next, (m) => m?.type === "history", 10_000, "history after RPC new_session");
+    // Now command new should fail with stale_session.
+    a.ws.send(JSON.stringify({ type: "command", command: "new" }));
+    await waitForMessage(
+      a.next,
+      (m) => m?.type === "error" && m.code === "stale_session",
+      10_000,
+      "stale_session error after RPC replacement",
+    );
+  } finally {
+    a.close();
+  }
+});
+
 // --- group 15: compaction visibility (spec: rc-compaction-visibility-spec.md) ---
 // The server mirrors pi's in-flight compaction as the OPTIONAL `compacting`
 // field on state frames (D1): set on session_before_compact (state broadcast
@@ -2413,7 +2707,8 @@ async function main() {
     for (const test of byGroup(group)) {
       const started = Date.now();
       try {
-        await withTimeout(test.run(ctx), 60_000, `test timed out after 60s`);
+        const ms = test.timeout ?? 60_000;
+        await withTimeout(test.run(ctx), ms, `test timed out after ${ms / 1000}s`);
         results.push({ test, status: "pass", ms: Date.now() - started });
         console.log(`PASS ${test.name}`);
       } catch (err) {
