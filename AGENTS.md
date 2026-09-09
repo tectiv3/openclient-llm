@@ -12,9 +12,7 @@ Each spec uses `.instructions.md` suffix with YAML front matter. Update this tab
 |---|---|
 | `agent-tool-calling.instructions.md` | Implementing tool calling, tool UI, or the agent loop. |
 | `architecture.instructions.md` | Creating Swift files, features, or changing layer boundaries. |
-| `changelog.instructions.md` | Updating `CHANGELOG.md`. |
 | `chat-visual-style.instructions.md` | Designing chat-specific SwiftUI. |
-| `code-style.instructions.md` | Writing or reviewing Swift style. |
 | `concurrency.instructions.md` | Working with async code, isolation, or `Sendable`. |
 | `design-ui.instructions.md` | Designing general SwiftUI UI, accessibility, haptics, or animation. |
 | `litellm-api.instructions.md` | Changing LiteLLM/OpenAI-compatible API integration. |
