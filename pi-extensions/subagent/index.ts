@@ -199,6 +199,16 @@ function formatTokens(count: number): string {
     return `${(count / 1000000).toFixed(1)}M`
 }
 
+function formatElapsedMs(ms: number): string {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000))
+    const hours = Math.floor(totalSeconds / 3600)
+    const minutes = Math.floor((totalSeconds % 3600) / 60)
+    const seconds = totalSeconds % 60
+    if (hours > 0) return `${hours}h${String(minutes).padStart(2, '0')}m`
+    if (minutes > 0) return `${minutes}m${String(seconds).padStart(2, '0')}s`
+    return `${seconds}s`
+}
+
 function formatUsageStats(
     usage: {
         input: number
@@ -593,6 +603,18 @@ function listSessionPersistedSubagents(): PersistedSubagentEntry[] {
     const sessionId = currentPiSessionId
     if (!sessionId) return []
     return listPersistedSubagents().filter(entry => entry.meta?.parentSessionId === sessionId)
+}
+
+// Resumable persisted runs of the current session: readable meta, not owned
+// by a live process (this session's running children are registry entries,
+// another session's by a live pidfile). Powers /subagents resume id omission
+// and the manager view's PERSISTED section (§11).
+function listSessionResumableSubagents(): PersistedSubagentEntry[] {
+    return listSessionPersistedSubagents().filter(
+        entry =>
+            entry.meta !== undefined &&
+            deriveSubagentRunStatus(entry.id, entry.meta).status !== 'running'
+    )
 }
 
 function formatPersistedSubagentsList(entries: PersistedSubagentEntry[]): string[] {
@@ -1195,6 +1217,25 @@ function readSubagentPid(pidPath: string): number | undefined {
     } catch {
         return undefined
     }
+}
+
+// Manager-view delete (§11): remove a persisted run's artifacts
+// (.jsonl/.meta/.pid). Refuses ids owned by a live child — this session's
+// registry or another session's live pidfile — and returns the refusal
+// reason; undefined means the artifacts were removed.
+function deletePersistedRunArtifacts(subagentId: string): string | undefined {
+    if (activeSubagents.has(subagentId)) {
+        return `Refused: ${subagentId.slice(0, LIST_ID_SHORT_CHARS)} is running in this session — abort it first.`
+    }
+    const { session, pid, meta } = getSubagentFilePaths(subagentId)
+    const livePid = readSubagentPid(pid)
+    if (livePid !== undefined && isProcessAlive(livePid)) {
+        return `Refused: pid ${livePid} is live — another session's child owns this run.`
+    }
+    removeSubagentFile(session)
+    removeSubagentFile(pid)
+    removeSubagentFile(meta)
+    return undefined
 }
 
 interface SubagentRunStatus {
@@ -1931,6 +1972,21 @@ async function runSingleAgent(
     }
 }
 
+// Command-level notices: print mode has no UI, so stdout replaces notify
+// (json/no-ui modes keep notify, a no-op there — same contract as the
+// pre-existing branches this consolidates).
+function emitCommandNotice(
+    ctx: ExtensionContext,
+    message: string,
+    severity: 'info' | 'warning' | 'error'
+): void {
+    if (ctx.mode === 'print') {
+        console.log(message)
+        return
+    }
+    ctx.ui.notify(message, severity)
+}
+
 // /subagents resume <id> [instruction...] — relaunch a persisted failed or
 // aborted run in this session and attach to it. Unlike the subagent tool's
 // resume path, no tool result consumes the run: runSingleAgent is fired and
@@ -1939,30 +1995,53 @@ async function runSingleAgent(
 async function handleSubagentsResume(ctx: ExtensionContext, rest: string[]): Promise<void> {
     capturePiSessionId(ctx)
 
-    if (ctx.mode !== 'tui') {
-        const message = 'resume requires an interactive session'
-        if (ctx.mode === 'print') console.log(message)
-        else ctx.ui.notify(message, 'warning')
-        return
+    // Id omission (§11): exactly one session-scoped resumable candidate
+    // resumes with the default instruction. The zero-case names the
+    // cross-session escape hatch — explicit full ids keep resolving globally.
+    let requestedId = rest[0]
+    if (!requestedId) {
+        const candidates = listSessionResumableSubagents()
+        if (candidates.length === 0) {
+            emitCommandNotice(
+                ctx,
+                'No resumable subagent runs from this session. Runs from other pi sessions are hidden — ' +
+                    'resume one with its full id: /subagents resume <id>.',
+                'info'
+            )
+            return
+        }
+        if (candidates.length > 1) {
+            emitCommandNotice(
+                ctx,
+                [
+                    `${candidates.length} resumable runs from this session — pick one:`,
+                    ...formatPersistedSubagentsList(candidates),
+                ].join('\n'),
+                'warning'
+            )
+            return
+        }
+        requestedId = candidates[0].id
     }
 
-    if (!rest[0]) {
-        ctx.ui.notify(
-            'Usage: /subagents resume <id> [instruction...] — run /subagents to list persisted runs.',
-            'warning'
-        )
-        return
-    }
     // The command grammar carries no quoting: whitespace-split words are
-    // re-joined with single spaces.
+    // re-joined with single spaces. When the id came from the omission
+    // path, rest is empty and the default instruction applies.
     const instruction = rest.slice(1).join(' ') || RESUME_DEFAULT_INSTRUCTION
 
-    const resolved = resolvePersistedResumeTarget(rest[0])
+    const resolved = resolvePersistedResumeTarget(requestedId)
     if ('error' in resolved) {
-        ctx.ui.notify(resolved.error, 'warning')
+        emitCommandNotice(ctx, resolved.error, 'warning')
         return
     }
     const shortId = resolved.id.slice(0, LIST_ID_SHORT_CHARS)
+
+    // Resume needs the interactive attach view; checked after id handling so
+    // the omission/resolution notices stay observable in print/rpc modes.
+    if (ctx.mode !== 'tui') {
+        emitCommandNotice(ctx, 'resume requires an interactive session', 'warning')
+        return
+    }
 
     if (activeSubagents.has(resolved.id)) {
         ctx.ui.notify(
@@ -2065,6 +2144,390 @@ async function handleSubagentsResume(ctx: ExtensionContext, rest: string[]): Pro
             'info'
         )
     }
+}
+
+// ── /subagents manager view (§11) ───────────────────────────────────
+
+type ManagerRow =
+    | {
+          kind: 'running'
+          id: string
+          agent: string
+          task: string
+          startedAt: number
+          entry: ActiveSubagent
+      }
+    | {
+          kind: 'persisted'
+          id: string
+          agent: string
+          task: string
+          status: string
+      }
+
+// Actions that close the manager (done() first, then the flow runs — no
+// auto-return to the manager).
+type ManagerAction =
+    | { type: 'attach'; entry: ActiveSubagent }
+    | { type: 'resume'; id: string }
+    | { type: 'inspect'; id: string }
+
+// Rows are re-scanned on every render: RUNNING children that settle while the
+// view is open drop out on the next redraw, and fresh PERSISTED failures
+// appear. Registry children get a close hook so a settle/abort/kill without a
+// keypress still triggers the re-scan render.
+async function openSubagentsManager(ctx: ExtensionContext): Promise<void> {
+    const action = await ctx.ui.custom<ManagerAction | undefined>((tui, theme, _kb, done) => {
+        let finished = false
+        let selected = 0
+        let message: string | undefined
+        let messageIsError = false
+        const hookedProcs = new Set<ChildProcess>()
+        const onProcClose = () => {
+            if (!finished) tui.requestRender()
+        }
+
+        const finish = (result: ManagerAction | undefined): void => {
+            if (finished) return
+            finished = true
+            for (const proc of hookedProcs) proc.removeListener('close', onProcClose)
+            done(result)
+        }
+
+        function scanRows(): ManagerRow[] {
+            const running: ManagerRow[] = [...activeSubagents.values()]
+                .filter(entry => !entry.settled)
+                .sort((a, b) => a.startedAt - b.startedAt)
+                .map(entry => {
+                    if (!hookedProcs.has(entry.proc)) {
+                        hookedProcs.add(entry.proc)
+                        entry.proc.once('close', onProcClose)
+                    }
+                    return {
+                        kind: 'running' as const,
+                        id: entry.id,
+                        agent: entry.agent,
+                        task: entry.task,
+                        startedAt: entry.startedAt,
+                        entry,
+                    }
+                })
+            const persisted: ManagerRow[] = listSessionResumableSubagents()
+                .filter(entry => !activeSubagents.has(entry.id))
+                .sort((a, b) =>
+                    (b.meta!.startedAt ?? b.id).localeCompare(a.meta!.startedAt ?? a.id)
+                )
+                .map(entry => ({
+                    kind: 'persisted' as const,
+                    id: entry.id,
+                    agent: entry.meta!.agent,
+                    task: entry.meta!.task,
+                    status: deriveSubagentRunStatus(entry.id, entry.meta).status,
+                }))
+            return [...running, ...persisted]
+        }
+
+        function rowLine(row: ManagerRow, isSelected: boolean): string {
+            const marker = isSelected ? theme.fg('accent', '▸ ') : '  '
+            const preview = previewText(row.task, ATTACH_TASK_PREVIEW_CHARS)
+            if (row.kind === 'running') {
+                return (
+                    marker +
+                    theme.fg('accent', row.id.slice(0, LIST_ID_SHORT_CHARS)) +
+                    ' ' +
+                    theme.fg('toolTitle', row.agent) +
+                    ' ' +
+                    theme.fg('muted', formatElapsedMs(Date.now() - row.startedAt)) +
+                    ' ' +
+                    theme.fg('dim', preview)
+                )
+            }
+            const statusColor =
+                row.status === 'failed'
+                    ? 'error'
+                    : row.status === 'aborted'
+                      ? 'warning'
+                      : 'dim'
+            return (
+                marker +
+                theme.fg(statusColor, row.status) +
+                ' ' +
+                theme.fg('toolTitle', row.agent) +
+                ' ' +
+                theme.fg('accent', row.id.slice(0, LIST_ID_SHORT_CHARS)) +
+                ' ' +
+                theme.fg('dim', preview)
+            )
+        }
+
+        function footerLegend(row: ManagerRow | undefined): string {
+            if (!row) return theme.fg('dim', 'no subagents · Esc/q close')
+            const nav = theme.fg('dim', '↑↓/jk select · ')
+            if (row.kind === 'running')
+                return (
+                    nav + theme.fg('dim', 'Enter/a attach · x abort · i inspect · Esc/q close')
+                )
+            return nav + theme.fg('dim', 'Enter/r resume · d delete · i inspect · Esc/q close')
+        }
+
+        function render(_width: number): string[] {
+            const rows = scanRows()
+            if (selected >= rows.length) selected = Math.max(0, rows.length - 1)
+            const selectedRow: ManagerRow | undefined = rows[selected]
+
+            const lines: string[] = [
+                theme.fg('toolTitle', theme.bold('subagents ')) +
+                    theme.fg(
+                        'muted',
+                        `session ${currentPiSessionId?.slice(0, LIST_ID_SHORT_CHARS) ?? '?'}`
+                    ),
+                '',
+                theme.fg('toolTitle', 'RUNNING'),
+            ]
+            const runningCount = rows.filter(row => row.kind === 'running').length
+            if (runningCount === 0) lines.push(theme.fg('dim', '  (none)'))
+            for (let i = 0; i < rows.length; i++) {
+                if (rows[i].kind === 'running') lines.push(rowLine(rows[i], i === selected))
+            }
+
+            lines.push(
+                '',
+                theme.fg('toolTitle', 'PERSISTED ') + theme.fg('muted', 'this session')
+            )
+            const persistedCount = rows.length - runningCount
+            if (persistedCount === 0) lines.push(theme.fg('dim', '  (none)'))
+            for (let i = 0; i < rows.length; i++) {
+                if (rows[i].kind === 'persisted') lines.push(rowLine(rows[i], i === selected))
+            }
+
+            if (message) {
+                lines.push('', theme.fg(messageIsError ? 'error' : 'dim', message))
+            }
+            lines.push('', footerLegend(selectedRow))
+            return lines
+        }
+
+        function handleInput(data: string): void {
+            if (matchesKey(data, Key.escape)) {
+                finish(undefined)
+                return
+            }
+            // j/k and the action letters arrive as raw chars on legacy
+            // terminals and CSI-u sequences on kitty-protocol ones;
+            // decodeSteerText covers both and rejects escape-prefixed input.
+            const ch = decodeSteerText(data)
+            if (ch === 'q') {
+                finish(undefined)
+                return
+            }
+
+            const rows = scanRows()
+            if (selected >= rows.length) selected = Math.max(0, rows.length - 1)
+            const row: ManagerRow | undefined = rows[selected]
+            const showNotice = (text: string, isError = false): void => {
+                message = text
+                messageIsError = isError
+                tui.requestRender()
+            }
+
+            if (matchesKey(data, Key.up) || ch === 'k') {
+                selected = Math.max(0, selected - 1)
+                message = undefined
+                tui.requestRender()
+                return
+            }
+            if (matchesKey(data, Key.down) || ch === 'j') {
+                selected = Math.min(rows.length - 1, selected + 1)
+                message = undefined
+                tui.requestRender()
+                return
+            }
+            if (!row) return
+
+            if (matchesKey(data, Key.enter) || ch === 'a') {
+                if (row.kind === 'running') {
+                    finish({ type: 'attach', entry: row.entry })
+                } else if (ch === 'a') {
+                    showNotice('attach applies to running rows only', true)
+                } else {
+                    finish({ type: 'resume', id: row.id })
+                }
+                return
+            }
+            if (ch === 'x') {
+                if (row.kind !== 'running') {
+                    showNotice('abort applies to running rows only', true)
+                    return
+                }
+                try {
+                    // SIGTERM through the same proc.kill path the abort signal
+                    // and watchdog use; registry cleanup and any pending
+                    // tool-call result settle through the existing handlers.
+                    row.entry.proc.kill('SIGTERM')
+                    showNotice(
+                        `Aborting ${row.id.slice(0, LIST_ID_SHORT_CHARS)} — SIGTERM sent; the row drops out when the child exits.`
+                    )
+                } catch {
+                    showNotice(
+                        `Abort failed: child of ${row.id.slice(0, LIST_ID_SHORT_CHARS)} is already dead`,
+                        true
+                    )
+                }
+                return
+            }
+            if (ch === 'r') {
+                if (row.kind !== 'persisted') {
+                    showNotice('resume applies to persisted rows only', true)
+                    return
+                }
+                finish({ type: 'resume', id: row.id })
+                return
+            }
+            if (ch === 'd') {
+                if (row.kind !== 'persisted') {
+                    showNotice('delete applies to persisted rows only', true)
+                    return
+                }
+                const refusal = deletePersistedRunArtifacts(row.id)
+                if (refusal) showNotice(refusal, true)
+                else
+                    showNotice(
+                        `Deleted ${row.id.slice(0, LIST_ID_SHORT_CHARS)} artifacts (.jsonl/.meta/.pid).`
+                    )
+                return
+            }
+            if (ch === 'i') {
+                finish({ type: 'inspect', id: row.id })
+            }
+        }
+
+        return {
+            render,
+            invalidate: () => {
+                // Nothing caches across renders — every render re-scans.
+            },
+            handleInput,
+            dispose: () => finish(undefined),
+        }
+    })
+
+    if (!action) return
+    if (action.type === 'attach') {
+        await attachToSubagent(ctx, action.entry)
+        return
+    }
+    if (action.type === 'resume') {
+        await handleSubagentsResume(ctx, [action.id])
+        return
+    }
+    await openSubagentInspectView(ctx, action.id)
+}
+
+// Manager inspect action (§11): buildSubagentInspectReport rendered in a
+// minimal scrollable text view using the attach view's manual scroll pattern
+// (the layout engine cannot scroll inside ui.custom). Esc closes; the
+// manager is not restored afterwards.
+async function openSubagentInspectView(
+    ctx: ExtensionContext,
+    subagentId: string
+): Promise<void> {
+    const reportLines = buildSubagentInspectReport(subagentId, INSPECT_DEFAULT_LIMIT).split(
+        '\n'
+    )
+    const shortId = subagentId.slice(0, LIST_ID_SHORT_CHARS)
+    // Header + footer rows on top of the attach view's dock reservation.
+    const INSPECT_CHROME_ROWS = 2
+
+    await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+        let finished = false
+        let scrollTop = 0
+        let cachedWidth = -1
+        let cachedLines: string[] | undefined
+        // Scroll bounds from the last render; handleInput has no width.
+        let lastLineCount = 0
+        let lastViewportHeight = ATTACH_MIN_VIEWPORT_LINES
+
+        const finish = () => {
+            if (finished) return
+            finished = true
+            done()
+        }
+
+        const viewportLines = () =>
+            Math.max(
+                ATTACH_MIN_VIEWPORT_LINES,
+                tui.terminal.rows - ATTACH_RESERVED_TERMINAL_ROWS - INSPECT_CHROME_ROWS
+            )
+
+        // The report is plain text; overlong lines hard-wrap at the width.
+        const wrapped = (width: number): string[] => {
+            if (cachedLines && cachedWidth === width) return cachedLines
+            const out: string[] = []
+            for (const line of reportLines) {
+                if (line.length <= width) out.push(line)
+                else
+                    for (let i = 0; i < line.length; i += width)
+                        out.push(line.slice(i, i + width))
+            }
+            cachedLines = out
+            cachedWidth = width
+            return out
+        }
+
+        function render(width: number): string[] {
+            const lines = wrapped(width)
+            lastLineCount = lines.length
+            const height = Math.min(lines.length, viewportLines())
+            lastViewportHeight = height
+            const maxScrollTop = Math.max(0, lines.length - height)
+            scrollTop = Math.min(scrollTop, maxScrollTop)
+            return [
+                theme.fg('toolTitle', theme.bold('inspect ')) + theme.fg('accent', shortId),
+                '',
+                ...lines.slice(scrollTop, scrollTop + height),
+                '',
+                theme.fg('dim', '↑↓/jk PgUp/PgDn Home/End scroll · Esc/q close'),
+            ]
+        }
+
+        function handleInput(data: string): void {
+            if (matchesKey(data, Key.escape)) {
+                finish()
+                return
+            }
+            const ch = decodeSteerText(data)
+            if (ch === 'q') {
+                finish()
+                return
+            }
+            const maxScrollTop = Math.max(0, lastLineCount - lastViewportHeight)
+            if (matchesKey(data, Key.up) || ch === 'k') {
+                scrollTop = Math.max(0, scrollTop - 1)
+            } else if (matchesKey(data, Key.down) || ch === 'j') {
+                scrollTop = Math.min(maxScrollTop, scrollTop + 1)
+            } else if (matchesKey(data, Key.pageUp)) {
+                scrollTop = Math.max(0, scrollTop - lastViewportHeight)
+            } else if (matchesKey(data, Key.pageDown)) {
+                scrollTop = Math.min(maxScrollTop, scrollTop + lastViewportHeight)
+            } else if (matchesKey(data, Key.home)) {
+                scrollTop = 0
+            } else if (matchesKey(data, Key.end)) {
+                scrollTop = maxScrollTop
+            } else {
+                return
+            }
+            tui.requestRender()
+        }
+
+        return {
+            render,
+            invalidate: () => {
+                cachedLines = undefined
+            },
+            handleInput,
+            dispose: () => finish(),
+        }
+    })
 }
 
 const TaskItem = Type.Object({
@@ -2912,34 +3375,68 @@ export default function (pi: ExtensionAPI) {
 
     pi.registerCommand('subagents', {
         description:
-            'List persisted subagent sessions (running, aborted, or failed runs), attach to a running one (/subagents attach [id]), or resume a persisted one (/subagents resume <id> [instruction...])',
+            'Manage subagents: bare = interactive manager view (TUI) or session-scoped text report (print); ' +
+            'attach to a running one (/subagents attach [id]); resume a persisted one (/subagents resume [id] [instruction...]); ' +
+            'abort a running one (/subagents abort [id])',
         handler: async (args, ctx) => {
             capturePiSessionId(ctx)
             const [sub, ...rest] = args.trim().split(/\s+/)
             if (sub === 'attach') {
                 const resolved = resolveAttachTarget(rest[0])
                 if (typeof resolved === 'string') {
-                    if (ctx.mode === 'print') console.log(resolved)
-                    else ctx.ui.notify(resolved, 'warning')
+                    emitCommandNotice(ctx, resolved, 'warning')
                     return
                 }
                 if (ctx.mode !== 'tui') {
-                    const message = 'attach requires an interactive session'
-                    if (ctx.mode === 'print') console.log(message)
-                    else ctx.ui.notify(message, 'warning')
+                    emitCommandNotice(ctx, 'attach requires an interactive session', 'warning')
                     return
                 }
                 await attachToSubagent(ctx, resolved)
+                return
+            }
+            if (sub === 'abort') {
+                // Registry-resolved like attach (exact/unique prefix/single-entry
+                // default); SIGTERMs the child and lets the existing close
+                // handlers settle the registry and any pending tool result.
+                const resolved = resolveAttachTarget(rest[0])
+                if (typeof resolved === 'string') {
+                    emitCommandNotice(ctx, resolved, 'warning')
+                    return
+                }
+                try {
+                    resolved.proc.kill('SIGTERM')
+                } catch {
+                    /* already dead — the close handler settles the registry */
+                }
+                emitCommandNotice(
+                    ctx,
+                    `Aborting subagent ${resolved.id.slice(0, LIST_ID_SHORT_CHARS)} (SIGTERM sent).`,
+                    'info'
+                )
                 return
             }
             if (sub === 'resume') {
                 await handleSubagentsResume(ctx, rest)
                 return
             }
-            const report = buildSubagentsListReport()
-            // ctx.ui.notify is a no-op without a UI (pi -p / --mode json); print mode writes to stdout instead.
-            if (ctx.mode === 'print') console.log(report)
-            else ctx.ui.notify(report, 'info')
+            if (!sub) {
+                // Bare command (§11): TUI opens the manager view; print mode
+                // keeps the text report; other modes fall back to notify.
+                if (ctx.mode === 'tui') {
+                    await openSubagentsManager(ctx)
+                    return
+                }
+                const report = buildSubagentsListReport()
+                // ctx.ui.notify is a no-op without a UI (pi -p / --mode json); print mode writes to stdout instead.
+                if (ctx.mode === 'print') console.log(report)
+                else ctx.ui.notify(report, 'info')
+                return
+            }
+            emitCommandNotice(
+                ctx,
+                `Unknown subcommand "${sub}". Usage: /subagents [attach [id] | resume [id] [instruction...] | abort [id]]`,
+                'warning'
+            )
         },
     })
 }
