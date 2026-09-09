@@ -12,9 +12,9 @@ import XCTest
 final class CodeServerClientTests: XCTestCase {
     // MARK: - Properties
 
-    private var transport: MockCodeWebSocketTransport!
+    var transport: MockCodeWebSocketTransport!
     /// Fast ping cadence keeps the ping/pong tests under a few seconds.
-    private var sut: CodeServerClient!
+    var sut: CodeServerClient!
 
     // MARK: - Setup
 
@@ -582,7 +582,7 @@ final class CodeServerClientTests: XCTestCase {
         }.first(where: { $0["type"] as? String == "hello" })
     }
 
-    private func nextEvent(from stream: AsyncStream<CodeEvent>) async throws -> CodeEvent {
+    func nextEvent(from stream: AsyncStream<CodeEvent>) async throws -> CodeEvent {
         var iterator = stream.makeAsyncIterator()
         let next = await iterator.next()
         return try XCTUnwrap(next, "Stream ended before the expected event")

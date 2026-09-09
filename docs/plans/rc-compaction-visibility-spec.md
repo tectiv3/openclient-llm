@@ -1,6 +1,6 @@
 # Plan: Compaction visibility in rc (banner + stop)
 
-Status: spec only, not yet implemented.
+Status: implemented (server: commit 12c6130; Swift client + tests landed after).
 Date: 2026-09-09
 Parent: `docs/plans/rc-remote-control-spec.md`. Partial pull of the
 `session_compact*` event handling out of `rc-commands-spec.md` (no command set —

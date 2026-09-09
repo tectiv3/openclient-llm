@@ -58,6 +58,7 @@ final class CodeViewModel {
         var cwd: String = ""
         var model: CodeModelInfo?
         var isStreaming: Bool = false
+        var compacting: CodeCompacting?
         var contextUsage: CodeContextUsage?
         var items: [CodeTranscriptItem] = []
         var pendingQuestion: PendingQuestion?
@@ -446,6 +447,7 @@ extension CodeViewModel {
         session.cwd = info.cwd
         session.model = info.model
         session.isStreaming = info.isStreaming
+        session.compacting = info.compacting
         session.contextUsage = info.contextUsage
 
         // Authoritative server state: when not streaming, close out any
@@ -498,45 +500,6 @@ extension CodeViewModel {
         )
         session.items.append(item)
         updateSession(session)
-    }
-
-    private func handleError(_ error: CodeServerError) {
-        guard error.code == "not_idle" else { return }
-        transientToast = error.message
-            ?? String(localized: "Cannot send while streaming")
-
-        // The error frame carries no prompt text, so correlate by ID:
-        // the server processes prompts in order and rejects only prompts
-        // (a steer always goes through), so the rejection belongs to the
-        // newest echo still pending.
-        markPendingEchoFailed()
-    }
-
-    /// Marks the newest pending prompt echo failed by UUID and removes it
-    /// from the pending list. No-op when the echo no longer exists in the
-    /// transcript (e.g. a history sync replaced the items in the meantime).
-    private func markPendingEchoFailed() {
-        guard var session = currentSession,
-              !pendingPromptEchoes.isEmpty
-        else { return }
-
-        let id = pendingPromptEchoes.removeLast()
-        guard let index = session.items.firstIndex(where: {
-            if case let .user(itemId, _, _, _) = $0 {
-                return itemId == id
-            }
-            return false
-        }) else {
-            LogManager.warning("Code not_idle: pending prompt echo not found")
-            return
-        }
-
-        if case let .user(itemId, text, _, _) = session.items[index] {
-            session.items[index] = .user(
-                id: itemId, text: text, failed: true, pending: false
-            )
-            updateSession(session)
-        }
     }
 
     private func transitionToReconnecting() {

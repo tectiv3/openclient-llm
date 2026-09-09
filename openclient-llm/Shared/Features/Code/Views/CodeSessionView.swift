@@ -35,6 +35,12 @@ struct CodeSessionView: View {
                     .transition(.opacity)
             }
 
+            // Standalone condition on purpose: reconnecting and compacting
+            // are independent states and both banners can coexist.
+            if session.compacting != nil {
+                compactingBanner
+            }
+
             if let usage = contextUsage {
                 ContextUsageView(usage: usage)
                     .padding(.horizontal, 16)
@@ -120,6 +126,12 @@ struct CodeSessionView: View {
             reduceMotion ? nil : .spring(duration: 0.3),
             value: viewModel.transientToast
         )
+        .onChange(of: session.compacting != nil) { _, isCompacting in
+            let message = isCompacting
+                ? String(localized: "Compacting context")
+                : String(localized: "Compaction ended")
+            AccessibilityNotification.Announcement(message).post()
+        }
         .onChange(of: isReconnecting) { _, reconnecting in
             guard !reconnecting else { return }
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) {
@@ -288,6 +300,44 @@ private extension CodeSessionView {
         .padding(.vertical, 8)
         .glassEffect(
             .regular.tint(.green.opacity(0.3)),
+            in: .rect(cornerRadius: 12)
+        )
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+    }
+
+    // MARK: - Compacting
+
+    var compactingBanner: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(String(localized: "Compacting context…"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(String(localized: "Compacting context"))
+
+            Spacer()
+
+            Button {
+                viewModel.send(.abort)
+            } label: {
+                Image(systemName: "stop.fill")
+                    .font(.body)
+                    .foregroundStyle(.red)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(String(localized: "Stop compaction"))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+        .glassEffect(
+            .regular.tint(.orange.opacity(0.3)),
             in: .rect(cornerRadius: 12)
         )
         .padding(.horizontal, 16)

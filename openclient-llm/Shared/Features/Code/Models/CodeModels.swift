@@ -17,6 +17,16 @@ struct CodeSessionInfo: Equatable, Sendable, Codable {
     let thinkingLevel: String?
     let isStreaming: Bool
     let contextUsage: CodeContextUsage?
+    /// `var` (not `let`) so the synthesized memberwise init defaults it to
+    /// nil — call sites predating this field stay source-compatible.
+    var compacting: CodeCompacting?
+}
+
+/// In-flight compaction reported by the server on the `state` frame
+/// (present only while compacting).
+struct CodeCompacting: Equatable, Sendable, Codable {
+    let reason: String
+    let willRetry: Bool?
 }
 
 struct CodeModelInfo: Equatable, Sendable, Codable {
