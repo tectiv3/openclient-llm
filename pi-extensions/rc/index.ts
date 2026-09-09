@@ -66,6 +66,14 @@ type RateLimitEntry = {
     lastSeen: number
 }
 
+// In-flight compaction mirror (spec: rc-compaction-visibility-spec.md D1):
+// present on state frames only while a compaction is running; a reconnecting
+// client sees the banner state in the connect burst for free.
+type CompactingInfo = {
+    reason: 'manual' | 'threshold' | 'overflow'
+    willRetry?: boolean
+}
+
 type Binding = {
     pi: ExtensionAPI
     ctx: ExtensionContext
@@ -105,6 +113,7 @@ type RcSingleton = {
     currentTurnBuffer: ContentBlock[]
     pendingAsk: PendingAsk | null
     pendingSteers: string[]
+    compacting: CompactingInfo | null
     quitAuthWritten: boolean
     processHooksRegistered: boolean
     handleUpgrade(req: IncomingMessage, socket: RcSocket, head: Buffer): void
@@ -144,6 +153,7 @@ function singleton(): RcSingleton {
         currentTurnBuffer: [],
         pendingAsk: null,
         pendingSteers: [],
+        compacting: null,
         quitAuthWritten: false,
         processHooksRegistered: false,
         handleUpgrade(req, socket, head) {
@@ -835,6 +845,7 @@ function buildState(state: RcSingleton): JsonObject {
         model: { provider, id },
         ...(ctx?.thinkingLevel ? { thinkingLevel: ctx.thinkingLevel } : {}),
         isStreaming: ctx ? !ctx.isIdle() : state.isStreaming,
+        ...(state.compacting ? { compacting: state.compacting } : {}),
         ...(usage &&
         usage.tokens !== null &&
         usage.contextWindow !== null &&
@@ -987,14 +998,17 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
         if (name === 'session_start') broadcastSessionSnapshot(state)
     }
     pi.on('session_start', (event, ctx) => {
-        // New session = new agent = empty steering queue. Clear BEFORE the
-        // forwarded session_start triggers broadcastSessionSnapshot, which must
-        // not carry stale entries from the old session.
+        // New session = new agent = empty steering queue AND no compaction
+        // (the old session is disposed, aborting anything in flight). Clear
+        // BEFORE the forwarded session_start triggers broadcastSessionSnapshot,
+        // which must not carry stale entries from the old session.
         state.pendingSteers.length = 0
+        state.compacting = null
         forward('session_start', event, ctx)
     })
     pi.on('session_shutdown', async (event, ctx) => {
         state.bind(pi, ctx)
+        state.compacting = null
         if (event.reason === 'quit') await state.stop('quit', 'pi shutdown')
     })
     pi.on('agent_start', (event, ctx) => forward('agent_start', event, ctx))
@@ -1022,6 +1036,46 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
         forward('tool_execution_update', event, ctx)
     )
     pi.on('tool_execution_end', (event, ctx) => forward('tool_execution_end', event, ctx))
+    // Compaction visibility (spec: rc-compaction-visibility-spec.md D2). The
+    // snapshot (state + history) is re-broadcast on finish because the
+    // compaction entry changes the branch; before_compact only needs the
+    // state broadcast (clients already have the history).
+    pi.on('session_before_compact', (event, ctx) => {
+        state.bind(pi, ctx)
+        if (!isObject(event)) return
+        state.compacting = {
+            reason:
+                event.reason === 'threshold' || event.reason === 'overflow'
+                    ? event.reason
+                    : 'manual',
+            ...(typeof event.willRetry === 'boolean' ? { willRetry: event.willRetry } : {}),
+        }
+        dbgLog('compaction started:', state.compacting.reason)
+        state.broadcast(buildState(state))
+    })
+    pi.on('session_compact', (event, ctx) => {
+        state.bind(pi, ctx)
+        dbgLog('compaction finished:', isObject(event) ? event.reason : 'unknown')
+        state.compacting = null
+        broadcastSessionSnapshot(state)
+    })
+    pi.on('session_compact_failed', (event, ctx) => {
+        state.bind(pi, ctx)
+        const aborted = isObject(event) && event.aborted === true
+        const message =
+            isObject(event) &&
+            typeof event.errorMessage === 'string' &&
+            event.errorMessage.length > 0
+                ? event.errorMessage
+                : 'compaction failed'
+        dbgLog('compaction failed:', aborted ? 'aborted (user Stop)' : message)
+        state.compacting = null
+        broadcastSessionSnapshot(state)
+        // D3: an aborted compaction was the user's own Stop — the banner
+        // clearing above is the feedback, no error frame. A genuine failure
+        // additionally surfaces as an error frame for the phone toast.
+        if (!aborted) state.broadcast({ type: 'error', code: 'compaction_failed', message })
+    })
 }
 
 function trackEvent(state: RcSingleton, name: string, event: unknown): void {

@@ -20,6 +20,12 @@
  * the child without the PI_RC_APNS_* env and re-runs group 12 as the
  * "push disabled" case (zero push traffic, all other RC behavior intact).
  * Group 12 waits out group 11's 60 s rate-limit lockout before connecting.
+ * Group 15 covers compaction visibility (spec:
+ * docs/plans/rc-compaction-visibility-spec.md): the in-flight compaction
+ * window is held open by a ~3 s delay in the test-only probe extension's
+ * before_provider_request hook (detected by the compaction summarization
+ * system prompt marker; normal chat turns are never delayed) — the child
+ * runs the real model, the harness has no mock model server for it.
  *
  * Exit codes: 0 = all pass, 1 = one or more test failures, 2 = setup failure
  * (port busy, spawn, readiness, or /rc toggle).
@@ -1757,6 +1763,174 @@ registerTest(13, "steer_pending_cleared_on_new_session", async (ctx) => {
   }
 });
 
+// --- group 15: compaction visibility (spec: rc-compaction-visibility-spec.md) ---
+// The server mirrors pi's in-flight compaction as the OPTIONAL `compacting`
+// field on state frames (D1): set on session_before_compact (state broadcast
+// only), cleared on session_compact / session_compact_failed (state + history
+// snapshot — the compaction entry changes the branch) and on rebind/shutdown.
+// A non-abort failure additionally broadcasts error compaction_failed (D3);
+// an abort (user Stop) sends NO error frame.
+//
+// Trigger: the test-only probe extension (test-project/rc-compact-probe.ts)
+// runs ctx.compact() from /rccompact — the only compaction entry point the
+// harness can reach. Stability: the same probe sleeps ~3 s in
+// before_provider_request when the request payload carries pi's summarization
+// system prompt, so the in-flight window is stable (marker-based; normal chat
+// turns are never delayed). Seeding: pi refuses to compact a short branch
+// ("Nothing to compact"), and once a compaction entry is the last entry it
+// refuses until new messages exist ("Already compacted"), so every trigger is
+// preceded by a natural exchange; test-project/.pi/settings.json lowers
+// compaction.keepRecentTokens to 16 so one or two short exchanges are enough
+// for a cut point to exist.
+// Shared session, locked ascending order (T1 -> T2 -> T3 -> T4), unique
+// RC-COMPACT-15x markers.
+
+// T1: a LATE client connecting while a compaction is in flight must see
+// compacting.reason == "manual" in its connect-burst state. Client A syncs on
+// the session_before_compact state broadcast (the window-open signal), then
+// opens B; the probe's ~3 s summarization delay guarantees the window is
+// still open when B's burst is built. A then waits out the completion on its
+// own stream so the group leaves the agent idle for T2.
+registerTest(15, "compact_late_join_sees_compacting_in_state", async (ctx) => {
+  const a = await connectAndVerifyConnectTime(ctx); // client A (working client)
+  try {
+    // Seed the session: manual compaction rejects "Nothing to compact" on a
+    // short branch, so the trigger needs real messages first.
+    for (const marker of ["RC-COMPACT-SEED-15a", "RC-COMPACT-SEED-15b"]) {
+      a.ws.send(JSON.stringify({ type: "prompt", text: `Reply with exactly: ${marker}` }));
+      await waitForEventByName(a.next, "agent_settled", 60_000);
+    }
+    await withTimeout(ctx.client.sendCommand({ type: "prompt", message: "/rccompact" }), 10_000, "pi /rccompact timed out");
+    // session_before_compact -> state broadcast with compacting.
+    const compactingState = await waitForMessage(a.next, (m) => m?.type === "state" && m.compacting !== undefined, 30_000, "state with compacting");
+    check(
+      compactingState.compacting?.reason === "manual",
+      `compacting.reason must be manual, got ${JSON.stringify(compactingState.compacting)}`,
+    );
+    // Late client B: read the CONNECT-BURST state itself (burst order is
+    // hello_ok, state, history); it must already carry compacting.
+    const late = await handshake(ctx);
+    assertHelloOk(late.result); // consumed hello_ok
+    try {
+      const state = await late.next();
+      check(
+        state?.type === "state" && state.compacting?.reason === "manual",
+        `late-join connect-burst state must carry compacting reason manual, got ${JSON.stringify(state ?? null).slice(0, 200)}`,
+      );
+    } finally {
+      late.close();
+    }
+    // Completion on A's own stream: the session_compact broadcast is a state
+    // frame WITHOUT compacting followed by a history snapshot carrying the
+    // compaction entry. Leaves the agent idle for T2.
+    const doneState = await waitForMessage(a.next, (m) => m?.type === "state" && m.compacting === undefined, 60_000, "state without compacting (completion)");
+    assertValidStateShape(doneState);
+    const history = await waitForMessage(a.next, (m) => m?.type === "history", 10_000, "completion history snapshot");
+    check(
+      (history.messages ?? []).some((m) => m?.role === "compaction"),
+      "completion history snapshot must contain a role:compaction entry",
+    );
+  } finally {
+    a.close(); // A was the group's working client; the late client is ephemeral
+  }
+});
+
+// T2 (continuation of T1, locked state dependence): after completion the
+// state has NO compacting and history contains the compaction entry —
+// asserted from a FRESH connect (the connect burst), which is what a
+// reconnecting phone sees.
+registerTest(15, "compact_finish_snapshot_has_entry", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    const state = ctx.lastState; // set by the connect burst above
+    check(
+      state.compacting === undefined,
+      `state must have no compacting after completion, got ${JSON.stringify(state.compacting)}`,
+    );
+    ws.send(JSON.stringify({ type: "get_history" }));
+    const history = await waitForMessage(next, (m) => m?.type === "history", 10_000, "history after compact");
+    assertHistoryShape(history, state.sessionId);
+    check(
+      (history.messages ?? []).some((m) => m?.role === "compaction"),
+      "history must contain a role:compaction entry after completion",
+    );
+  });
+});
+
+// T3: abort-during-compact — the 2026-09-09 incident pin (spec D4). While a
+// compaction is in flight isIdle() is false, so the server's existing abort
+// frame calls ctx.abort(), which must abort the compaction controller.
+// Expectation: a state broadcast WITHOUT compacting, NO compaction_failed
+// error frame (aborted: true = the user's own Stop caused it — no feedback
+// frame), and NO new compaction entry (the interrupted summary is discarded).
+// If abort does NOT interrupt compaction here, the incident has reproduced.
+registerTest(15, "abort_during_compact_clears_without_entry", async (ctx) => {
+  const a = await connectAndVerifyConnectTime(ctx); // client A (working client)
+  try {
+    // Count the compaction entries already in the branch (T1's success).
+    a.ws.send(JSON.stringify({ type: "get_history" }));
+    const beforeHistory = await waitForMessage(a.next, (m) => m?.type === "history", 10_000, "history before abort-compact");
+    const entriesBefore = (beforeHistory.messages ?? []).filter((m) => m?.role === "compaction").length;
+    check(entriesBefore >= 1, `expected at least one compaction entry from T1, got ${entriesBefore}`);
+    // Seed one more exchange: the branch ends with T1's compaction entry and
+    // pi refuses "Already compacted" until new messages exist.
+    a.ws.send(JSON.stringify({ type: "prompt", text: "Reply with exactly: RC-COMPACT-SEED-15c" }));
+    await waitForEventByName(a.next, "agent_settled", 60_000);
+    await withTimeout(ctx.client.sendCommand({ type: "prompt", message: "/rccompact" }), 10_000, "pi /rccompact (T3) timed out");
+    await waitForMessage(a.next, (m) => m?.type === "state" && m.compacting !== undefined, 30_000, "state with compacting (T3)");
+    // The phone Stop: the existing abort frame, mid-compact.
+    a.ws.send(JSON.stringify({ type: "abort" }));
+    // Wait for the session_compact_failed broadcast: state WITHOUT compacting.
+    const frames = await readMessages(a.next, (m) => m?.type === "state" && m.compacting === undefined, 60_000, "state without compacting (abort-compact)");
+    assertValidStateShape(frames.at(-1));
+    const quiet = await readMessages(a.next, () => false, 1_500, "post-abort-compact error window", { onTimeout: "return" });
+    for (const frame of [...frames, ...quiet]) {
+      check(
+        !(frame?.type === "error" && frame.code === "compaction_failed"),
+        `aborted compaction must send NO compaction_failed error frame, got ${JSON.stringify(frame)}`,
+      );
+    }
+    // The interrupted summary must NOT have been persisted: the compaction
+    // entry count is unchanged.
+    a.ws.send(JSON.stringify({ type: "get_history" }));
+    const afterHistory = await waitForMessage(a.next, (m) => m?.type === "history", 10_000, "history after abort-compact");
+    const entriesAfter = (afterHistory.messages ?? []).filter((m) => m?.role === "compaction").length;
+    check(
+      entriesAfter === entriesBefore,
+      `aborted compaction must not add a compaction entry (expected ${entriesBefore}, got ${entriesAfter})`,
+    );
+  } finally {
+    a.close();
+  }
+});
+
+// T4: the rebind (new_session) snapshot must carry no compacting — the
+// session_start clear runs before broadcastSessionSnapshot, so a replaced
+// session never inherits stale banner state.
+registerTest(15, "rebind_snapshot_has_no_compacting", async (ctx) => {
+  requireAuth(ctx);
+  const a = await connectAndVerifyConnectTime(ctx); // client A (working client)
+  const oldId = ctx.lastState?.sessionId;
+  check(nonEmptyString(oldId), "no prior sessionId to rebind from");
+  try {
+    await sleep(1000); // drain any in-flight events from the connect burst
+    const resp = await withTimeout(ctx.client.sendCommand({ type: "new_session" }), 10_000, "new_session RPC timed out");
+    check(resp.success !== false, `new_session RPC failed: ${JSON.stringify(resp)}`);
+    // The server re-sends state+history on the session_start rebind; we must
+    // see a NEW sessionId and no compacting.
+    const newState = await waitForMessage(a.next, (m) => m?.type === "state" && nonEmptyString(m.sessionId) && m.sessionId !== oldId, 10_000, "new state (rebind)");
+    assertValidStateShape(newState);
+    check(
+      newState.compacting === undefined,
+      `rebind snapshot must carry no compacting, got ${JSON.stringify(newState.compacting)}`,
+    );
+    const newHistory = await waitForMessage(a.next, (m) => m?.type === "history" && m.sessionId === newState.sessionId, 10_000, "new history (rebind)");
+    assertHistoryShape(newHistory, newState.sessionId); // messages may be empty for a fresh session
+    ctx.lastState = newState; // group ends here; keep the state fresh
+  } finally {
+    a.close();
+  }
+});
+
 // --- groups 5, 6, 7, 8, 9 -------------------------------------------------------
 
 // Group 5: Questions. LLM-dependent: test-project AGENTS.md forces the ask_user_question tool for the exact prompts ASK/ASKFORM
@@ -2144,9 +2318,16 @@ async function main() {
     childEnv.PI_RC_APNS_KEY_FILE = join(tmpRoot, "apns-key.p8");
   }
 
-  // The signal probe is a test-only extension loaded into the child (see the
-  // group-5b tests); it is copied with the test project into tmpRoot.
-  const childArgs = [...PI_ARGS, "--extension", join(tmpRoot, "rc-signal-probe.ts")];
+  // Test-only extensions loaded into the child (group 5b: signal probe;
+  // group 15: compact probe). Both are copied with the test project into
+  // tmpRoot.
+  const childArgs = [
+    ...PI_ARGS,
+    "--extension",
+    join(tmpRoot, "rc-signal-probe.ts"),
+    "--extension",
+    join(tmpRoot, "rc-compact-probe.ts"),
+  ];
   const child = spawn(PI_COMMAND, childArgs, {
     cwd: tmpRoot,
     env: childEnv,

@@ -41,6 +41,12 @@ declare module '@earendil-works/pi-coding-agent' {
         isIdle(): boolean
         hasPendingMessages(): boolean
         abort(): void
+        /** Fire-and-forget manual compaction (pi: CompactOptions). */
+        compact(options?: {
+            customInstructions?: string
+            onComplete?: (result: unknown) => void
+            onError?: (error: Error) => void
+        }): void
         isProjectTrusted(): boolean
         getContextUsage(): {
             tokens: number | null

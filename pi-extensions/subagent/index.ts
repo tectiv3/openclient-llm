@@ -105,6 +105,8 @@ interface ActiveSubagent {
     agent: string
     task: string
     proc: ChildProcess
+    // Spawn time (epoch ms) — drives the elapsed column in the manager view.
+    startedAt: number
     eventEmitter: EventEmitter
     settled: boolean
     events: SubagentStreamEvent[]
@@ -1657,6 +1659,7 @@ async function runSingleAgent(
                 agent: agentName,
                 task,
                 proc,
+                startedAt: Date.now(),
                 eventEmitter: new EventEmitter(),
                 settled: false,
                 events: [],
