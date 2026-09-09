@@ -23,7 +23,7 @@ spec doc in `docs/plans/`. The parent spec numbered this feature section A8
 | 2 | Explicitly EXCLUDED for v1 | thinking level, cycle_model (redundant with the explicit sheet), resume/session-picker, fork/clone, quit (dangerous from phone), reload (owner is retiring `/reload`), export (no file transfer path) |
 | 3 | Frame shape | ONE generic `command` frame with a `command` name field (not one frame type per action) |
 | 4 | Model list delivery | optional `models` array added to the existing `state` frame (no new request/response) |
-| 5 | Protocol compatibility | The protocol is frozen vs the Swift client, but both ends are owned by us and change atomically (precedent: ask consolidation). New frames/fields/codes are additive |
+| 5 | Protocol compatibility | Both ends are owner-controlled and change atomically (precedent: ask consolidation). New frames/fields/codes should be additive (Swift JSONDecoder ignores unknown keys). NOTE: the `session_compact*` event handling was pulled into `rc-compaction-visibility-spec.md` (2026-09-09) and shipped separately from the command set |
 
 ## Decisions 2 (two 2026-09-09 review rounds — do not revisit)
 

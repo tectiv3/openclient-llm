@@ -1,8 +1,14 @@
 # Plan: Remote control of pi (Code tab)
 
-> **FROZEN (2026-09-09):** this spec is the historical record of the shipped rc
-> remote-control feature. No further edits here — every new feature gets its own
-> spec doc in `docs/plans/` (e.g. `rc-commands-spec.md`, remote commands).
+> **HISTORICAL RECORD (2026-09-09):** this spec is the historical record of the
+> shipped rc remote-control feature. No further edits here — every new feature
+> gets its own spec doc in `docs/plans/` (e.g. `rc-commands-spec.md`, remote
+> commands, `rc-compaction-visibility-spec.md`, compaction banner).
+>
+> NOTE (2026-09-09, owner): "frozen protocol" language elsewhere is deprecated.
+> The protocol is NOT change-blocked — both ends are owner-controlled and change
+> atomically (precedent: ask consolidation, `pending` steers). New frames/fields
+> should be additive (Swift JSONDecoder ignores unknown keys).
 
 Status: implemented (round 3 revision; pending steers landed 2026-09-08).
 Date: 2026-09-05 (round 3 revision; original 2026-07-09)
