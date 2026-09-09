@@ -87,6 +87,7 @@ enum CodeClientMessage: Sendable {
     case getHistory(cursor: String?)
     case ping
     case pushToken(token: String)
+    case command(command: String, args: [String: AnyCodableValue] = [:])
 }
 
 // MARK: - Implementation
@@ -569,6 +570,13 @@ private extension CodeServerClient {
         case let .pushToken(token):
             dict["type"] = .string("push_token")
             dict["token"] = .string(token)
+
+        case let .command(command, args):
+            dict["type"] = .string("command")
+            dict["command"] = .string(command)
+            for (key, value) in args {
+                dict[key] = value
+            }
         }
 
         return try? encoder.encode(dict)

@@ -20,6 +20,7 @@ struct CodeSessionInfo: Equatable, Sendable, Codable {
     /// `var` (not `let`) so the synthesized memberwise init defaults it to
     /// nil — call sites predating this field stay source-compatible.
     var compacting: CodeCompacting?
+    var models: [CodeModelInfo]?
 }
 
 /// In-flight compaction reported by the server on the `state` frame

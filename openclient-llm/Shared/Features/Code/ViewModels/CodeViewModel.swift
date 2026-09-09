@@ -32,6 +32,10 @@ final class CodeViewModel {
         case notificationTapped
         case retry
         case clearToast
+        case newSession
+        case setModel(provider: String, modelId: String)
+        case compact(instructions: String?)
+        case rename(name: String)
     }
 
     enum State: Equatable {
@@ -57,6 +61,7 @@ final class CodeViewModel {
         var sessionId: String = ""
         var cwd: String = ""
         var model: CodeModelInfo?
+        var models: [CodeModelInfo] = []
         var isStreaming: Bool = false
         var compacting: CodeCompacting?
         var contextUsage: CodeContextUsage?
@@ -218,6 +223,19 @@ final class CodeViewModel {
             handleNotificationTapped()
         case .clearToast:
             transientToast = nil
+        case .newSession:
+            sendCommand("new")
+        case let .setModel(provider, modelId):
+            sendCommand("set_model", args: [
+                "provider": .string(provider),
+                "modelId": .string(modelId),
+            ])
+        case let .compact(instructions):
+            sendCommand("compact", args: instructions.flatMap {
+                $0.isEmpty ? nil : ["instructions": AnyCodableValue.string($0)]
+            } ?? [:])
+        case let .rename(name):
+            sendCommand("name", args: ["name": .string(name)])
         }
     }
 }
@@ -434,6 +452,14 @@ extension CodeViewModel {
     private func handleStateInfo(_ info: CodeSessionInfo) {
         guard var session = currentSession else { return }
 
+        // Null-binding window: sessionId "unknown" means the server's
+        // binding is nil (session being replaced). Do not rebind, do not
+        // overwrite fields with stale values. The real session_start
+        // snapshot corrects everything.
+        if info.sessionId == "unknown" {
+            return
+        }
+
         let isRebind = !session.sessionId.isEmpty
             && session.sessionId != info.sessionId
 
@@ -446,6 +472,9 @@ extension CodeViewModel {
         session.sessionId = info.sessionId
         session.cwd = info.cwd
         session.model = info.model
+        if let models = info.models {
+            session.models = models
+        }
         session.isStreaming = info.isStreaming
         session.compacting = info.compacting
         session.contextUsage = info.contextUsage

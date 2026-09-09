@@ -14,23 +14,43 @@ import Foundation
 
 extension CodeViewModel {
     func handleError(_ error: CodeServerError) {
-        // Genuine compaction failure (a phone-caused abort reports no
-        // error): surface as a toast, nothing else to correlate.
-        if error.code == "compaction_failed" {
+        switch error.code {
+        case "compaction_failed":
             transientToast = error.message
                 ?? String(localized: "Compaction failed")
-            return
+
+        case "not_idle":
+            transientToast = error.message
+                ?? String(localized: "Cannot send while streaming")
+            markPendingEchoFailed()
+
+        case "not_ready":
+            transientToast = error.message
+                ?? String(localized: "Session loading, try again shortly")
+
+        case "stale_session":
+            transientToast = error.message
+                ?? String(localized: "Session replaced — run /rc in terminal")
+
+        case "model_not_found":
+            transientToast = error.message
+                ?? String(localized: "Model not found")
+
+        case "model_not_set":
+            transientToast = error.message
+                ?? String(localized: "Model unavailable (no provider auth)")
+
+        case "command_failed":
+            transientToast = error.message
+                ?? String(localized: "Command failed")
+
+        case "unknown_command":
+            transientToast = error.message
+                ?? String(localized: "Unknown command")
+
+        default:
+            break
         }
-
-        guard error.code == "not_idle" else { return }
-        transientToast = error.message
-            ?? String(localized: "Cannot send while streaming")
-
-        // The error frame carries no prompt text, so correlate by ID:
-        // the server processes prompts in order and rejects only prompts
-        // (a steer always goes through), so the rejection belongs to the
-        // newest echo still pending.
-        markPendingEchoFailed()
     }
 
     /// Marks the newest pending prompt echo failed by UUID and removes it
@@ -58,5 +78,14 @@ extension CodeViewModel {
             )
             updateSession(session)
         }
+    }
+
+    // MARK: - Commands
+
+    func sendCommand(
+        _ command: String,
+        args: [String: AnyCodableValue] = [:]
+    ) {
+        Task { await client.send(.command(command: command, args: args)) }
     }
 }
