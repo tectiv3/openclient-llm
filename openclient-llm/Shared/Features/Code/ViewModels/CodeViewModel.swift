@@ -312,7 +312,13 @@ private extension CodeViewModel {
     }
 
     func handleAbort() {
-        guard case .connected = state else { return }
+        guard case var .connected(session) = state else { return }
+        // Optimistic local finalize: the server confirms via agent_settled → state
+        // refresh, but a tool ignoring its abort signal or a mid-abort compaction
+        // can delay the settle indefinitely — the UI must not stay stuck streaming.
+        session.isStreaming = false
+        finalizeStreamingBubbles(in: &session)
+        updateSession(session)
         Task { await client.send(.abort) }
     }
 }

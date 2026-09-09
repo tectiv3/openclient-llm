@@ -30,6 +30,7 @@ interface RcRemoteLike {
               wasCustom: boolean
               index?: number
           }[]
+        | 'dismissed'
         | null
     >
 }
@@ -46,7 +47,7 @@ async function promptValue(
             kind: 'ask_user_question',
             params: { questions: [{ id: 'q1', prompt: title, options: [] }] },
         })
-        const answer = answers?.[0]
+        const answer = Array.isArray(answers) ? answers[0] : undefined
         if (!answer) return null
         const value = answer.value.trim()
         return value.length > 0 ? value : null
@@ -208,7 +209,7 @@ async function promptConfirm(
                 ],
             },
         })
-        const answer = answers?.[0]
+        const answer = Array.isArray(answers) ? answers[0] : undefined
         if (!answer) return false
         const value = answer.wasCustom ? answer.value.trim().toLowerCase() : answer.value
         return value === 'yes' || value === 'yes, continue'

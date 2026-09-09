@@ -57,7 +57,7 @@ type PendingAsk = {
     id: string
     kind: 'ask_user_question'
     message: JsonObject
-    resolve: (result: RemoteAnswer[] | null) => void
+    resolve: (result: RemoteAnswer[] | 'dismissed' | null) => void
 }
 
 type RateLimitEntry = {
@@ -130,7 +130,7 @@ type RcSingleton = {
         kind: 'ask_user_question'
         params: JsonObject
         signal?: AbortSignal
-    }): Promise<RemoteAnswer[] | null>
+    }): Promise<RemoteAnswer[] | 'dismissed' | null>
 }
 
 function singleton(): RcSingleton {
@@ -261,7 +261,7 @@ function singleton(): RcSingleton {
             dbgLog('ask created:', id, opts.kind)
             this.broadcast(message)
             fireQuestionPush(this)
-            const askPromise = new Promise<RemoteAnswer[] | null>(resolve => {
+            const askPromise = new Promise<RemoteAnswer[] | 'dismissed' | null>(resolve => {
                 pending.resolve = result => {
                     if (this.pendingAsk === pending) this.pendingAsk = null
                     resolve(result)
@@ -286,8 +286,14 @@ function singleton(): RcSingleton {
 }
 
 // Cancels the in-flight ask (toggle-off, pi exit, supersede, abort signal):
-// tells the clients it is gone and resolves the waiting caller with null.
-function cancelPendingAsk(state: RcSingleton): void {
+// tells the clients it is gone and resolves the waiting caller. The default
+// null preserves the legacy callers' semantics (esc-hatch fallthrough to the
+// local prompt, supersede, toggle-off); the wire abort passes 'dismissed' so
+// the ask tool reports the cancellation instead of falling back locally.
+function cancelPendingAsk(
+    state: RcSingleton,
+    result: RemoteAnswer[] | 'dismissed' | null = null
+): void {
     if (!state.pendingAsk) return
     dbgLog('ask cancelled:', state.pendingAsk.id)
     state.broadcast({
@@ -295,7 +301,7 @@ function cancelPendingAsk(state: RcSingleton): void {
         id: state.pendingAsk.id,
         by: 'cancelled',
     })
-    state.pendingAsk.resolve(null)
+    state.pendingAsk.resolve(result)
     state.pendingAsk = null
 }
 
@@ -505,6 +511,13 @@ function handleClientMessage(state: RcSingleton, client: RcClient, message: unkn
             handleSteer(state, client, message)
             break
         case 'abort':
+            // A pending ask owns the run: the ask tool cannot observe the
+            // agent-loop abort signal, so resolving the ask is the only way the
+            // tool returns. 'dismissed' (not null) makes the tool report the
+            // cancellation instead of falling through to the local TUI prompt,
+            // which would hold the run hostage on an unattended terminal. The
+            // owner decision: dismiss = cancel the question AND abort the run.
+            if (state.pendingAsk) cancelPendingAsk(state, 'dismissed')
             if (!state.binding?.ctx.isIdle()) state.binding?.ctx.abort()
             break
         case 'get_state':

@@ -109,7 +109,7 @@ interface RcRemote {
         kind: 'ask_user_question'
         params: unknown
         signal?: AbortSignal
-    }): Promise<Answer[] | null>
+    }): Promise<Answer[] | 'dismissed' | null>
 }
 
 const RC_KEY = Symbol.for('pi-rc')
@@ -134,15 +134,24 @@ function rcRemote(): RcRemote | undefined {
 // Esc escape hatch for the remote ask: show a non-blocking wait panel while
 // the singleton waits for a remote client answer. Esc aborts the ask through
 // its signal (the singleton cancels the pending ask and resolves null) so the
-// caller falls through to the local TUI prompt. Any other null cause (Esc,
-// /rc toggle-off, all clients disconnected) resolves the same way.
+// caller falls through to the local TUI prompt. The tool-call abort signal is
+// forwarded onto the same controller: an agent-run abort cancels the remote
+// ask and closes the wait panel instead of leaving both dangling. Any other
+// null cause (Esc, /rc toggle-off, all clients disconnected) resolves the
+// same way.
 async function askRemoteWithEscHatch(
     ctx: ExtensionContext,
-    questions: Question[]
-): Promise<Answer[] | null> {
+    questions: Question[],
+    signal: AbortSignal | undefined
+): Promise<Answer[] | 'dismissed' | null> {
     const rc = rcRemote()
     if (!rc) return null
     const controller = new AbortController()
+    const onToolAbort = () => controller.abort()
+    if (signal) {
+        if (signal.aborted) controller.abort()
+        else signal.addEventListener('abort', onToolAbort, { once: true })
+    }
     const askPromise = rc.ask({
         kind: 'ask_user_question',
         params: { questions },
@@ -177,6 +186,7 @@ async function askRemoteWithEscHatch(
             },
         }
     })
+    if (signal) signal.removeEventListener('abort', onToolAbort)
     return await askPromise
 }
 
@@ -189,7 +199,7 @@ export default function askUserQuestion(pi: ExtensionAPI) {
         executionMode: 'sequential',
         parameters: AskUserQuestionParams,
 
-        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        async execute(_toolCallId, params, signal, _onUpdate, ctx) {
             // Normalize once up front (defaults for id/label/options.value/
             // allowOther); every later consumer — remote params, TUI, details —
             // uses this array.
@@ -209,9 +219,13 @@ export default function askUserQuestion(pi: ExtensionAPI) {
             if (rc && rc.askAvailable()) {
                 const answers =
                     ctx.mode === 'tui'
-                        ? await askRemoteWithEscHatch(ctx, questions)
-                        : await rc.ask({ kind: 'ask_user_question', params: { questions } })
-                if (answers !== null) {
+                        ? await askRemoteWithEscHatch(ctx, questions, signal)
+                        : await rc.ask({
+                              kind: 'ask_user_question',
+                              params: { questions },
+                              signal: signal ?? undefined,
+                          })
+                if (answers !== null && answers !== 'dismissed') {
                     const answerLines = answers.map(a => {
                         const qLabel = questions.find(q => q.id === a.id)?.label || a.id
                         if (a.wasCustom) {
@@ -227,6 +241,13 @@ export default function askUserQuestion(pi: ExtensionAPI) {
                         content: [{ type: 'text', text: answerLines.join('\n') }],
                         details: { questions, answers, cancelled: false },
                     }
+                }
+                // Dismissed (wire abort) or a run abort: report the cancellation.
+                // Falling through to the local TUI prompt is wrong here — the run
+                // is going away, and a local prompt would hold the aborting run
+                // hostage on an unattended terminal.
+                if (answers === 'dismissed' || (answers === null && signal?.aborted)) {
+                    return errorResult('User cancelled the question', questions)
                 }
                 // TUI + null (Esc, toggle-off, all clients disconnected): fall through to
                 // the local TUI prompt below. Non-TUI has no local prompt; the ask is

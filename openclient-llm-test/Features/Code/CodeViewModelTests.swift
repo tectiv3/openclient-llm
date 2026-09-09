@@ -259,6 +259,48 @@ final class CodeViewModelTests: XCTestCase {
         )
     }
 
+    func test_sendAbort_optimisticallyClearsStreamingState() async throws {
+        // Given — a live streaming run with a text-bearing assistant bubble
+        try await connectAndEstablish(isStreaming: true)
+        mockClient.emit(.event(CodeStreamEvent(
+            sessionId: "s1", name: "agent_start", payload: [:]
+        )))
+        mockClient.emit(.event(messageStartEvent(role: "assistant")))
+        mockClient.emit(.event(messageUpdateEvent(
+            thinking: "", text: "generating"
+        )))
+        try await waitUntil {
+            guard let session = self.currentSession(),
+                  case let .assistant(_, content, isStreaming)? = session.items.last
+            else { return false }
+            return session.isStreaming && isStreaming
+                && content.contains(.text("generating"))
+        }
+
+        // When
+        sut.send(.abort)
+
+        // Then — the local finalize is synchronous: no settle frame needed
+        let session = try XCTUnwrap(currentSession())
+        XCTAssertFalse(session.isStreaming)
+        guard case let .assistant(_, content, bubbleStreaming)? = session.items.last
+        else {
+            return XCTFail("Expected assistant item, got \(session.items.last)")
+        }
+        XCTAssertFalse(bubbleStreaming)
+        XCTAssertEqual(content, [.thinking(""), .text("generating")])
+
+        // And — exactly one abort frame still goes to the server
+        try await waitUntil {
+            self.mockClient.attemptsCount(where: {
+                if case .abort = $0 {
+                    return true
+                }
+                return false
+            }) == 1
+        }
+    }
+
     // MARK: - Tests — History and streaming buffer
 
     func test_history_event_populatesTranscriptItems() async throws {

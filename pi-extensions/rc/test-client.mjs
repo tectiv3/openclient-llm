@@ -2057,6 +2057,32 @@ registerTest(5, "askform_triggers_multi_question_ask_and_answers_resolve", async
   });
 });
 
+// Wire abort with a pending ask: the abort frame must BOTH cancel the question
+// (question_resolved by cancelled — resolving the ask tool, which cannot
+// observe the agent-loop abort signal on its own) AND abort the run
+// (turn_end -> agent_settled -> idle). Pins the owner decision that a phone
+// Stop/Dismiss during a pending ask never holds the run hostage.
+registerTest(5, "abort_with_pending_ask_cancels_question_and_aborts_run", async (ctx) => {
+  requireAuth(ctx);
+  await withConnection(ctx, async ({ ws, next }) => {
+    ws.send(JSON.stringify({ type: "prompt", text: "ASK" }));
+    const q = await waitForMessage(next, (m) => m?.type === "question", 60_000, "question (LLM round trip)");
+    ws.send(JSON.stringify({ type: "abort" }));
+    const resolved = await waitForMessage(next, (m) => m?.type === "question_resolved" && m.id === q.id, 10_000, "question_resolved (cancelled)");
+    check(resolved.by === "cancelled", `expected by cancelled, got ${JSON.stringify(resolved.by)}`);
+    // stopReason is informational only (sometimes absent, like the group-4
+    // abort test); the settle + idle assertions below are the abort pins.
+    const turnEnd = await waitForEventByName(next, "turn_end", 20_000);
+    const stopReason = turnEnd?.message?.stopReason;
+    check(stopReason === undefined || stopReason === "aborted", `stopReason, when present, must be aborted, got ${JSON.stringify(stopReason)}`);
+    await readMessages(next, (m) => m?.type === "event" && m.name === "agent_settled", 20_000, "abort with pending ask (agent_settled)");
+    ws.send(JSON.stringify({ type: "get_state" }));
+    const state = await waitForMessage(next, (m) => m?.type === "state", 10_000, "state after abort");
+    assertValidStateShape(state);
+    check(state.isStreaming === false, "isStreaming must be false after abort, was true");
+  });
+});
+
 // Group 5b: the ask() signal path (the TUI esc-hatch's abort mechanism,
 // covered at the singleton level). The esc hatch itself cannot be exercised
 // in this spawn (ctx.mode is "rpc" and ctx.ui.custom() returns undefined),
