@@ -1,11 +1,11 @@
 # Subagent Attach — Design Spec
 
-**Date**: 2026-09-08
+**Date**: 2026-09-08 (updated 2026-09-09)
 **Scope**: `pi-extensions/subagent/` (TypeScript, pi TUI extension)
 
 ## Summary
 
-Add `/subagents attach [id]` command that takes over the TUI to show a running subagent's live transcript and allows steering it via typed input. Escape detaches back to the parent session.
+Add `/subagents attach [id]` command that takes over the TUI to show a running subagent's live transcript and allows steering it via typed input, plus `/subagents resume <id> [instruction...]` to relaunch a persisted failed/aborted run straight from the TUI. Escape detaches back to the parent session.
 
 ## Decisions
 
@@ -16,6 +16,8 @@ Add `/subagents attach [id]` command that takes over the TUI to show a running s
 | Attach view content | Match parent TUI feel (Markdown, tool calls, thinking) |
 | On subagent finish | Auto-detach back to parent |
 | Parallel support | Single subagent only for now |
+| Resuming a failed/aborted run | TUI subcommand `/subagents resume <id> [instruction...]` — spawn + auto-attach (§10). Added 2026-09-09; resume was tool-parameter-only in v1, which live use showed was a scope gap — the persisted-until-resumed files are user-facing state and needed a user-facing entry point. |
+| Steer acceptance feedback | `‹pending›` lines driven by `queue_update` frames until delivery renders `‹you›` (§7) |
 
 ## Architecture
 
@@ -117,7 +119,7 @@ The `emitUpdate()` call to the parent tool result renderer stays as-is — it co
 
 ### 7. `/subagents attach [id]` command
 
-**Subcommand parsing**: The existing `/subagents` command handler receives `args: string`. Parse with `args.trim()` — same pattern as `/rc push-setup` in the rc extension. `attach` with optional trailing id.
+**Subcommand parsing**: The existing `/subagents` command handler receives `args: string`. Parse with `args.trim()` — same pattern as `/rc push-setup` in the rc extension. `attach` with optional trailing id; `resume` with required id and optional instruction text (§10).
 
 **Resolution logic**:
 1. If `id` is provided: find it in `activeSubagents` (exact match or unique prefix).
@@ -166,7 +168,21 @@ Note: `onTerminalInput` is only functional in interactive (TUI) mode — the par
 - `renderCall` / `renderResult` — parent tool result display stays as-is
 - Chain and parallel modes — they use `runSingleAgent` internally, so they get rpc mode automatically, but `/subagents attach` only supports single mode for now
 - Persistence — `.jsonl`, `.meta`, `.pid` files work the same way (rpc mode uses `--session` the same as json mode — verified)
-- Resume — the meta sidecar records the same data; resume re-sends the continuation task as a stdin prompt instead of a CLI arg
+- Resume via tool parameter — the meta sidecar records the same data; resume re-sends the continuation task as a stdin prompt instead of a CLI arg. Unchanged; the user-facing `/subagents resume` subcommand (§10) wraps the same machinery.
+
+### 10. `/subagents resume <id> [instruction...]`
+
+Resumes a persisted failed/aborted run directly from the TUI: the child is spawned immediately, then the attach view (§7) auto-opens on it. Complements the tool-parameter resume (`subagent {agent, task, resume}`), which stays the model-facing path.
+
+- **Syntax**: `/subagents resume <id> [instruction...]` — id is exact or a unique prefix against persisted runs with a readable `.meta` sidecar (meta reading is shared via `listPersistedSubagents`; ambiguity and missing-id messages mirror the inspect resolution). A missing instruction defaults to `Continue from where you stopped.`; instruction words are whitespace-split and re-joined with single spaces (the command grammar carries no quoting).
+- **Refusal guards** (warning notify, no spawn):
+  - non-tui parent mode — resume needs the interactive attach view (print mode prints the notice);
+  - the id is in the in-process `activeSubagents` registry — already running in this session, attach instead;
+  - a `<id>.pid` file with a live pid (`process.kill(pid, 0)` probe: ESRCH = dead, EPERM = alive) — another pi session's child owns that run;
+  - the meta's agent no longer exists in the loaded agent configs (discovered with scope `both`; no project-trust confirm — that gate is for model-initiated tool calls, not user-typed commands);
+  - the shared `resolveResumeTarget` gate: session file must exist and the agent's `promptHash` must be unchanged.
+- **Spawn + auto-attach**: `runSingleAgent` runs with the original agent (from `meta.agent`), empty dispatch defaults (the meta drives model/thinking), no abort signal, no onUpdate, and a new optional `onSpawned` callback invoked immediately after `registerActiveSubagent`. The handler awaits the registry entry through a promise resolved in `onSpawned` (15 s timeout → error notify), then calls `attachToSubagent` — identical flow to `/subagents attach`.
+- **Fire-and-forget semantics**: `runSingleAgent` is not awaited to completion. The handler returns when the attach view closes; a settled (or crashed/killed — non-null exit/signal code) child gets a "finished" notify, a detached-from child gets a "keeps running — reattach with /subagents attach" notify. The run's outcome is recorded in the persisted meta/session files (visible via `/subagents` and `subagent_inspect`), not in any tool result.
 
 ## Implementation deviations (resolved)
 
@@ -176,6 +192,8 @@ Deliberate departures from the original design, resolved during implementation:
 - **§7 scrolling**: `ScrollView` → manual scroll window (render all lines, slice a viewport); the layout engine cannot drive a `ScrollView` inside `ui.custom`.
 - **§8 abort while attached**: no synthetic settled/aborted event — the `proc` `close` hook already covers the detach on SIGTERM exit.
 - **Post-review fixes (M1/M2)**: failed `response` acks are surfaced (steer errors render as `‹err›` lines in the attach view; a rejected initial prompt fails fast instead of stalling until the watchdog), and the ring buffer keeps renderable events only.
+- **Live-test fix (2026-09-09)**: v1 assumed the child emits the steered user `message_end` on acceptance — wrong; it emits only at delivery (next LLM request boundary), so steers typed mid-tool-call vanished with zero feedback (and died silently with the child on abort). Fixed by rendering `queue_update`-driven `‹pending›` lines (§4/§7), excluding `queue_update` from the ring buffer, and clamping the attach viewport for pending rows.
+- **Resume scope (2026-09-09)**: v1 shipped resume only as a tool parameter, leaving persisted failed/aborted runs resumable solely by asking the main agent. `/subagents resume` (§10) should have been a subcommand from the start — added with spawn + auto-attach reusing the attach flow.
 
 ## Out of scope (future)
 
