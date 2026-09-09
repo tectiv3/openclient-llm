@@ -82,6 +82,15 @@ const ATTACH_STEER_ROW_HEIGHT = 2
 // spawn, consumed by /subagents attach (live view + ring-buffer replay).
 const RING_BUFFER_MAX_EVENTS = 500
 
+// Streaming frames the attach view never renders. Excluded from the ring so
+// late-attach replay history stays renderable; live consumers still receive
+// them via the emitter/eventBus.
+const NON_RENDERABLE_EVENT_TYPES = new Set([
+    'message_update',
+    'tool_execution_update',
+    'tool_execution_start',
+])
+
 type SubagentStreamEvent = { type: string; [key: string]: unknown }
 
 interface ActiveSubagent {
@@ -702,6 +711,19 @@ function buildAttachItems(
     }
 
     for (const event of events) {
+        if (event.type === 'steer_error') {
+            items.push(
+                new Text(
+                    themeFg(
+                        'error',
+                        `‹err› ${previewText(String(event.error ?? 'steer rejected'), ATTACH_STEER_PREVIEW_CHARS)}`
+                    ),
+                    0,
+                    0
+                )
+            )
+            continue
+        }
         if (event.type !== 'message_end' && event.type !== 'tool_result_end') continue
         const msg = event.message as Message | undefined
         if (!msg) continue
@@ -764,6 +786,10 @@ async function attachToSubagent(ctx: ExtensionContext, entry: ActiveSubagent): P
         let cachedWidth = -1
         let cachedLines: string[] | undefined
         let steerBuffer = ''
+        // Steer rejections arrive emitter-only (parent-side metadata, not
+        // child transcript, so the ring stays free of them); collected here
+        // for as long as this view is open.
+        const steerErrors: SubagentStreamEvent[] = []
 
         // The custom component lives in the editor dock, outside the layout
         // engine's reach — a nested ScrollView cannot scroll there (no
@@ -779,7 +805,10 @@ async function attachToSubagent(ctx: ExtensionContext, entry: ActiveSubagent): P
 
         function rebuild(width: number): string[] {
             if (cachedLines && cachedWidth === width) return cachedLines
-            const items = buildAttachItems(entry.events, theme.fg.bind(theme))
+            const items = buildAttachItems(
+                [...entry.events, ...steerErrors],
+                theme.fg.bind(theme)
+            )
             const lines: string[] = []
             for (let i = 0; i < items.length; i++) {
                 if (i > 0) lines.push('')
@@ -803,6 +832,17 @@ async function attachToSubagent(ctx: ExtensionContext, entry: ActiveSubagent): P
                 finish()
                 return
             }
+            // Only event types the view renders invalidate the line cache;
+            // streaming frames (message_update, tool_execution_*) would
+            // force a full rebuild per token.
+            if (
+                event.type !== 'message_end' &&
+                event.type !== 'tool_result_end' &&
+                event.type !== 'steer_error'
+            ) {
+                return
+            }
+            if (event.type === 'steer_error') steerErrors.push(event)
             cachedLines = undefined
             tui.requestRender()
         }
@@ -1500,7 +1540,37 @@ async function runSingleAgent(
                 // after the watchdog reset so a frame flood counts as genuine
                 // stdout activity, but before eventCount so command acks and
                 // control frames stay out of transcript accounting.
-                if (type === 'response') return // command ack, not a transcript event
+                if (type === 'response') {
+                    // Command ack, not a transcript event — but a failed ack
+                    // must not vanish silently: rpc-mode replies
+                    // {success:false, error} when a command is rejected.
+                    if (event.success === false) {
+                        const command = String(event.command ?? 'unknown')
+                        const error = String(event.error ?? 'unknown error')
+                        debug(`response: ${command} rejected: ${error}`)
+                        if (command === 'steer') {
+                            // Emitter-only so an open attach view renders it:
+                            // parent-side metadata, not child transcript, so
+                            // the replay ring is not polluted with it.
+                            entry.eventEmitter.emit('event', {
+                                type: 'steer_error',
+                                error: event.error ?? 'steer rejected',
+                            })
+                        } else if (command === 'prompt' && eventCount === 0) {
+                            // Initial prompt rejected preflight: the child
+                            // sits idle forever. Fail fast instead of waiting
+                            // for the stall watchdog; safeResolve alone leaves
+                            // the child running, so kill it too.
+                            currentResult.stderr = currentResult.stderr
+                                ? `${currentResult.stderr}\n${error}`
+                                : error
+                            currentResult.errorMessage = error
+                            safeResolve(1, 'prompt-rejected')
+                            proc.kill('SIGTERM')
+                        }
+                    }
+                    return
+                }
                 if (type === 'extension_error') {
                     debug(
                         `extension_error: ${String(event.extensionPath ?? '?')} ${String(event.error ?? '')}`
@@ -1516,11 +1586,13 @@ async function runSingleAgent(
                 lastEventType = type
 
                 // Forward before the dispatch chain so events that also hit
-                // message_end / tool_result_end are forwarded too. Everything
-                // non-control is transcript, including high-frequency
-                // *_update frames the attach view streams; the ring-buffer
-                // cap bounds memory.
-                pushSubagentEvent(entry, event)
+                // message_end / tool_result_end are forwarded too. The ring
+                // holds only renderable events (late-attach replay history):
+                // high-frequency streaming frames would evict real history
+                // from the capped ring without ever being rendered. The
+                // emitter and eventBus still carry the full live stream.
+                const renderable = !NON_RENDERABLE_EVENT_TYPES.has(type)
+                if (renderable) pushSubagentEvent(entry, event)
                 entry.eventEmitter.emit('event', event)
                 eventBus?.emit('subagent:event', { subagentId, agent: agentName, event })
 
