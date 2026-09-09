@@ -218,8 +218,12 @@ private struct QuestionnaireView: View {
     let onAnswer: (String, [CodeAnswer]) -> Void
 
     @State private var currentPage = 0
+    /// question.id → selected value; a value matching no option's
+    /// `resolvedValue` is a custom answer.
     @State private var answers: [String: String] = [:]
     @State private var customTexts: [String: String] = [:]
+    @State private var expandedCustom: Set<String> = []
+    @FocusState private var focusedCustom: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -304,11 +308,9 @@ private struct QuestionnaireView: View {
                         Array(question.options.enumerated()),
                         id: \.offset
                     ) { optIndex, option in
-                        questionnaireOptionRow(
+                        optionRow(
                             option,
-                            questionId: question.id,
-                            isSelected: answers[question.id]
-                                == option.resolvedValue
+                            questionId: question.id
                         )
 
                         if optIndex < question.options.count - 1 {
@@ -316,42 +318,17 @@ private struct QuestionnaireView: View {
                                 .padding(.leading, 16)
                         }
                     }
+
+                    if question.resolvedAllowOther {
+                        Divider()
+                            .padding(.leading, 16)
+                        customRow(for: question)
+                    }
                 }
                 .glassEffect(
                     .regular,
                     in: .rect(cornerRadius: 16)
                 )
-
-                if question.resolvedAllowOther {
-                    HStack(spacing: 8) {
-                        TextField(
-                            String(localized: "Type something..."),
-                            text: customTextBinding(for: question.id),
-                            axis: .vertical
-                        )
-                        .textFieldStyle(.plain)
-                        .lineLimit(1 ... 3)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-
-                        Button {
-                            let text = (customTexts[question.id] ?? "")
-                                .trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !text.isEmpty else { return }
-                            answers[question.id] = text
-                        } label: {
-                            Image(systemName: "arrow.up.circle.fill")
-                                .font(.title3)
-                                .foregroundStyle(
-                                    (customTexts[question.id] ?? "").isEmpty
-                                        ? .secondary
-                                        : Color.appAccent
-                                )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .glassEffect(.regular, in: .rect(cornerRadius: 16))
-                }
             }
             .padding(.horizontal, 20)
         }
@@ -364,13 +341,19 @@ private struct QuestionnaireView: View {
         )
     }
 
-    func questionnaireOptionRow(
+    /// Selection is a toggle: a second tap on the selected option
+    /// deselects it.
+    func optionRow(
         _ option: CodeQuestionOption,
-        questionId: String,
-        isSelected: Bool
+        questionId: String
     ) -> some View {
-        Button {
-            answers[questionId] = option.resolvedValue
+        let isSelected = answers[questionId] == option.resolvedValue
+        return Button {
+            if isSelected {
+                answers.removeValue(forKey: questionId)
+            } else {
+                answers[questionId] = option.resolvedValue
+            }
         } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
@@ -386,19 +369,132 @@ private struct QuestionnaireView: View {
                 }
                 Spacer()
 
-                if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Color.appAccent)
-                } else {
-                    Image(systemName: "circle")
-                        .foregroundStyle(.tertiary)
-                }
+                selectionIndicator(isSelected: isSelected)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    func selectionIndicator(isSelected: Bool) -> some View {
+        if isSelected {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(Color.appAccent)
+        } else {
+            Image(systemName: "circle")
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    /// Custom-answer row, last row inside the card. Collapsed shows the
+    /// submitted custom answer (or the placeholder); expanded shows the
+    /// TextField + submit arrow. Selection is derived, so a typed-but-
+    /// unsubmitted edit immediately drops the checkmark.
+    func customRow(for question: CodeSubQuestion) -> some View {
+        let isSelected = isCustomSelected(question)
+        return Group {
+            if expandedCustom.contains(question.id) {
+                HStack(spacing: 8) {
+                    TextField(
+                        String(localized: "Type something..."),
+                        text: customTextBinding(for: question.id),
+                        axis: .vertical
+                    )
+                    .textFieldStyle(.plain)
+                    .lineLimit(1 ... 3)
+                    .focused($focusedCustom, equals: question.id)
+                    .onSubmit {
+                        submitCustom(for: question.id)
+                    }
+
+                    Button {
+                        submitCustom(for: question.id)
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.title3)
+                            .foregroundStyle(
+                                (customTexts[question.id] ?? "").isEmpty
+                                    ? .secondary
+                                    : Color.appAccent
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(
+                        (customTexts[question.id] ?? "")
+                            .trimmingCharacters(
+                                in: .whitespacesAndNewlines
+                            )
+                            .isEmpty
+                    )
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            } else {
+                Button {
+                    expandedCustom.insert(question.id)
+                    focusedCustom = question.id
+                } label: {
+                    HStack {
+                        if isSelected, let answer = answers[question.id] {
+                            Text(answer)
+                                .foregroundStyle(.primary)
+                        } else {
+                            Text(String(localized: "Type something..."))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+
+                        selectionIndicator(isSelected: isSelected)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "Type something"))
+                .accessibilityHint(
+                    String(localized: "Double tap to enter a custom answer")
+                )
+            }
+        }
+        .onChange(of: customTexts[question.id] ?? "") { _, newValue in
+            // Clearing the text deselects a submitted custom answer so the
+            // form cannot submit a stale selection.
+            guard newValue.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ).isEmpty,
+                let selected = answers[question.id],
+                !question.options.contains(where: {
+                    $0.resolvedValue == selected
+                })
+            else { return }
+            answers.removeValue(forKey: question.id)
+        }
+    }
+
+    /// The custom row counts as selected only when the stored answer is a
+    /// custom value (matches no option) and still equals the typed text.
+    func isCustomSelected(_ question: CodeSubQuestion) -> Bool {
+        guard let selected = answers[question.id],
+              !question.options.contains(where: {
+                  $0.resolvedValue == selected
+              })
+        else { return false }
+        let text = (customTexts[question.id] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return selected == text
+    }
+
+    func submitCustom(for questionId: String) {
+        let text = (customTexts[questionId] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        answers[questionId] = text
+        expandedCustom.remove(questionId)
+        focusedCustom = nil
     }
 
     var submitButton: some View {
@@ -465,4 +561,51 @@ private struct QuestionnaireView: View {
         onAnswer: { _, _ in }
     )
     .frame(height: 300)
+}
+
+#Preview("Questionnaire") {
+    CodeQuestionContent(
+        question: .init(
+            id: "q2",
+            params: CodeQuestionParams(
+                questions: [
+                    CodeSubQuestion(
+                        id: "Q1",
+                        label: "Q1",
+                        prompt: "Which language?",
+                        options: [
+                            CodeQuestionOption(label: "Swift"),
+                            CodeQuestionOption(label: "TypeScript"),
+                        ],
+                        allowOther: true
+                    ),
+                    CodeSubQuestion(
+                        id: "Q2",
+                        label: "Q2",
+                        prompt: "How urgent?",
+                        options: [
+                            CodeQuestionOption(
+                                label: "Now",
+                                description: "Drop everything"
+                            ),
+                            CodeQuestionOption(label: "This week"),
+                        ],
+                        allowOther: false
+                    ),
+                    CodeSubQuestion(
+                        id: "Q3",
+                        label: "Q3",
+                        prompt: "Add tests?",
+                        options: [
+                            CodeQuestionOption(label: "Yes"),
+                            CodeQuestionOption(label: "No"),
+                        ],
+                        allowOther: nil
+                    ),
+                ]
+            )
+        ),
+        onAnswer: { _, _ in }
+    )
+    .frame(height: 420)
 }
