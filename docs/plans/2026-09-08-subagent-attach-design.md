@@ -17,6 +17,7 @@ Add `/subagents attach [id]` command that takes over the TUI to show a running s
 | On subagent finish | Auto-detach back to parent |
 | Parallel support | Single subagent only for now |
 | Resuming a failed/aborted run | TUI subcommand `/subagents resume <id> [instruction...]` — spawn + auto-attach (§10). Added 2026-09-09; resume was tool-parameter-only in v1, which live use showed was a scope gap — the persisted-until-resumed files are user-facing state and needed a user-facing entry point. |
+| Bare `/subagents` | TUI opens an interactive manager view (§11); print mode keeps the flat text report. Added 2026-09-09. |
 | Steer acceptance feedback | `‹pending›` lines driven by `queue_update` frames until delivery renders `‹you›` (§7) |
 
 ## Architecture
@@ -119,7 +120,7 @@ The `emitUpdate()` call to the parent tool result renderer stays as-is — it co
 
 ### 7. `/subagents attach [id]` command
 
-**Subcommand parsing**: The existing `/subagents` command handler receives `args: string`. Parse with `args.trim()` — same pattern as `/rc push-setup` in the rc extension. `attach` with optional trailing id; `resume` with required id and optional instruction text (§10).
+**Subcommand parsing**: The existing `/subagents` command handler receives `args: string`. Parse with `args.trim()` — same pattern as `/rc push-setup` in the rc extension. `attach` with optional trailing id; `resume` with optional id and optional instruction text (§10, §11 — an omitted id resolves against this session's resumable runs); `abort` with optional trailing id (§11); bare `/subagents` opens the manager view in TUI mode (§11). Unknown subcommands notify usage instead of falling through to the report.
 
 **Resolution logic**:
 1. If `id` is provided: find it in `activeSubagents` (exact match or unique prefix).
@@ -184,6 +185,48 @@ Resumes a persisted failed/aborted run directly from the TUI: the child is spawn
 - **Spawn + auto-attach**: `runSingleAgent` runs with the original agent (from `meta.agent`), empty dispatch defaults (the meta drives model/thinking), no abort signal, no onUpdate, and a new optional `onSpawned` callback invoked immediately after `registerActiveSubagent`. The handler awaits the registry entry through a promise resolved in `onSpawned` (15 s timeout → error notify), then calls `attachToSubagent` — identical flow to `/subagents attach`.
 - **Fire-and-forget semantics**: `runSingleAgent` is not awaited to completion. The handler returns when the attach view closes; a settled (or crashed/killed — non-null exit/signal code) child gets a "finished" notify, a detached-from child gets a "keeps running — reattach with /subagents attach" notify. The run's outcome is recorded in the persisted meta/session files (visible via `/subagents` and `subagent_inspect`), not in any tool result.
 
+## 11. `/subagents` manager view
+
+Bare `/subagents` in TUI mode opens an interactive manager view (print mode keeps the flat text report; json/no-UI modes keep the notify no-op). Direct-action keys, no menu — the list fits one screen, so there is no scrolling machinery and no text input (no kitty steer decoding beyond printable action letters).
+
+### Session scoping via `parentSessionId`
+
+The subagents dir (`~/.pi/agent/subagents/`) is global, so v1's listings leaked every other pi session's failed/aborted runs. Every spawned — and resume-spawned — run now records the spawning session's id (`ctx.sessionManager.getSessionId?.()`, defensive cast mirroring rc) as `SubagentMeta.parentSessionId` at spawn; the exit-status finalizer preserves it via spread. All listing surfaces — the flat report, ambiguity/availability lists, the manager's PERSISTED section, and resume-id omission candidates — filter to `meta.parentSessionId === current session id`. Runs whose meta lacks the field (pre-scoping metas, or spawns where the id was unavailable) are hidden from lists but STILL resolvable by explicit full id — explicit id is explicit intent, and the existing live-pid guard already refuses other sessions' running children. Prefix matching is scoped like the lists; exact ids resolve globally.
+
+### Entries
+
+Rows are re-scanned on every render, so RUNNING children that settle while the view is open drop out on the next redraw (registry children also get a proc-close hook that requests the re-render).
+
+- **RUNNING** — unsettled entries from the module-level `activeSubagents` registry. Row: short id, agent, elapsed time (from `startedAt` on the registry entry), task preview (`ATTACH_TASK_PREVIEW_CHARS`).
+- **PERSISTED (this session)** — session-scoped resumable runs: readable meta, no live pid, not in the registry. Row: status, agent, short id, task preview; newest `startedAt` first.
+
+### Keys and action semantics
+
+The footer legend shows the keys and which apply to the selected row type; non-applicable action keys show an in-view message (notify is only safe after `ui.custom()` resolves).
+
+- `↑`/`↓` or `j`/`k` — move selection across the combined list (RUNNING rows first, then PERSISTED).
+- `Enter` — most common action for the row type: attach (running) / resume (persisted).
+- `a` — attach (running rows).
+- `x` — abort: SIGTERM the child via the existing `proc.kill` path; registry cleanup and pending tool-call results settle through the existing handlers. In-view notice; the row drops out when the child exits.
+- `r` — resume: routes through `handleSubagentsResume` with the selected id and the default instruction.
+- `d` — delete persisted artifacts (rm `.jsonl`/`.meta`/`.pid`); refuses with a warning when the id is in the registry or its pid file holds a live pid.
+- `i` — inspect: renders the existing `buildSubagentInspectReport` text for that id in a minimal scrollable text view reusing the attach view's manual-scroll pattern (plain text, hard-wrapped at the width). Esc closes back to the editor — the manager is NOT restored.
+- `Esc`/`q` — close the manager, no action.
+
+Opening attach, resume, or inspect closes the manager first (`done()`, then `await` the flow) — no auto-return to the manager. `x` and `d` update the view in place (drop the row / show the notice) instead of closing it.
+
+### `/subagents abort [id]`
+
+Registry-resolved exactly like attach (exact id, unique prefix, single-entry default when omitted), SIGTERMs the child, notifies. Useful outside the manager view; the same settle path (registry cleanup, pending tool-call result) applies.
+
+### `/subagents resume` id omission
+
+- exactly one session-scoped resumable candidate → resume it with the default instruction
+- zero → "No resumable subagent runs from this session. …" — the message names the escape hatch: explicit full ids still resolve cross-session
+- multiple → notice + short list with ids
+
+Resume's tui-mode guard sits after id resolution/omission so those notices stay observable in print/rpc modes (a resolved single candidate in a non-tui mode still refuses with "resume requires an interactive session").
+
 ## Implementation deviations (resolved)
 
 Deliberate departures from the original design, resolved during implementation:
@@ -194,6 +237,7 @@ Deliberate departures from the original design, resolved during implementation:
 - **Post-review fixes (M1/M2)**: failed `response` acks are surfaced (steer errors render as `‹err›` lines in the attach view; a rejected initial prompt fails fast instead of stalling until the watchdog), and the ring buffer keeps renderable events only.
 - **Live-test fix (2026-09-09)**: v1 assumed the child emits the steered user `message_end` on acceptance — wrong; it emits only at delivery (next LLM request boundary), so steers typed mid-tool-call vanished with zero feedback (and died silently with the child on abort). Fixed by rendering `queue_update`-driven `‹pending›` lines (§4/§7), excluding `queue_update` from the ring buffer, and clamping the attach viewport for pending rows.
 - **Resume scope (2026-09-09)**: v1 shipped resume only as a tool parameter, leaving persisted failed/aborted runs resumable solely by asking the main agent. `/subagents resume` (§10) should have been a subcommand from the start — added with spawn + auto-attach reusing the attach flow.
+- **Session scoping (2026-09-09)**: the shared global subagents dir required per-session scoping that v1 lacked — retrospective fix: v1's `/subagents` report, availability/ambiguity lists, and resolution prefixes leaked other pi sessions' runs to every session. `parentSessionId` on `SubagentMeta` (§11) scopes all listing surfaces to the spawning/resuming session; explicit full ids still resolve cross-session.
 
 ## Out of scope (future)
 
