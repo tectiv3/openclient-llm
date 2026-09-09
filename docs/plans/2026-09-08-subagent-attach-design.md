@@ -85,6 +85,7 @@ Beyond the existing `message_end`, `tool_result_end`, `message_update`, `tool_ex
 | `response` | Command ack (`{"type":"response","command":"...","success":true}`). Skip in `processLine` — do not forward or count. |
 | `extension_ui_request` | Extension UI dialog (confirm, select, notify, setStatus, etc.). Requires `extension_ui_response` reply on stdin. See Section 5. |
 | `extension_error` | Extension load/runtime error. Log to debug, do not forward. |
+| `queue_update` | Steering/follow-up queue state change (emitted when a steer is queued and when dequeued at delivery). Used by the attach view to render pending steers; excluded from the ring buffer. |
 
 `processLine` must recognize these three types and handle them before the existing event dispatch logic.
 
@@ -139,6 +140,8 @@ The `emitUpdate()` call to the parent tool result renderer stays as-is — it co
 6. On `agent_settled` event: call `done()` to auto-detach, unregister handlers.
 
 **Input handling detail**: `ctx.ui.onTerminalInput(handler)` receives complete terminal sequences (parsed by pi's `StdinBuffer`). Bare Escape arrives as `"\x1b"` after a brief timeout (~50ms). Arrow keys arrive as distinct sequences (`"\x1b[A"` etc.). This makes Escape detection reliable.
+
+**Steer delivery semantics**: A steer command only queues the text in the child session; the child emits the user-role `message_end` (rendered as a `‹you›` line) only at **delivery** — the next LLM request boundary, possibly minutes later, or never if the child is killed first. Acceptance alone produces no transcript line. Until delivery, the attach view renders still-queued steers as `‹pending›` lines driven by `queue_update` frames (emitted on every queue change, including the dequeue at delivery — at which point the `‹pending›` line disappears and the `‹you›` line takes over).
 
 Note: `onTerminalInput` is only functional in interactive (TUI) mode — the parent's mode. This is correct since the parent runs interactively; the child runs in rpc mode.
 

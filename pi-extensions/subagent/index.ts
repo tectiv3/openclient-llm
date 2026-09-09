@@ -82,13 +82,15 @@ const ATTACH_STEER_ROW_HEIGHT = 2
 // spawn, consumed by /subagents attach (live view + ring-buffer replay).
 const RING_BUFFER_MAX_EVENTS = 500
 
-// Streaming frames the attach view never renders. Excluded from the ring so
-// late-attach replay history stays renderable; live consumers still receive
-// them via the emitter/eventBus.
+// Streaming frames and transient queue state the attach view never renders.
+// Excluded from the ring so late-attach replay history stays renderable and
+// never replays stale queue state; live consumers still receive them via
+// the emitter/eventBus.
 const NON_RENDERABLE_EVENT_TYPES = new Set([
     'message_update',
     'tool_execution_update',
     'tool_execution_start',
+    'queue_update',
 ])
 
 type SubagentStreamEvent = { type: string; [key: string]: unknown }
@@ -101,6 +103,9 @@ interface ActiveSubagent {
     eventEmitter: EventEmitter
     settled: boolean
     events: SubagentStreamEvent[]
+    // Latest still-queued steer texts, replaced wholesale on every
+    // queue_update frame; seeded empty at spawn, read by the attach view.
+    pendingSteers: string[]
     // Steer handle for a new LLM turn; wired at spawn so the attach view can
     // reach it later.
     steer: (message: string) => void
@@ -687,8 +692,11 @@ function decodeSteerText(data: string): string | undefined {
 // — the completed message_end supersedes them — and onEvent's
 // renderable-type check gates cache invalidation, so skipped frames never
 // trigger a rebuild. User-role message_end frames (the initial task prompt
-// and steered messages) render as ‹you› marker lines; the child emits them
-// when it accepts the message, so no parent-side echo is needed.
+// and steered messages) render as ‹you› marker lines. A steer's message_end
+// is emitted only at delivery — the next LLM request boundary, possibly
+// minutes after acceptance — so acceptance alone is invisible; queued
+// texts render as ‹pending› lines in the attach view's render(), driven by
+// queue_update frames, until delivery swaps them for the ‹you› line.
 function buildAttachItems(
     events: SubagentStreamEvent[],
     themeFg: (color: any, text: string) => string
@@ -789,6 +797,12 @@ async function attachToSubagent(ctx: ExtensionContext, entry: ActiveSubagent): P
         let cachedWidth = -1
         let cachedLines: string[] | undefined
         let steerBuffer = ''
+        // Still-queued steers: seeded from the registry snapshot (late
+        // attach sees texts queued before the view opened), then replaced
+        // wholesale on queue_update — the authoritative stream drops a text
+        // at delivery, when it starts rendering as a ‹you› line via the
+        // child's user-role message_end.
+        let pendingSteers: string[] = [...entry.pendingSteers]
         // Steer rejections arrive emitter-only (parent-side metadata, not
         // child transcript, so the ring stays free of them); collected here
         // for as long as this view is open.
@@ -804,7 +818,10 @@ async function attachToSubagent(ctx: ExtensionContext, entry: ActiveSubagent): P
         const maxViewportLines = () =>
             Math.max(
                 ATTACH_MIN_VIEWPORT_LINES,
-                tui.terminal.rows - ATTACH_RESERVED_TERMINAL_ROWS - ATTACH_STEER_ROW_HEIGHT
+                tui.terminal.rows -
+                    ATTACH_RESERVED_TERMINAL_ROWS -
+                    ATTACH_STEER_ROW_HEIGHT -
+                    pendingSteers.length
             )
 
         function rebuild(width: number): string[] {
@@ -834,6 +851,17 @@ async function attachToSubagent(ctx: ExtensionContext, entry: ActiveSubagent): P
         function onEvent(event: SubagentStreamEvent): void {
             if (event.type === 'agent_settled') {
                 finish()
+                return
+            }
+            if (event.type === 'queue_update') {
+                // Replacement only — delivered texts are dropped by the
+                // child's dequeue re-emission, so no matching against
+                // transcript messages is needed. Pending lines render
+                // outside the cached transcript, so no cache invalidation.
+                if (Array.isArray(event.steering)) {
+                    pendingSteers = event.steering.map(String)
+                }
+                tui.requestRender()
                 return
             }
             // Only event types the view renders invalidate the line cache;
@@ -891,10 +919,19 @@ async function attachToSubagent(ctx: ExtensionContext, entry: ActiveSubagent): P
                 theme.fg('dim', prompt) +
                 theme.fg('muted', chars.slice(start).join('')) +
                 theme.fg('dim', caret)
+            // Pending steers render after the transcript window, before the
+            // steer row — appended here, not in rebuild(), so queue updates
+            // never invalidate the cached transcript lines.
+            const pendingLines = pendingSteers.map(
+                text =>
+                    theme.fg('dim', '‹pending› ') +
+                    theme.fg('dim', previewText(text, ATTACH_STEER_PREVIEW_CHARS))
+            )
             return [
                 ...header,
                 '',
                 ...lines.slice(scrollTop, scrollTop + viewportHeight),
+                ...pendingLines,
                 '',
                 steerRow,
             ]
@@ -1534,6 +1571,7 @@ async function runSingleAgent(
                 eventEmitter: new EventEmitter(),
                 settled: false,
                 events: [],
+                pendingSteers: [],
                 steer: steerFn,
             }
             registerActiveSubagent(entry)
@@ -1609,6 +1647,13 @@ async function runSingleAgent(
                 if (renderable) pushSubagentEvent(entry, event)
                 entry.eventEmitter.emit('event', event)
                 eventBus?.emit('subagent:event', { subagentId, agent: agentName, event })
+
+                // Whole-list replacement: the child re-emits queue_update
+                // without a text once it is dequeued for delivery, so the
+                // latest frame is the authoritative pending set.
+                if (type === 'queue_update' && Array.isArray(event.steering)) {
+                    entry.pendingSteers = event.steering.map(String)
+                }
 
                 if (type === 'agent_settled') {
                     // Normal lifecycle end, never an error. Closing stdin makes
