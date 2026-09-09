@@ -123,6 +123,24 @@ const activeSubagents = new Map<string, ActiveSubagent>()
 // through module scope.
 let eventBus: EventBus | undefined
 
+// Id of the pi session this extension instance serves. One pi process serves
+// one session, so module scope is the single source of truth; every entry
+// point that can spawn or list refreshes it from its ExtensionContext
+// (mirroring the rc extension's defensive getSessionId cast). Undefined when
+// the host does not expose one — spawns then omit parentSessionId and scoped
+// listings hide everything rather than leak other sessions' runs.
+let currentPiSessionId: string | undefined
+
+function sessionIdFromContext(ctx: ExtensionContext): string | undefined {
+    return (
+        ctx?.sessionManager as { getSessionId?: () => string } | undefined
+    )?.getSessionId?.()
+}
+
+function capturePiSessionId(ctx: ExtensionContext): void {
+    currentPiSessionId = sessionIdFromContext(ctx)
+}
+
 function registerActiveSubagent(entry: ActiveSubagent): void {
     activeSubagents.set(entry.id, entry)
 }
@@ -324,6 +342,10 @@ interface SubagentMeta {
     thinkingLevel?: ThinkingLevel
     startedAt: string
     promptHash: string
+    // Pi session that spawned (or last resumed) the run. Listing surfaces
+    // scope to the current session's id; runs without the field (pre-scoping
+    // metas) stay resolvable by explicit full id.
+    parentSessionId?: string
     resumedCount?: number
     status?: 'succeeded' | 'failed' | 'aborted'
     stopReason?: string
@@ -559,6 +581,18 @@ function listPersistedSubagents(): PersistedSubagentEntry[] {
         .sort((a, b) => a.id.localeCompare(b.id))
 }
 
+// Session-scoped view of the persisted runs: only metas whose parentSessionId
+// matches the current session. Runs without the field (pre-scoping metas, and
+// anything spawned while the session id was unavailable) are hidden from all
+// listing surfaces but stay resolvable by explicit full id — explicit id is
+// explicit intent, and the live-pid guard already refuses other sessions'
+// running children.
+function listSessionPersistedSubagents(): PersistedSubagentEntry[] {
+    const sessionId = currentPiSessionId
+    if (!sessionId) return []
+    return listPersistedSubagents().filter(entry => entry.meta?.parentSessionId === sessionId)
+}
+
 function formatPersistedSubagentsList(entries: PersistedSubagentEntry[]): string[] {
     return entries.map(entry => {
         if (!entry.meta) return `- ${entry.id} — (meta sidecar unreadable)`
@@ -569,16 +603,19 @@ function formatPersistedSubagentsList(entries: PersistedSubagentEntry[]): string
 }
 
 function formatAvailableSubagentsError(resumeId: string): string {
-    const entries = listPersistedSubagents()
+    const entries = listSessionPersistedSubagents()
     if (entries.length === 0) {
         return (
             `No subagent found with id "${resumeId}" (completed runs are cleaned up). ` +
-            `No persisted subagent sessions are available in ${getSubagentsDir()}.`
+            `No persisted subagent runs from this session in ${getSubagentsDir()} ` +
+            '(runs from other pi sessions are hidden — reference one by its full id).'
         )
     }
     return [
-        `No subagent found with id "${resumeId}" (completed runs are cleaned up). Available subagents:`,
+        `No subagent found with id "${resumeId}" (completed runs are cleaned up). ` +
+            'Persisted runs from this session:',
         ...formatPersistedSubagentsList(entries),
+        'Runs from other pi sessions are hidden; reference one by its full id.',
     ].join('\n')
 }
 
@@ -598,10 +635,12 @@ function formatSessionFileSize(sessionPath: string): string {
 function buildSubagentsListReport(): string {
     // Successful runs are cleaned up, so every persisted entry is running, interrupted, or failed.
     // Missing-meta entries fall back to the uuidv7 id, which embeds a creation timestamp.
-    const entries = [...listPersistedSubagents()].sort((a, b) =>
+    // Scoped to the current session (§11): other sessions' runs are hidden from
+    // listings but stay reachable by explicit full id.
+    const entries = [...listSessionPersistedSubagents()].sort((a, b) =>
         (b.meta?.startedAt ?? b.id).localeCompare(a.meta?.startedAt ?? a.id)
     )
-    if (entries.length === 0) return 'No persisted subagent sessions.'
+    if (entries.length === 0) return 'No persisted subagent runs from this session.'
 
     const dir = getSubagentsDir()
     const lines = entries.map(entry => {
@@ -615,8 +654,10 @@ function buildSubagentsListReport(): string {
     })
     return [
         ...lines,
-        `${entries.length} persisted subagent session${entries.length === 1 ? '' : 's'} in ${dir}`,
-        `inspect: subagent_inspect <id>; resume: /subagents resume <id> or subagent {agent, task, resume}; delete: rm ${dir}/<id>.*`,
+        `${entries.length} persisted subagent run${entries.length === 1 ? '' : 's'} from this session in ${dir}`,
+        `session: ${currentPiSessionId ?? 'unknown'}`,
+        `runs from other pi sessions are hidden — inspect/resume them by full id; ` +
+            `inspect: subagent_inspect <id>; resume: /subagents resume <id>`,
     ].join('\n')
 }
 
@@ -1081,17 +1122,21 @@ function resolveResumeTarget(
 type InspectTarget = { id: string } | { error: string }
 
 function resolveInspectTarget(requestedId: string): InspectTarget {
-    // An exact id is honored even when its meta sidecar is missing (jsonl-only runs).
+    // An exact id is honored even when its meta sidecar is missing (jsonl-only runs)
+    // and even when the run belongs to another session — explicit id is
+    // explicit intent. Prefix candidates are scoped to this session.
     const { session, pid, meta } = getSubagentFilePaths(requestedId)
     if (fs.existsSync(session) || fs.existsSync(pid) || fs.existsSync(meta))
         return { id: requestedId }
 
-    const matches = listPersistedSubagents().filter(entry => entry.id.startsWith(requestedId))
+    const matches = listSessionPersistedSubagents().filter(entry =>
+        entry.id.startsWith(requestedId)
+    )
     if (matches.length === 1) return { id: matches[0].id }
     if (matches.length > 1) {
         return {
             error: [
-                `Ambiguous subagent id "${requestedId}" matches ${matches.length} persisted runs:`,
+                `Ambiguous subagent id "${requestedId}" matches ${matches.length} persisted runs from this session:`,
                 ...formatPersistedSubagentsList(matches),
             ].join('\n'),
         }
@@ -1109,11 +1154,12 @@ function resolveInspectTarget(requestedId: string): InspectTarget {
 // persisted runs that have a readable meta sidecar (the agent name and
 // prompt hash needed to relaunch the run live there). Meta reading is
 // shared with the other resolution helpers via listPersistedSubagents.
+// Exact ids resolve across sessions; prefix candidates are scoped to this
+// session (§11).
 type PersistedResumeResolution = { id: string; meta: SubagentMeta } | { error: string }
 
 function resolvePersistedResumeTarget(requestedId: string): PersistedResumeResolution {
-    const entries = listPersistedSubagents()
-    const exact = entries.find(entry => entry.id === requestedId)
+    const exact = listPersistedSubagents().find(entry => entry.id === requestedId)
     if (exact) {
         if (!exact.meta) {
             return {
@@ -1123,7 +1169,7 @@ function resolvePersistedResumeTarget(requestedId: string): PersistedResumeResol
         return { id: exact.id, meta: exact.meta }
     }
 
-    const resumable = entries.filter(
+    const resumable = listSessionPersistedSubagents().filter(
         (entry): entry is PersistedSubagentEntry & { meta: SubagentMeta } =>
             entry.meta !== undefined
     )
@@ -1132,7 +1178,7 @@ function resolvePersistedResumeTarget(requestedId: string): PersistedResumeResol
     if (matches.length > 1) {
         return {
             error: [
-                `Ambiguous subagent id "${requestedId}" matches ${matches.length} persisted runs:`,
+                `Ambiguous subagent id "${requestedId}" matches ${matches.length} persisted runs from this session:`,
                 ...formatPersistedSubagentsList(matches),
             ].join('\n'),
         }
@@ -1462,6 +1508,8 @@ async function runSingleAgent(
             thinkingLevel,
             startedAt: new Date().toISOString(),
             promptHash: createHash('sha256').update(agent.systemPrompt).digest('hex'),
+            // Omitted (undefined) when the session id was unavailable at spawn.
+            parentSessionId: currentPiSessionId,
             resumedCount: resume ? (resume.meta.resumedCount ?? 0) + 1 : undefined,
         }
         writeSubagentMetaFile(metaPath, spawnMeta)
@@ -1886,6 +1934,8 @@ async function runSingleAgent(
 // forgotten, the handler returns when the attach view closes, and the
 // child's outcome lands in the persisted meta/session files.
 async function handleSubagentsResume(ctx: ExtensionContext, rest: string[]): Promise<void> {
+    capturePiSessionId(ctx)
+
     if (ctx.mode !== 'tui') {
         const message = 'resume requires an interactive session'
         if (ctx.mode === 'print') console.log(message)
@@ -2095,6 +2145,7 @@ export default function (pi: ExtensionAPI) {
         parameters: SubagentParams,
 
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
+            capturePiSessionId(ctx)
             const agentScope: AgentScope = params.agentScope ?? 'user'
             const dispatchDefaults: DispatchDefaults = {
                 model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
@@ -2822,7 +2873,8 @@ export default function (pi: ExtensionAPI) {
         ].join(' '),
         parameters: SubagentInspectParams,
 
-        async execute(_toolCallId, params) {
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            capturePiSessionId(ctx)
             const limit = Math.max(1, Math.floor(params.limit ?? INSPECT_DEFAULT_LIMIT))
             const resolved = resolveInspectTarget(params.id)
             if ('error' in resolved) {
@@ -2859,6 +2911,7 @@ export default function (pi: ExtensionAPI) {
         description:
             'List persisted subagent sessions (running, aborted, or failed runs), attach to a running one (/subagents attach [id]), or resume a persisted one (/subagents resume <id> [instruction...])',
         handler: async (args, ctx) => {
+            capturePiSessionId(ctx)
             const [sub, ...rest] = args.trim().split(/\s+/)
             if (sub === 'attach') {
                 const resolved = resolveAttachTarget(rest[0])
