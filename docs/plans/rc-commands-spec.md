@@ -2,7 +2,7 @@
 
 Status: spec only, 2026-09-09 (revised 2026-09-09); not yet implemented.
 Date: 2026-09-09.
-History: reviewed by independent critic + source scout 2026-09-09; revisions folded in (Decisions 2).
+History: two review rounds 2026-09-09 (independent critic + source scout); round-2 owner decisions A/B/C folded in (Decisions 2).
 Parent: `docs/plans/rc-remote-control-spec.md` (FROZEN 2026-09-09).
 
 **Context.** The shipped rc feature (parent spec) lets the phone watch a live pi
@@ -25,15 +25,16 @@ spec doc in `docs/plans/`. The parent spec numbered this feature section A8
 | 4 | Model list delivery | optional `models` array added to the existing `state` frame (no new request/response) |
 | 5 | Protocol compatibility | The protocol is frozen vs the Swift client, but both ends are owned by us and change atomically (precedent: ask consolidation). New frames/fields/codes are additive |
 
-## Decisions 2 (2026-09-09 review round — do not revisit)
+## Decisions 2 (two 2026-09-09 review rounds — do not revisit)
 
 | # | Decision | Chosen |
 |---|----------|--------|
 | 6 | C1 — a run blocked on a remote ask cannot be settled by phone Stop (the ask tool ignores the run-abort signal) | NO proactive cancel in the `new`/`compact` handlers (owner: "overly defensive"). Instead: (a) document as accepted known behavior that `command new`/`compact` issued while a remote question is pending BLOCK until the question settles — in practice the question is on screen in the same phone UI, so it gets answered first; and (b) fix the pre-existing gap so the phone CAN unblock (decision 7) |
-| 7 | Phone Stop must unblock a run blocked on a pending remote ask | rc's `abort` handler additionally calls `cancelPendingAsk(state)` — the pending ask resolves null → the ask tool falls through to the LOCAL TUI prompt (same semantics as the existing TUI Esc hatch). Also makes the parent spec's "X sends abort, cancelling the agent's current turn" true for the blocked-ask case |
-| 8 | C2 — `session_shutdown` never clears pendingAsk; a reconnecting client re-receives the dead session's question | `session_shutdown` with reason ≠ `quit` also calls `cancelPendingAsk(state)` — the question belongs to the dead session; cancelPendingAsk already broadcasts the cancel to clients and resolves null |
+| 7 | Phone Stop must unblock a run blocked on a pending remote ask | rc `abort` handler calls `ctx.abort()` + `cancelPendingAsk(state)` (clears the pending ask, broadcasts `question_resolved {by:'cancelled'}`); AND the ask_user_question tool respects its run signal — on a null remote-ask result with the signal aborted, return `errorResult('User cancelled the question')` instead of falling through to the local TUI prompt. Settles the turn in both TUI and RPC modes |
+| 8 | C2 — `session_shutdown` never clears pendingAsk; a reconnecting client re-receives the dead session's question | `session_shutdown` (reason ≠ quit) fix is `state.binding = null` ONLY; the `cancelPendingAsk` half is dropped — unreachable (replacement blocks on `abort()`→`waitForIdle()` so a live pending ask prevents shutdown), and it would wrongly cancel on `reload`. C2 zombie re-delivery is unreachable |
 | 9 | H3 misattribution (uncorrelated broadcasts: two phones, or compact racing a non-rc replacement, can see each other's command results) | ACCEPT and document for v1 (single-phone realistic usage; per-command ids deferred) |
 | 10 | Remaining critique revisions (wording fixes, pinned mitigations, added tests) | Folded into the spec |
+| 11 | `set_model` validation | always validate via `ctx.modelRegistry.find(provider, modelId)` (undefined → `model_not_found`); no skip-validation path |
 
 ## Verified facts (2026-09-09, recon against pi-mono + `pi-extensions/rc/`)
 
@@ -54,8 +55,7 @@ spec doc in `docs/plans/`. The parent spec numbered this feature section A8
    `binding.ctx.isIdle()` (index.ts:774/800) throws on the invalidated old ctx
    (runner.ts:593-603) → blanket catch in `handleSocketData` → client dropped.
    FIX: in the `session_shutdown` handler (index.ts:996-999),
-   when `reason !== 'quit'`, set `state.binding = null` and call
-   `cancelPendingAsk(state)` (decision 8) — instead of the current
+   when `reason !== 'quit'`, set `state.binding = null` — instead of the current
    no-op rebind to the old ctx at index.ts:997); keep `stop()` for quit.
    `buildState`/`sessionId` are already null-binding safe (index.ts:816-837).
 3. **`newSession` availability**: only on `ExtensionCommandContext`
@@ -82,7 +82,7 @@ spec doc in `docs/plans/`. The parent spec numbered this feature section A8
    `errorMessage?`, `aborted`). `getContextUsage()` returns null tokens/percent
    after compaction until the next assistant message with usage (buildState
    already omits the field then; Swift keeps the stale header value — accepted).
-5. **setModel**: `pi.setModel(model)` (ExtensionAPI, types.ts:1415) — no idle
+5. **setModel**: `pi.setModel(model)` (ExtensionAPI, types.ts:1419) — no idle
    check, takes effect at the next LLM call, returns `false` when the provider has
    no auth. Emits `model_select` `{model, previousModel, source}`
    (types.ts:830-834) when the model actually changes — rc does NOT currently
@@ -98,9 +98,11 @@ spec doc in `docs/plans/`. The parent spec numbered this feature section A8
    rc's `sessionName(state)` reads live from
    `ctx.sessionManager.getSessionName()` per frame.
 7. **Model list for the phone — VERIFIED**: the TUI `/model` selector is
-   constructed at interactive-mode.ts:2044 WITH
-   `scopedModels: this.session.scopedModels`; the scoped-vs-all selection
-   itself is in the model-selector constructor (`scope =
+   `showModelSelector` (interactive-mode.ts:4989, `scopedModels` passed at
+   :5012); interactive-mode.ts:2044 is the ExtensionContext config literal
+   (`scopedModels: this.session.scopedModels`), not the selector construction.
+   The scoped-vs-all selection itself is in the model-selector constructor
+   (`scope =
    scopedModels.length > 0 ? "scoped" : "all"`) (model-selector.ts:94, 162)
    — the scoped set is listed when non-empty, else the full catalog via
    `modelRuntime.getAvailableSnapshot()`. The extension-ctx equivalents map to
@@ -133,8 +135,14 @@ spec doc in `docs/plans/`. The parent spec numbered this feature section A8
     `rc.ask()` DOES support signal-based cancel (rc/index.ts:263-270); the only
     cancel path is `cancelPendingAsk` (rc/index.ts:280-290), currently
     reachable from `stop()` (:203), a superseding `ask()` (:238), and the TUI
-    Esc controller (:265, via the ask signal listener). `session_shutdown`
-    does NOT clear pendingAsk (pre-existing; fixed by this feature — decision 8).
+    Esc controller (:265, via the ask signal listener). A run-signal abort
+    (phone Stop) now returns `errorResult` via the ask tool's signal-respect
+    (decision 7); the null→local-TUI-prompt fall-through remains ONLY for
+    Esc/toggle-off/disconnect. Replacement blocks on `abort()`→`waitForIdle()`
+    (agent-session-runtime.ts:167-176, agent-session.ts:1619-1631), so
+    `session_shutdown` with reason `new`/`resume`/`fork` cannot fire while a
+    pending ask is live — the round-1 C2 "zombie re-delivery" scenario is
+    unreachable.
 12. **Swift "unknown" sessionId double-rebind + event drop (owner-verified)**:
     CodeViewModel.swift:427-451 — a state frame with sessionId `"unknown"`
     triggers `isRebind` → transcript + pendingQuestion cleared; the later
@@ -205,7 +213,7 @@ drift; the parent is frozen, so it is not corrected there).
 issued while a remote question is pending BLOCKs until the question settles
 (the ask tool ignores the run-abort signal — verified fact 11; in practice the
 question is on screen in the same phone UI, so it gets answered first — the
-phone is also unblocked by Stop, which now cancels the ask, decision 7). For
+phone is also unblocked by Stop, which now cancels the ask and settles the turn (decision 7)). For
 `compact` specifically the block is invisible: the fire-and-forget IIFE hangs
 silently — neither `session_compact` nor `session_compact_failed` fires, the
 phone gets zero feedback; accepted (owner: scenario out of scope).
@@ -252,10 +260,12 @@ never dereferenced in that window):
   wrapping an IIFE that starts with `await this.abort()`
   (agent-session.ts:2641-2649, 1947-1948) — a compact racing the old
   session's `dispose()` can surface as a spurious
-  `session_compact_failed` attributed to the NEW session). The
-  serialization flag MUST reset in `finally` (also on stale/cancelled
-  failure). `await state.commandCtx.newSession({withSession: (fresh) => {
-  state.commandCtx = fresh }})` in a try/catch — stale-ctx throw
+  `session_compact_failed` attributed to the NEW session). This rejects ALL
+  `command` frames during the window — including `set_model`/`name`, which
+  would otherwise be lost against the tearing-down old session — coherent,
+  accepted. The serialization flag MUST reset in `finally` (also on
+  stale/cancelled failure). `await state.commandCtx.newSession({withSession:
+  (fresh) => { state.commandCtx = fresh }})` in a try/catch — stale-ctx throw
   (runner.ts:593-603) → `stale_session`; `{cancelled: true}` →
   `command_failed`. The await spans the abort+settle on the old session
   (agent-session-runtime.ts:226), so clients see the aborted-run tail strictly
@@ -263,18 +273,16 @@ never dereferenced in that window):
   `session_start` BEFORE setup runs `withSession`, so a `command new` arriving
   in that ms-scale window sees the not-yet-refreshed commandCtx stash →
   spurious `stale_session` (accepted, documented).
-- `set_model`: derive the available list (verified fact 7); derive each
-  entry's `{provider, id}` with the SAME fallbacks `buildState` uses
-  (index.ts:818-826); exact (provider, modelId) match →
-  `await state.binding.pi.setModel(model)` — `pi.setModel` is
-  `Promise<boolean>` (types.ts:1415); without the await, `model_not_set`
-  is undetectable and the promise goes unhandled; no match →
-  `model_not_found`; `pi.setModel` resolved to false → `model_not_set`.
-  Selecting the already-active model is a SILENT no-op (no error, no broadcast
-  — `_emitModelSelect` early-returns when the model is unchanged,
-  agent-session.ts:1640-1649). When the derived list is empty/unavailable,
-  SKIP membership validation and attempt `setModel` directly (a false result
-  still yields `model_not_set`).
+- `set_model`: validate existence via `ctx.modelRegistry.find(provider,
+  modelId)` (model-registry.ts:57, returns `Model | undefined`) — undefined →
+  `model_not_found`; else `await state.binding.pi.setModel(model)` — `pi.setModel`
+  is `Promise<boolean>` (types.ts:1419); without the await, `model_not_set`
+  is undetectable and the promise goes unhandled; resolved false →
+  `model_not_set` (no-auth ONLY — types.ts:1419; agent-session.ts:2615
+  `if (!hasConfiguredAuth) return false`). Selecting the already-active model
+  is a SILENT no-op (no error, no broadcast — `_emitModelSelect` early-returns
+  when the model is unchanged, agent-session.ts:1643
+  `if (modelsAreEqual(previousModel, nextModel)) return;`).
 - `compact`: `state.binding.ctx.compact(instructions ? { customInstructions:
   instructions } : undefined)` — verified fact 4. Fire-and-forget: completion is
   observed via the `session_compact`/`session_compact_failed` events, not a
@@ -305,20 +313,27 @@ never dereferenced in that window):
 - `state` frame gains optional `models: [{provider, id}]` (same derivation as
   `state.model`; omitted or empty when unavailable). Rides every existing state
   broadcast (connect, `get_state`, rebind, model/rename/compact events).
-- **`session_shutdown` fix** (verified facts 2 + 11): for `reason !== 'quit'`,
-  set `state.binding = null` AND call `cancelPendingAsk(state)` — the pending
-  question belongs to the dead session (decision 8); the cancel broadcast +
-  null resolve give the phone a clean question-cancelled frame instead of a
-  zombie re-delivery on reconnect. Keep `stop()` for quit. (The current
-  handler re-binds to the old ctx on every shutdown — index.ts:997 — and
-  never clears pendingAsk.)
-- **Stop fix (decision 7)**: rc's `abort` handler (index.ts:498) additionally
-  calls `cancelPendingAsk(state)` — fixes the pre-existing gap where phone
-  Stop/X did not cancel a pending remote ask (the run-signal never reached the
-  ask tool — verified fact 11; parent spec B3.5's abort claim was false for
-  the blocked-ask case). Semantics: the ask resolves null → the
-  `ask_user_question` tool falls through to the LOCAL TUI prompt (identical to
-  the existing TUI Esc hatch — ask-user-question/index.ts:134-152).
+- **`session_shutdown` fix** (verified fact 2): for `reason !== 'quit'`, set
+  `state.binding = null` ONLY — the `cancelPendingAsk` half is dropped
+  (decision 8) because (1) replacement (`new`/`resume`/`fork`) goes
+  `teardownCurrent` → `await session.abort()` → `waitForIdle()`
+  (agent-session-runtime.ts:167-176; agent-session.ts:1619-1631) which never
+  settles while a pending ask ignores the run signal, so `session_shutdown`
+  can only fire AFTER the run settled → `pendingAsk` already null (unreachable
+  dead code); and (2) `reason !== 'quit'` would over-match `"reload"`
+  (types.ts:635; agent-session.ts:2821) which keeps the same session/run —
+  cancelling a live question there would be wrong. Keep `stop()` for quit.
+  (The current handler re-binds to the old ctx on every shutdown —
+  index.ts:997 — and never clears pendingAsk.)
+- **Stop fix (decision 7)**: rc's `abort` handler (index.ts:498) calls
+  `ctx.abort()` + `cancelPendingAsk(state)` — the pending ask is cleared and
+  `question_resolved {by:'cancelled'}` is broadcast; AND the `ask_user_question`
+  tool respects its run signal — after the remote ask returns null, if the run
+  signal is aborted, return `errorResult('User cancelled the question')`
+  instead of falling through to the local TUI prompt. Settles the turn in both
+  TUI and RPC modes. The ask-tool change is TUI-only behavior, not exercisable
+  by the RPC harness — verified by manual smoke (phone Stop while a question is
+  pending in TUI mode → question cleared, turn ends, no local prompt).
 - **Null-binding guards**: `handlePrompt`/`handleSteer`/`handleCommand` treat a
   null `state.binding` as `error {code:'not_ready'}` to that client — a clean
   per-client error, replacing the current throw→`invalid_message`→drop in the
@@ -328,7 +343,10 @@ never dereferenced in that window):
   second `new` is rejected (`not_ready`); a `prompt` during the switch has
   THREE outcomes: `not_idle` (before the abort lands), `not_ready` (the
   null-binding window), or it lands on the new session (after
-  `session_start`).
+  `session_start`) — between the abort settling and `session_shutdown`
+  nulling the binding, a prompt can be accepted into the soon-disposed old
+  session (sub-millisecond; accepted): the three outcomes are the common
+  cases, not strictly exhaustive.
 - **Security note**: `compact.instructions` and `name` are phone-authored
   input flowing into pi (summarization prompt / session title); auth-gated,
   but the implementation must run the `security.instructions.md` pass before
@@ -432,19 +450,18 @@ wait, with the IP counter reset by later successful hellos.
    covered indirectly by the rebind/`stale_session` tests.
 10. Second `command new` issued while the first is in flight → `not_ready`
     (item 3 chains sequentially only).
-11. Near-empty `command compact` (no seeded content) → assert a
+11. Near-empty `command compact` (no seeded content) → issue `command new`
+    first to get a fresh near-empty session, then `command compact` → assert a
     `command_failed` error frame reaches the client (exercises the
     `reason === "manual"` gate; rc's subscription is live in the harness —
     compact throws "Nothing to compact (session too small)" on a short branch,
-    agent-session.ts:1966-1968 → `session_compact_failed`). Order it BEFORE
-    item 6's seeding, or in a fresh session after a `command new` (items 1-3
-    end in fresh sessions, so the session is near-empty by default).
-12. `abort` (phone Stop) while a remote question is pending → client receives
-    the question-cancelled frame (pins the Stop fix, decision 7; use the
-    existing question harness pattern from group 12 / parent spec).
-13. After an RPC `new_session` replacement, a pending question is NOT
-    re-delivered to a reconnecting client (pins C2 — pendingAsk cleared on
-    shutdown, decision 8).
+    agent-session.ts:1969 → `session_compact_failed`).
+12. `abort` (phone Stop) while a remote question is pending → the harness runs
+    in RPC mode; assert the client receives `question_resolved {by:'cancelled'}`
+    AND the run settles with the turn ended (the RPC `errorResult` path) (pins
+    the Stop fix, decision 7; use the existing question harness pattern from
+    group 12 / parent spec). The TUI-mode local-prompt-prevention (ask-tool
+    signal-respect) is NOT exercisable by the RPC harness — manual smoke only.
 
 ### Swift unit tests (run order per parent spec C3)
 
@@ -484,3 +501,5 @@ wait, with the IP counter reset by later successful hellos.
   `model_not_found` negative path is env-independent and always runs.
 - Security pass (`security.instructions.md`) required before commit for the
   phone-authored-input surface (`compact.instructions`, `name`).
+- The ask-tool run-signal-respect change (TUI mode) has no automated test —
+  manual smoke only (phone Stop while a question is pending in TUI mode).
