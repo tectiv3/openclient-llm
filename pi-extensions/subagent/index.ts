@@ -62,6 +62,11 @@ const INSPECT_ENTRY_PREVIEW_CHARS = 100
 const INSPECT_FINAL_OUTPUT_CAP = 2000
 const LIST_ID_SHORT_CHARS = 8
 const LIST_TASK_PREVIEW_CHARS = 60
+// /subagents resume: instruction sent when the user provides none, and how
+// long the command waits for the spawned child to appear in the registry
+// before reporting failure (covers pre-spawn exits inside runSingleAgent).
+const RESUME_DEFAULT_INSTRUCTION = 'Continue from where you stopped.'
+const RESUME_SPAWN_TIMEOUT_MS = 15_000
 
 // /subagents attach live-view sizing and preview caps. While attached, the
 // view is de-facto fullscreen: it occupies nearly all terminal rows, its own
@@ -611,7 +616,7 @@ function buildSubagentsListReport(): string {
     return [
         ...lines,
         `${entries.length} persisted subagent session${entries.length === 1 ? '' : 's'} in ${dir}`,
-        `inspect: subagent_inspect <id>; resume: subagent {agent, task, resume}; delete: rm ${dir}/<id>.*`,
+        `inspect: subagent_inspect <id>; resume: /subagents resume <id> or subagent {agent, task, resume}; delete: rm ${dir}/<id>.*`,
     ].join('\n')
 }
 
@@ -1100,6 +1105,41 @@ function resolveInspectTarget(requestedId: string): InspectTarget {
     }
 }
 
+// Id resolution for /subagents resume: exact or unique prefix against
+// persisted runs that have a readable meta sidecar (the agent name and
+// prompt hash needed to relaunch the run live there). Meta reading is
+// shared with the other resolution helpers via listPersistedSubagents.
+type PersistedResumeResolution = { id: string; meta: SubagentMeta } | { error: string }
+
+function resolvePersistedResumeTarget(requestedId: string): PersistedResumeResolution {
+    const entries = listPersistedSubagents()
+    const exact = entries.find(entry => entry.id === requestedId)
+    if (exact) {
+        if (!exact.meta) {
+            return {
+                error: `Cannot resume "${requestedId}": its meta sidecar is missing or unreadable. Start a fresh delegation instead.`,
+            }
+        }
+        return { id: exact.id, meta: exact.meta }
+    }
+
+    const resumable = entries.filter(
+        (entry): entry is PersistedSubagentEntry & { meta: SubagentMeta } =>
+            entry.meta !== undefined
+    )
+    const matches = resumable.filter(entry => entry.id.startsWith(requestedId))
+    if (matches.length === 1) return { id: matches[0].id, meta: matches[0].meta }
+    if (matches.length > 1) {
+        return {
+            error: [
+                `Ambiguous subagent id "${requestedId}" matches ${matches.length} persisted runs:`,
+                ...formatPersistedSubagentsList(matches),
+            ].join('\n'),
+        }
+    }
+    return { error: formatAvailableSubagentsError(requestedId) }
+}
+
 function readSubagentPid(pidPath: string): number | undefined {
     try {
         const pid = Number.parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10)
@@ -1305,7 +1345,8 @@ async function runSingleAgent(
     signal: AbortSignal | undefined,
     onUpdate: OnUpdateCallback | undefined,
     makeDetails: (results: SingleResult[]) => SubagentDetails,
-    resume?: ResumeTarget
+    resume?: ResumeTarget,
+    onSpawned?: (entry: ActiveSubagent) => void
 ): Promise<SingleResult> {
     const subagentId = resume?.id ?? uuidv7()
     const {
@@ -1575,6 +1616,10 @@ async function runSingleAgent(
                 steer: steerFn,
             }
             registerActiveSubagent(entry)
+            // Fires before any child output can arrive (stdout events are
+            // async; the awaiting caller resumes first), so callers can
+            // attach immediately — /subagents resume relies on this.
+            onSpawned?.(entry)
 
             const processLine = (line: string) => {
                 if (!line.trim()) return
@@ -1832,6 +1877,140 @@ async function runSingleAgent(
             } catch {
                 /* ignore */
             }
+    }
+}
+
+// /subagents resume <id> [instruction...] — relaunch a persisted failed or
+// aborted run in this session and attach to it. Unlike the subagent tool's
+// resume path, no tool result consumes the run: runSingleAgent is fired and
+// forgotten, the handler returns when the attach view closes, and the
+// child's outcome lands in the persisted meta/session files.
+async function handleSubagentsResume(ctx: ExtensionContext, rest: string[]): Promise<void> {
+    if (ctx.mode !== 'tui') {
+        const message = 'resume requires an interactive session'
+        if (ctx.mode === 'print') console.log(message)
+        else ctx.ui.notify(message, 'warning')
+        return
+    }
+
+    if (!rest[0]) {
+        ctx.ui.notify(
+            'Usage: /subagents resume <id> [instruction...] — run /subagents to list persisted runs.',
+            'warning'
+        )
+        return
+    }
+    // The command grammar carries no quoting: whitespace-split words are
+    // re-joined with single spaces.
+    const instruction = rest.slice(1).join(' ') || RESUME_DEFAULT_INSTRUCTION
+
+    const resolved = resolvePersistedResumeTarget(rest[0])
+    if ('error' in resolved) {
+        ctx.ui.notify(resolved.error, 'warning')
+        return
+    }
+    const shortId = resolved.id.slice(0, LIST_ID_SHORT_CHARS)
+
+    if (activeSubagents.has(resolved.id)) {
+        ctx.ui.notify(
+            `Subagent ${shortId} is already running in this session — attach with /subagents attach instead of resuming.`,
+            'warning'
+        )
+        return
+    }
+
+    // Scope "both": the run's agent may be project-local, and a user-typed
+    // command needs no project-trust confirm (that gate protects
+    // model-initiated tool calls, not direct user intent).
+    const discovery = discoverAgents(ctx.cwd, 'both')
+    const agents = discovery.agents
+    if (!agents.some(a => a.name === resolved.meta.agent)) {
+        const available = agents.map(a => `"${a.name}"`).join(', ') || 'none'
+        ctx.ui.notify(
+            `Cannot resume ${shortId}: agent "${resolved.meta.agent}" from the original run is no longer among the loaded agents (${available}).`,
+            'warning'
+        )
+        return
+    }
+
+    // Shared gate with the subagent tool's resume parameter: session file
+    // exists, pidfile not live (another pi session's child), prompt hash
+    // unchanged.
+    const resumeTarget = resolveResumeTarget(resolved.id, resolved.meta.agent, agents)
+    if (typeof resumeTarget === 'string') {
+        ctx.ui.notify(resumeTarget, 'warning')
+        return
+    }
+
+    const makeDetails = (results: SingleResult[]): SubagentDetails => ({
+        mode: 'single',
+        agentScope: 'both',
+        projectAgentsDir: discovery.projectAgentsDir,
+        results,
+    })
+
+    // The registry entry only exists once runSingleAgent spawns the child;
+    // onSpawned bridges it out so the handler can attach without awaiting
+    // the full run. Pre-spawn exits (early return or rejection) resolve
+    // undefined via the settlement handlers below so the timeout message is
+    // not stacked on top of the real failure.
+    let deliverEntry!: (entry: ActiveSubagent | undefined) => void
+    const entryPromise = new Promise<ActiveSubagent | undefined>(resolve => {
+        deliverEntry = resolve
+    })
+    const spawnTimeout = setTimeout(() => deliverEntry(undefined), RESUME_SPAWN_TIMEOUT_MS)
+    let failureNotified = false
+
+    void runSingleAgent(
+        ctx.cwd,
+        {}, // Resume takes model/thinking from the meta sidecar; no dispatch defaults.
+        agents,
+        resolved.meta.agent,
+        instruction,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        makeDetails,
+        resumeTarget,
+        entry => deliverEntry(entry)
+    ).then(
+        () => deliverEntry(undefined),
+        err => {
+            failureNotified = true
+            deliverEntry(undefined)
+            ctx.ui.notify(
+                `Resuming subagent ${shortId} failed: ${
+                    err instanceof Error ? err.message : String(err)
+                }`,
+                'error'
+            )
+        }
+    )
+
+    const entry = await entryPromise
+    clearTimeout(spawnTimeout)
+    if (!entry) {
+        if (!failureNotified) {
+            ctx.ui.notify(
+                `Resuming subagent ${shortId} failed: it did not start within ${Math.round(RESUME_SPAWN_TIMEOUT_MS / 1000)}s.`,
+                'error'
+            )
+        }
+        return
+    }
+
+    await attachToSubagent(ctx, entry)
+    // Settled → the view closed on agent_settled; a non-null exit code or
+    // signal covers watchdog kills and crashes that close the view via proc
+    // close without a settle frame. Anything else means the user detached.
+    if (entry.settled || entry.proc.exitCode !== null || entry.proc.signalCode !== null) {
+        ctx.ui.notify(`Subagent ${shortId} finished.`, 'info')
+    } else {
+        ctx.ui.notify(
+            `Subagent ${shortId} keeps running — reattach with /subagents attach.`,
+            'info'
+        )
     }
 }
 
@@ -2678,7 +2857,7 @@ export default function (pi: ExtensionAPI) {
 
     pi.registerCommand('subagents', {
         description:
-            'List persisted subagent sessions (running, aborted, or failed runs), or attach to a running one: /subagents attach [id]',
+            'List persisted subagent sessions (running, aborted, or failed runs), attach to a running one (/subagents attach [id]), or resume a persisted one (/subagents resume <id> [instruction...])',
         handler: async (args, ctx) => {
             const [sub, ...rest] = args.trim().split(/\s+/)
             if (sub === 'attach') {
@@ -2695,6 +2874,10 @@ export default function (pi: ExtensionAPI) {
                     return
                 }
                 await attachToSubagent(ctx, resolved)
+                return
+            }
+            if (sub === 'resume') {
+                await handleSubagentsResume(ctx, rest)
                 return
             }
             const report = buildSubagentsListReport()
