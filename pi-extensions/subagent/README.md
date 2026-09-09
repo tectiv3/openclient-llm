@@ -183,8 +183,8 @@ design, `subagent_inspect` covers the model and `rm` covers the user.
 ### Live view: `/subagents attach [id]`
 
 Attaches to a **running** subagent and takes over the editor region with a live transcript
-replayed from the subagent's in-memory ring buffer (last 500 events), so late-attaching
-shows recent history.
+replayed from the subagent's in-memory ring buffer (last 500 renderable events), so
+late-attaching shows recent history.
 
 - **Resolution**: with an id, exact or unique-prefix match against running subagents
   (ambiguous prefixes list the matches). Without an id, attaches when exactly one
@@ -196,9 +196,10 @@ tool calls formatted like the parent TUI, tool output truncated (200 chars). Str
   and suspends the pin while you scroll up (`End` jumps back to live).
 - **Steering**: anything you type goes into the `› ▌` input row at the bottom of the view.
   `Enter` sends the line to the subagent as a steering message (it lands in the child's next
-  turn); `Backspace` edits the line. The sent line shows up in the transcript as a muted
-  `‹you› ...` marker once the child accepts it. Scroll keys are unaffected — arrow keys
-  still scroll, printable keys never do.
+  turn); `Backspace` edits the line; pastes are supported (bracketed-paste markers are
+  stripped and newlines/tabs flattened to spaces). The sent line shows up in the transcript
+  as a muted `‹you› ...` marker once the child accepts it. Scroll keys are unaffected —
+  arrow keys still scroll, printable keys never do.
 - **Detach**: `Esc` returns to the parent editor; the subagent keeps running.
 - **Auto-detach**: the view closes by itself when the subagent finishes
   (`agent_settled`) or its process exits (watchdog kill, crash, abort — the parent's abort

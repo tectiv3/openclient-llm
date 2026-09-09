@@ -29,7 +29,7 @@ interface ActiveSubagent {
     agent: string
     task: string
     proc: ChildProcess
-    stdin: Writable
+    steer: (message: string) => void  // steer handle, wired at spawn
     eventEmitter: EventEmitter  // per-subagent event stream
     settled: boolean
     events: SubagentStreamEvent[]  // capped ring buffer for late-attach replay
@@ -38,7 +38,7 @@ interface ActiveSubagent {
 
 Entries are added immediately after spawn, removed on process exit.
 
-**Ring buffer cap**: Max 500 events. On overflow, oldest events are evicted. This bounds memory for long-running subagents while keeping enough history for meaningful late-attach replay.
+**Ring buffer cap**: Max 500 events. On overflow, oldest events are evicted. This bounds memory for long-running subagents while keeping enough history for meaningful late-attach replay. Only renderable events are pushed (`message_end`, `tool_result_end`, `tool_execution_end`, lifecycle frames); high-frequency `*_update` frames are forwarded live (emitter + event bus) but excluded from the ring, so late-attach replay history stays renderable.
 
 ### 2. Switch children from `--mode json` to `--mode rpc`
 
@@ -74,7 +74,7 @@ Commands written as newline-terminated JSON lines to child stdin:
 |---|---|---|
 | Initial task | `{"type":"prompt","message":"Task: ..."}` | Immediately after spawn |
 | Steer | `{"type":"steer","message":"..."}` | User types while attached |
-| Abort | `{"type":"abort"}` | User aborts (existing abort path) |
+| Abort | `{"type":"abort"}` | Not sent by this implementation — the parent abort path SIGTERMs the child directly (pre-existing); SIGTERM is strictly stronger because an rpc `abort` ack would abort the run but leave the child alive awaiting stdin. |
 
 ### 4. RPC stdout frame types (child → parent)
 
@@ -95,8 +95,9 @@ In rpc mode, the child can emit `extension_ui_request` frames on stdout. These r
 **v1 — auto-respond with conservative defaults** (when not attached):
 - `confirm` → `false` (deny by default — safer than auto-approving destructive operations)
 - `select` → first option
-- `notify` → no response needed (fire-and-forget)
-- `setStatus`, `setWidget`, `setTitle`, `editor`, `set_editor_text` → no response needed
+- `input` → `{cancelled: true}` (rpc mode awaits a reply)
+- `editor` → `{cancelled: true}` (rpc mode awaits a reply)
+- `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text` → no response needed (fire-and-forget)
 
 The confirm default is `false` rather than `true` because auto-approving could allow destructive operations (file deletions, irreversible commands) without the user's knowledge. Subagents that need confirms should have their trust established before spawn (the existing `confirmProjectAgents` gate in the parent handles this).
 
@@ -107,7 +108,7 @@ The confirm default is `false` rather than `true` because auto-approving could a
 Today `processLine` only calls `emitUpdate()` on `message_end` and `tool_result_end`. Other events (`message_update`, `tool_execution_start/update/end`, `agent_start`, `agent_settled`) are consumed only for stall detection.
 
 **Change**: All parsed events are also:
-1. Pushed to the per-subagent ring buffer (capped at 500)
+1. Pushed to the per-subagent ring buffer (capped at 500) — renderable events only; high-frequency `*_update` frames are excluded (see §1)
 2. Emitted via per-subagent `EventEmitter`
 3. Emitted via `pi.events.emit('subagent:event', ...)` (for cross-extension use)
 
@@ -163,6 +164,15 @@ Note: `onTerminalInput` is only functional in interactive (TUI) mode — the par
 - Chain and parallel modes — they use `runSingleAgent` internally, so they get rpc mode automatically, but `/subagents attach` only supports single mode for now
 - Persistence — `.jsonl`, `.meta`, `.pid` files work the same way (rpc mode uses `--session` the same as json mode — verified)
 - Resume — the meta sidecar records the same data; resume re-sends the continuation task as a stdin prompt instead of a CLI arg
+
+## Implementation deviations (resolved)
+
+Deliberate departures from the original design, resolved during implementation:
+
+- **§7 input routing**: `ctx.ui.onTerminalInput` → focused custom component with its own `handleInput`; keys reach the focused component before app keybindings, so no terminal-input interception hook is needed.
+- **§7 scrolling**: `ScrollView` → manual scroll window (render all lines, slice a viewport); the layout engine cannot drive a `ScrollView` inside `ui.custom`.
+- **§8 abort while attached**: no synthetic settled/aborted event — the `proc` `close` hook already covers the detach on SIGTERM exit.
+- **Post-review fixes (M1/M2)**: failed `response` acks are surfaced (steer errors render as `‹err›` lines in the attach view; a rejected initial prompt fails fast instead of stalling until the watchdog), and the ring buffer keeps renderable events only.
 
 ## Out of scope (future)
 

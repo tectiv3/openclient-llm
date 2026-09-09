@@ -19,7 +19,6 @@ import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { Writable } from 'node:stream'
 import type { AgentToolResult, ThinkingLevel } from '@earendil-works/pi-agent-core'
 import type { Message } from '@earendil-works/pi-ai'
 import { StringEnum, uuidv7 } from '@earendil-works/pi-ai'
@@ -64,10 +63,11 @@ const INSPECT_FINAL_OUTPUT_CAP = 2000
 const LIST_ID_SHORT_CHARS = 8
 const LIST_TASK_PREVIEW_CHARS = 60
 
-// /subagents attach live-view sizing and preview caps. The reserved-rows
-// constant leaves room for the dock around the custom component (status,
-// editor chrome, footer, margin) so the view never starves the parent
-// transcript.
+// /subagents attach live-view sizing and preview caps. While attached, the
+// view is de-facto fullscreen: it occupies nearly all terminal rows, its own
+// header and steer chrome included (spec §7 "takes over the TUI"). The
+// reserved rows only guarantee the surrounding dock — status line and
+// footer — survives.
 const ATTACH_TASK_PREVIEW_CHARS = 60
 const ATTACH_THINKING_PREVIEW_CHARS = 200
 const ATTACH_TOOL_OUTPUT_PREVIEW_CHARS = 200
@@ -98,13 +98,12 @@ interface ActiveSubagent {
     agent: string
     task: string
     proc: ChildProcess
-    stdin: Writable
     eventEmitter: EventEmitter
     settled: boolean
     events: SubagentStreamEvent[]
     // Steer handle for a new LLM turn; wired at spawn so the attach view can
-    // reach it later (the field also justifies keeping the closure unexported).
-    steer?: (message: string) => void
+    // reach it later.
+    steer: (message: string) => void
 }
 
 const activeSubagents = new Map<string, ActiveSubagent>()
@@ -662,16 +661,19 @@ function resolveAttachTarget(id?: string): ActiveSubagent | string {
     ].join('\n')
 }
 
-// Steer text extraction from raw terminal input. Legacy mode delivers
-// printable text as-is; kitty-protocol terminals encode it in CSI-u
-// sequences (decodeKittyPrintable). Anything with an escape prefix or
-// control codes is not steer input.
+// Steer text extraction from typed terminal input. Bracketed pastes are
+// handled separately in the attach view's handleInput; this covers single
+// keys and raw multi-char reads. Legacy mode delivers printable text as-is;
+// kitty-protocol terminals encode it in CSI-u sequences
+// (decodeKittyPrintable). Anything with an escape prefix or control codes is
+// not steer input.
 function decodeSteerText(data: string): string | undefined {
     const decoded = decodeKittyPrintable(data)
     if (decoded) return decoded
     if (data.length === 0 || data.startsWith('\x1b')) return undefined
-    // Multi-char strings are pastes: embedded \r/\n/\t become spaces so a
-    // pasted paragraph is not rejected wholesale. Lone keys stay strict.
+    // Raw multi-char reads (terminals that deliver a paste without bracketed
+    // markers) normalize embedded \r/\n/\t to spaces so the read is not
+    // rejected wholesale. Lone keys stay strict.
     const text = data.length > 1 ? data.replace(/[\r\n\t]+/g, ' ') : data
     for (const ch of text) {
         const code = ch.codePointAt(0) ?? 0
@@ -680,12 +682,13 @@ function decodeSteerText(data: string): string | undefined {
     return text
 }
 
-// Transcript items for the attach view. Only *_end events render: the ring
-// buffer also keeps message_update frames, but streaming those would rebuild
-// the view per token — the completed message_end supersedes them. User-role
-// message_end frames (the initial task prompt and steered messages) render as
-// ‹you› marker lines; the child emits them when it accepts the message, so no
-// parent-side echo is needed.
+// Transcript items for the attach view. Only *_end events render, by
+// design: live streaming partials (message_update) are skipped deliberately
+// — the completed message_end supersedes them — and onEvent's
+// renderable-type check gates cache invalidation, so skipped frames never
+// trigger a rebuild. User-role message_end frames (the initial task prompt
+// and steered messages) render as ‹you› marker lines; the child emits them
+// when it accepts the message, so no parent-side echo is needed.
 function buildAttachItems(
     events: SubagentStreamEvent[],
     themeFg: (color: any, text: string) => string
@@ -796,7 +799,8 @@ async function attachToSubagent(ctx: ExtensionContext, entry: ActiveSubagent): P
         // bounded viewport, no scroll translation; verified against
         // pi-tui's layout walk). Scrolling is manual: render every
         // transcript line, slice a window, and clamp the total height so the
-        // dock never starves the parent transcript.
+        // de-facto fullscreen view still leaves the dock chrome (status,
+        // footer) on screen.
         const maxViewportLines = () =>
             Math.max(
                 ATTACH_MIN_VIEWPORT_LINES,
@@ -908,7 +912,7 @@ async function attachToSubagent(ctx: ExtensionContext, entry: ActiveSubagent): P
                 if (steerBuffer.length > 0) {
                     const message = steerBuffer
                     steerBuffer = ''
-                    entry.steer?.(message)
+                    entry.steer(message)
                     // The ‹you› echo arrives when the child forwards its
                     // user-role message_end; jump to live so the follow-up
                     // response is visible as it streams.
@@ -920,6 +924,17 @@ async function attachToSubagent(ctx: ExtensionContext, entry: ActiveSubagent): P
             if (matchesKey(data, Key.backspace)) {
                 if (steerBuffer.length > 0) {
                     steerBuffer = Array.from(steerBuffer).slice(0, -1).join('')
+                    tui.requestRender()
+                }
+                return
+            }
+            // Bracketed paste (pi's TUI wraps pastes in \x1b[200~…\x1b[201~):
+            // strip both markers, flatten newlines/tabs to spaces, and
+            // append the remainder to the steer buffer.
+            if (data.startsWith('\x1b[200~') && data.endsWith('\x1b[201~')) {
+                const pasted = data.slice('\x1b[200~'.length, -'\x1b[201~'.length)
+                if (pasted) {
+                    steerBuffer += pasted.replace(/[\r\n\t]+/g, ' ')
                     tui.requestRender()
                 }
                 return
@@ -1516,7 +1531,6 @@ async function runSingleAgent(
                 agent: agentName,
                 task,
                 proc,
-                stdin: proc.stdin,
                 eventEmitter: new EventEmitter(),
                 settled: false,
                 events: [],
