@@ -258,7 +258,78 @@ export default function askUserQuestion(pi: ExtensionAPI) {
             }
 
             if (ctx.mode !== 'tui') {
-                return errorResult('Error: UI not available (running in non-interactive mode)')
+                // rpc mode: relay questions to parent via ctx.ui.select/input.
+                // These methods exist at runtime (rpc-mode.ts emits extension_ui_request
+                // events on stdout) but are absent from the local type stubs.
+                const ui = ctx.ui as unknown as {
+                    select(
+                        title: string,
+                        options: string[],
+                        opts?: { signal?: AbortSignal }
+                    ): Promise<string | undefined>
+                    input(
+                        title: string,
+                        defaultValue?: string,
+                        opts?: { signal?: AbortSignal }
+                    ): Promise<string | undefined>
+                }
+
+                const answers: Answer[] = []
+                for (const question of questions) {
+                    const optionLabels = question.options.map(o => o.label)
+                    if (question.allowOther) {
+                        optionLabels.push('Type something...')
+                    }
+
+                    const selected = await ui.select(question.prompt, optionLabels, {
+                        signal: signal ?? undefined,
+                    })
+
+                    if (selected === undefined) {
+                        return errorResult('User cancelled the question', questions)
+                    }
+
+                    if (question.allowOther && selected === 'Type something...') {
+                        const typed = await ui.input(question.prompt, undefined, {
+                            signal: signal ?? undefined,
+                        })
+                        if (typed === undefined) {
+                            return errorResult('User cancelled the question', questions)
+                        }
+                        answers.push({
+                            id: question.id,
+                            value: typed,
+                            label: typed,
+                            wasCustom: true,
+                        })
+                    } else {
+                        const matchedOption = question.options.find(o => o.label === selected)
+                        const matchedIndex = question.options.findIndex(
+                            o => o.label === selected
+                        )
+                        answers.push({
+                            id: question.id,
+                            value: matchedOption?.value ?? selected,
+                            label: selected,
+                            wasCustom: false,
+                            index: matchedIndex >= 0 ? matchedIndex + 1 : undefined,
+                        })
+                    }
+                }
+
+                const answerLines = answers.map(a => {
+                    const qLabel = questions.find(q => q.id === a.id)?.label || a.id
+                    if (a.wasCustom) {
+                        return `${qLabel}: user wrote: ${a.label}`
+                    }
+                    const suffix = a.value !== a.label ? ` (value: ${a.value})` : ''
+                    return `${qLabel}: user selected: ${a.index}. ${a.label}${suffix}`
+                })
+
+                return {
+                    content: [{ type: 'text', text: answerLines.join('\n') }],
+                    details: { questions, answers, cancelled: false },
+                }
             }
 
             const isMulti = questions.length > 1

@@ -445,4 +445,4 @@ Each `MCPToolInfo` is wrapped in an `MCPTool` that conforms to `ChatToolProtocol
 - Web search requires a configured search tool in Settings and the web search toggle to be on.
 - MCP tools require the LiteLLM server to have at least one MCP server configured and individual tools to be enabled in the MCP Tools sheet.
 - Both are integrated through the same `ToolRegistry` → `AgentStreamUseCase` pipeline.
-- See `web-browsing.instructions.md` for the full flow table and implementation details
+- The web search flow (toggle, search tool configuration, result rendering) is documented inline in this spec and in `ChatViewModel+Agent.swift`.

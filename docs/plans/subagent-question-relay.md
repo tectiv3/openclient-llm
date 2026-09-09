@@ -1,6 +1,6 @@
 # Subagent question relay
 
-Status: SPEC FINAL (revised 2026-09-09), implementation pending.
+Status: IMPLEMENTED (1da1e11, 2026-09-09).
 Supersedes: 2026-09-09 original (queueing design), 2026-09-06 Unix-socket draft (parked).
 
 ## Problem

@@ -98,6 +98,183 @@ const NON_RENDERABLE_EVENT_TYPES = new Set([
     'queue_update',
 ])
 
+// Remote-control access (see pi-extensions/rc). The structural type keeps the
+// two extensions decoupled: rc is looked up on globalThis and checked, never imported.
+interface RcRemote {
+    askAvailable(): boolean
+    ask(opts: {
+        kind: 'ask_user_question'
+        params: unknown
+        signal?: AbortSignal
+    }): Promise<
+        | { id: string; value: string; label: string; wasCustom: boolean; index?: number }[]
+        | 'dismissed'
+        | null
+    >
+}
+
+const RC_KEY = Symbol.for('pi-rc')
+
+function rcRemote(): RcRemote | undefined {
+    const rc = (globalThis as unknown as Record<symbol, unknown>)[RC_KEY]
+    if (!rc) return undefined
+    if (
+        typeof (rc as RcRemote).ask !== 'function' ||
+        typeof (rc as RcRemote).askAvailable !== 'function'
+    )
+        return undefined
+    return rc as RcRemote
+}
+
+// FIFO mutex serializing concurrent relay calls — the user can only answer
+// one relayed question at a time (TUI or phone).
+const relayMutexQueue: (() => void)[] = []
+let relayMutexHeld = false
+
+async function acquireRelayMutex(): Promise<() => void> {
+    if (!relayMutexHeld) {
+        relayMutexHeld = true
+        return () => {
+            const next = relayMutexQueue.shift()
+            if (next) next()
+            else relayMutexHeld = false
+        }
+    }
+    return new Promise(resolve => {
+        relayMutexQueue.push(() => {
+            resolve(() => {
+                const next = relayMutexQueue.shift()
+                if (next) next()
+                else relayMutexHeld = false
+            })
+        })
+    })
+}
+
+type RelayUiRequest = (
+    event: { method: string; id: string; [key: string]: unknown },
+    agentName: string,
+    signal: AbortSignal
+) => Promise<Record<string, unknown> | null>
+
+function buildRelayUiRequest(ctx: ExtensionContext): RelayUiRequest {
+    return async (event, agentName, relaySignal) => {
+        const method = event.method
+        const title = String(event.title ?? '')
+        const rc = rcRemote()
+
+        if (rc?.askAvailable()) {
+            if (method === 'select') {
+                const options = Array.isArray(event.options) ? event.options : []
+                const answer = await rc.ask({
+                    kind: 'ask_user_question',
+                    params: {
+                        questions: [
+                            {
+                                id: 'Q1',
+                                label: agentName,
+                                prompt: `[${agentName}] ${title}`,
+                                options: options.map((o: string) => ({ label: o, value: o })),
+                                allowOther: false,
+                            },
+                        ],
+                    },
+                    signal: relaySignal,
+                })
+                if (!answer || answer === 'dismissed') return null
+                return { value: answer[0].value }
+            }
+            if (method === 'confirm') {
+                const message = String(event.message ?? '')
+                const answer = await rc.ask({
+                    kind: 'ask_user_question',
+                    params: {
+                        questions: [
+                            {
+                                id: 'Q1',
+                                label: agentName,
+                                prompt: `[${agentName}] ${title}: ${message}`,
+                                options: [
+                                    { label: 'Yes', value: 'yes' },
+                                    { label: 'No', value: 'no' },
+                                ],
+                                allowOther: false,
+                            },
+                        ],
+                    },
+                    signal: relaySignal,
+                })
+                if (!answer || answer === 'dismissed') return null
+                return { confirmed: answer[0].value === 'yes' }
+            }
+            if (method === 'input') {
+                const answer = await rc.ask({
+                    kind: 'ask_user_question',
+                    params: {
+                        questions: [
+                            {
+                                id: 'Q1',
+                                label: agentName,
+                                prompt: `[${agentName}] ${title}`,
+                                options: [],
+                                allowOther: true,
+                            },
+                        ],
+                    },
+                    signal: relaySignal,
+                })
+                if (!answer || answer === 'dismissed') return null
+                return { value: answer[0].label }
+            }
+            return null
+        }
+
+        // TUI fallback — select/input/confirm with signal support exist at runtime
+        // (rpc-mode.ts) but are absent from the local type stubs.
+        const ui = ctx.ui as unknown as {
+            select(
+                title: string,
+                options: string[],
+                opts?: { signal?: AbortSignal }
+            ): Promise<string | undefined>
+            confirm(
+                title: string,
+                message: string,
+                opts?: { signal?: AbortSignal }
+            ): Promise<boolean>
+            input(
+                title: string,
+                defaultValue?: string,
+                opts?: { signal?: AbortSignal }
+            ): Promise<string | undefined>
+        }
+
+        if (method === 'select') {
+            const options = Array.isArray(event.options) ? event.options : []
+            const result = await ui.select(`[${agentName}] ${title}`, options as string[], {
+                signal: relaySignal,
+            })
+            return result !== undefined ? { value: result } : null
+        }
+        if (method === 'confirm') {
+            const message = String(event.message ?? '')
+            const result = await ui.confirm(`[${agentName}] ${title}`, message, {
+                signal: relaySignal,
+            })
+            return { confirmed: result }
+        }
+        if (method === 'input') {
+            const placeholder = String(event.placeholder ?? '')
+            const result = await ui.input(`[${agentName}] ${title}`, placeholder, {
+                signal: relaySignal,
+            })
+            return result !== undefined ? { value: result } : null
+        }
+
+        return null
+    }
+}
+
 type SubagentStreamEvent = { type: string; [key: string]: unknown }
 
 interface ActiveSubagent {
@@ -1441,7 +1618,8 @@ async function runSingleAgent(
     onUpdate: OnUpdateCallback | undefined,
     makeDetails: (results: SingleResult[]) => SubagentDetails,
     resume?: ResumeTarget,
-    onSpawned?: (entry: ActiveSubagent) => void
+    onSpawned?: (entry: ActiveSubagent) => void,
+    relayUiRequest?: RelayUiRequest
 ): Promise<SingleResult> {
     const subagentId = resume?.id ?? uuidv7()
     const {
@@ -1588,6 +1766,7 @@ async function runSingleAgent(
             let buffer = ''
             let resolved = false
             let lastActivityTime = Date.now()
+            let relayPending = false
             let eventCount = 0
             let lastEventType = ''
             let stdinClosed = false
@@ -1632,17 +1811,55 @@ async function runSingleAgent(
                 }
             }
 
-            // Auto-responder for extension UI dialogs raised inside the child:
-            // children run headless, so confirm/select/input/editor requests
-            // hang forever without a reply. Reply with conservative defaults
-            // (deny confirms, cancel the rest) instead of hanging — forwarding
-            // dialogs to the attached user is future work (spec §5).
-            const handleExtensionUiRequest = (event: any) => {
+            const handleExtensionUiRequest = async (event: any) => {
                 const method = String(event.method ?? '')
                 const id = event.id
+
+                // Relay select/confirm/input to the user when a callback is available.
+                if (
+                    relayUiRequest &&
+                    (method === 'select' || method === 'confirm' || method === 'input')
+                ) {
+                    const release = await acquireRelayMutex()
+                    relayPending = true
+                    const controller = new AbortController()
+                    const onRunAbort = () => controller.abort()
+                    signal?.addEventListener('abort', onRunAbort, { once: true })
+                    try {
+                        const response = await relayUiRequest(
+                            event,
+                            agentName,
+                            controller.signal
+                        )
+                        if (response) {
+                            writeChildStdin({ type: 'extension_ui_response', id, ...response })
+                            debug(`extension_ui: ${method} → relayed`)
+                        } else {
+                            writeChildStdin({
+                                type: 'extension_ui_response',
+                                id,
+                                cancelled: true,
+                            })
+                            debug(`extension_ui: ${method} → relay cancelled`)
+                        }
+                    } catch (err) {
+                        writeChildStdin({ type: 'extension_ui_response', id, cancelled: true })
+                        debug(
+                            `extension_ui: ${method} relay error: ${err instanceof Error ? err.message : String(err)}`
+                        )
+                    } finally {
+                        relayPending = false
+                        lastActivityTime = Date.now()
+                        signal?.removeEventListener('abort', onRunAbort)
+                        release()
+                    }
+                    return
+                }
+
+                // Fallback auto-responder when no relay callback is available:
+                // reply with conservative defaults so the child doesn't hang.
                 switch (method) {
                     case 'confirm':
-                        // Deny — never auto-approve destructive operations.
                         writeChildStdin({
                             type: 'extension_ui_response',
                             id,
@@ -1671,8 +1888,6 @@ async function runSingleAgent(
                     }
                     case 'input':
                     case 'editor':
-                        // rpc mode awaits a reply for these (pendingExtensionRequests);
-                        // cancelling prevents an indefinite hang.
                         writeChildStdin({ type: 'extension_ui_response', id, cancelled: true })
                         debug(`extension_ui: ${method} → cancelled`)
                         break
@@ -1681,7 +1896,6 @@ async function runSingleAgent(
                     case 'setWidget':
                     case 'setTitle':
                     case 'set_editor_text':
-                        // Fire-and-forget methods — rpc mode expects no reply.
                         debug(`extension_ui: ${method} → fire-and-forget`)
                         break
                     default:
@@ -1773,7 +1987,16 @@ async function runSingleAgent(
                     return
                 }
                 if (type === 'extension_ui_request') {
-                    handleExtensionUiRequest(event)
+                    handleExtensionUiRequest(event).catch(err => {
+                        debug(
+                            `extension_ui relay error: ${err instanceof Error ? err.message : String(err)}`
+                        )
+                        writeChildStdin({
+                            type: 'extension_ui_response',
+                            id: event.id,
+                            cancelled: true,
+                        })
+                    })
                     return
                 }
 
@@ -1901,6 +2124,7 @@ async function runSingleAgent(
             // Legitimate long operations (bash tools) still produce stderr
             // progress; true silence means the child is stuck.
             const stallWatchdog = setInterval(() => {
+                if (relayPending) return
                 const silentMs = Date.now() - lastActivityTime
                 if (silentMs >= STALL_TIMEOUT_MS) {
                     debug(
@@ -2098,6 +2322,7 @@ async function handleSubagentsResume(ctx: ExtensionContext, rest: string[]): Pro
     })
     const spawnTimeout = setTimeout(() => deliverEntry(undefined), RESUME_SPAWN_TIMEOUT_MS)
     let failureNotified = false
+    const relayUiRequest = buildRelayUiRequest(ctx)
 
     void runSingleAgent(
         ctx.cwd,
@@ -2111,7 +2336,8 @@ async function handleSubagentsResume(ctx: ExtensionContext, rest: string[]): Pro
         undefined,
         makeDetails,
         resumeTarget,
-        entry => deliverEntry(entry)
+        entry => deliverEntry(entry),
+        relayUiRequest
     ).then(
         () => deliverEntry(undefined),
         err => {
@@ -2715,6 +2941,8 @@ export default function (pi: ExtensionAPI) {
                 }
             }
 
+            const relayUiRequest = buildRelayUiRequest(ctx)
+
             if (params.chain && params.chain.length > 0) {
                 const results: SingleResult[] = []
                 let previousOutput = ''
@@ -2748,7 +2976,10 @@ export default function (pi: ExtensionAPI) {
                         i + 1,
                         signal,
                         chainUpdate,
-                        makeDetails('chain')
+                        makeDetails('chain'),
+                        undefined,
+                        undefined,
+                        relayUiRequest
                     )
                     results.push(result)
 
@@ -2854,7 +3085,10 @@ export default function (pi: ExtensionAPI) {
                                     emitParallelUpdate()
                                 }
                             },
-                            makeDetails('parallel')
+                            makeDetails('parallel'),
+                            undefined,
+                            undefined,
+                            relayUiRequest
                         )
                         allResults[index] = result
                         emitParallelUpdate()
@@ -2912,7 +3146,9 @@ export default function (pi: ExtensionAPI) {
                     signal,
                     onUpdate,
                     makeDetails('single'),
-                    resume
+                    resume,
+                    undefined,
+                    relayUiRequest
                 )
                 const isError = isFailedResult(result)
                 if (isError) {
