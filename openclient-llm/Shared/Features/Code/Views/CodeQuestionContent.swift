@@ -353,6 +353,10 @@ private struct QuestionnaireView: View {
                 answers.removeValue(forKey: questionId)
             } else {
                 answers[questionId] = option.resolvedValue
+                expandedCustom.remove(questionId)
+                if focusedCustom == questionId {
+                    focusedCustom = nil
+                }
             }
         } label: {
             HStack {

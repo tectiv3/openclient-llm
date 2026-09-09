@@ -1223,6 +1223,12 @@ function readSubagentPid(pidPath: string): number | undefined {
 // (.jsonl/.meta/.pid). Refuses ids owned by a live child — this session's
 // registry or another session's live pidfile — and returns the refusal
 // reason; undefined means the artifacts were removed.
+//
+// Not atomic: a concurrent session could resume this id between the
+// isProcessAlive check and the file removal, orphaning the child.
+// Acceptable because resume + delete of the same id requires deliberate
+// user action in two sessions simultaneously, and Node is single-threaded
+// so in-process races are impossible.
 function deletePersistedRunArtifacts(subagentId: string): string | undefined {
     if (activeSubagents.has(subagentId)) {
         return `Refused: ${subagentId.slice(0, LIST_ID_SHORT_CHARS)} is running in this session — abort it first.`
@@ -2182,9 +2188,13 @@ async function openSubagentsManager(ctx: ExtensionContext): Promise<void> {
         let selected = 0
         let message: string | undefined
         let messageIsError = false
+        let cachedRows: ManagerRow[] | undefined
         const hookedProcs = new Set<ChildProcess>()
         const onProcClose = () => {
-            if (!finished) tui.requestRender()
+            if (!finished) {
+                cachedRows = undefined
+                tui.requestRender()
+            }
         }
 
         const finish = (result: ManagerAction | undefined): void => {
@@ -2195,6 +2205,7 @@ async function openSubagentsManager(ctx: ExtensionContext): Promise<void> {
         }
 
         function scanRows(): ManagerRow[] {
+            if (cachedRows) return cachedRows
             const running: ManagerRow[] = [...activeSubagents.values()]
                 .filter(entry => !entry.settled)
                 .sort((a, b) => a.startedAt - b.startedAt)
@@ -2224,7 +2235,8 @@ async function openSubagentsManager(ctx: ExtensionContext): Promise<void> {
                     task: entry.meta!.task,
                     status: deriveSubagentRunStatus(entry.id, entry.meta).status,
                 }))
-            return [...running, ...persisted]
+            cachedRows = [...running, ...persisted]
+            return cachedRows
         }
 
         function rowLine(row: ManagerRow, isSelected: boolean): string {
@@ -2308,6 +2320,7 @@ async function openSubagentsManager(ctx: ExtensionContext): Promise<void> {
         }
 
         function handleInput(data: string): void {
+            cachedRows = undefined
             if (matchesKey(data, Key.escape)) {
                 finish(undefined)
                 return
