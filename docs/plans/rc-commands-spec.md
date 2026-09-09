@@ -135,10 +135,13 @@ spec doc in `docs/plans/`. The parent spec numbered this feature section A8
     `rc.ask()` DOES support signal-based cancel (rc/index.ts:263-270); the only
     cancel path is `cancelPendingAsk` (rc/index.ts:280-290), currently
     reachable from `stop()` (:203), a superseding `ask()` (:238), and the TUI
-    Esc controller (:265, via the ask signal listener). A run-signal abort
-    (phone Stop) now returns `errorResult` via the ask tool's signal-respect
-    (decision 7); the null→local-TUI-prompt fall-through remains ONLY for
-    Esc/toggle-off/disconnect. Replacement blocks on `abort()`→`waitForIdle()`
+    Esc controller (:265, via the ask signal listener). Today a null ask result
+    returns `errorResult` ONLY in non-TUI mode (ask-user-question/index.ts:233-235);
+    TUI mode falls through to the local prompt. Decision 7's ask-tool change
+    adds: null + aborted run signal → `errorResult` in TUI mode too; the
+    null→local-TUI-prompt fall-through then remains ONLY for
+    Esc/toggle-off/disconnect (those abort the ask signal, not the run
+    signal). Replacement blocks on `abort()`→`waitForIdle()`
     (agent-session-runtime.ts:167-176, agent-session.ts:1619-1631), so
     `session_shutdown` with reason `new`/`resume`/`fork` cannot fire while a
     pending ask is live — the round-1 C2 "zombie re-delivery" scenario is
@@ -190,11 +193,13 @@ args, or a `name` empty after trim), `not_ready` (session being replaced / null 
 return this in the replacement window too, replacing the old
 throw→`invalid_message`→drop), `stale_session` (the stashed command ctx was
 invalidated by a non-rc session replacement — the message instructs running
-`/rc` in the terminal), `model_not_found` (set_model ref not in the available
-list), `model_not_set` (pi.setModel returned false — provider auth
-unavailable), `command_failed` (compact cancelled/failed; message carries the
-sanitized/truncated reason) — `command_failed` is ALSO the catch-all
-fallback code for any unexpected error in the `handleCommand` try/catch.
+`/rc` in the terminal), `model_not_found` (set_model ref not found by
+`modelRegistry.find` — full catalog; a catalog model whose provider lacks auth
+instead yields `model_not_set`), `model_not_set` (pi.setModel returned false —
+provider auth unavailable), `command_failed` (compact cancelled/failed;
+message carries the sanitized/truncated reason) — `command_failed` is ALSO
+the catch-all fallback code for any unexpected error in the `handleCommand`
+try/catch.
 
 Note: the live rc code already emits `send_failed` (index.ts:781, 812),
 which is absent from the frozen parent's error-code list (pre-existing
@@ -331,9 +336,12 @@ never dereferenced in that window):
   tool respects its run signal — after the remote ask returns null, if the run
   signal is aborted, return `errorResult('User cancelled the question')`
   instead of falling through to the local TUI prompt. Settles the turn in both
-  TUI and RPC modes. The ask-tool change is TUI-only behavior, not exercisable
-  by the RPC harness — verified by manual smoke (phone Stop while a question is
-  pending in TUI mode → question cleared, turn ends, no local prompt).
+  TUI and RPC modes — RPC already settles today (the non-TUI null path returns
+  the same `errorResult`, ask-user-question/index.ts:233-235), so the change's
+  only new behavior is the TUI aborted-signal branch, which the RPC harness
+  cannot exercise — verify by manual smoke after implementation (phone Stop
+  while a question is pending in TUI mode → question cleared, turn ends, no
+  local prompt).
 - **Null-binding guards**: `handlePrompt`/`handleSteer`/`handleCommand` treat a
   null `state.binding` as `error {code:'not_ready'}` to that client — a clean
   per-client error, replacing the current throw→`invalid_message`→drop in the
@@ -423,9 +431,7 @@ wait, with the IP counter reset by later successful hellos.
    snapshot reflects the new session.
 3. Chained `command new` twice (withSession stash) → both succeed (second sees
    the new session).
-4. `command new` after an RPC `new_session` replacement (non-rc path) →
-   `stale_session` error.
-5. `command set_model` with an available model → subsequent `state` carries the
+4. `command set_model` with an available model → subsequent `state` carries the
    new model; unknown ref → `model_not_found`. (The child runs the real `zai`
    provider with inherited env auth (test-client.mjs:47 `PI_ARGS`, spawn env
    `...process.env` at :2124) and `test-project/` holds no model config — so
@@ -433,35 +439,40 @@ wait, with the IP counter reset by later successful hellos.
    catalogue probe); require ≥ 2 entries, else skip (env-conditioned, same
    convention as the existing four skips); the positive case picks a
    (provider, modelId) different from the current `state.model`.)
-6. Mid-stream compact (success path): seed first — run a couple of natural
+5. Mid-stream compact (success path): seed first — run a couple of natural
    prompt/turn exchanges (the group-12 "Reply with exactly: PING-xN" settle
    pattern) — then start a live run (group-13 long-generation pattern) and
    issue `command compact` while it is streaming → abort tail +
    `session_compact` snapshot; next history includes the compaction entry.
-   (The near-empty compact failure path is a SEPARATE test — item 11.)
-7. `command name` → `state` carries the new `sessionName`; empty name →
+   (The near-empty compact failure path is a SEPARATE test — item 10.)
+6. `command name` → `state` carries the new `sessionName`; empty name →
    `unknown_command` (the overloaded code — same as unknown name / malformed
    args).
-8. Unknown command name → `unknown_command`.
-9. `not_ready` window: explicitly NOT pinned — the black-box window is
+7. Unknown command name → `unknown_command`.
+8. `not_ready` window: explicitly NOT pinned — the black-box window is
    ms-scale and an RPC-replacement + immediate-frame probe is too racy to pin
    deterministically; there is no TS unit harness for rc/index.ts in this repo
    (the harness is black-box WS), so there is no forced-null unit test either;
    covered indirectly by the rebind/`stale_session` tests.
-10. Second `command new` issued while the first is in flight → `not_ready`
-    (item 3 chains sequentially only).
-11. Near-empty `command compact` (no seeded content) → issue `command new`
+9. Second `command new` issued while the first is in flight → `not_ready`
+   (item 3 chains sequentially only).
+10. Near-empty `command compact` (no seeded content) → issue `command new`
     first to get a fresh near-empty session, then `command compact` → assert a
     `command_failed` error frame reaches the client (exercises the
     `reason === "manual"` gate; rc's subscription is live in the harness —
     compact throws "Nothing to compact (session too small)" on a short branch,
     agent-session.ts:1969 → `session_compact_failed`).
-12. `abort` (phone Stop) while a remote question is pending → the harness runs
+11. `abort` (phone Stop) while a remote question is pending → the harness runs
     in RPC mode; assert the client receives `question_resolved {by:'cancelled'}`
-    AND the run settles with the turn ended (the RPC `errorResult` path) (pins
-    the Stop fix, decision 7; use the existing question harness pattern from
-    group 12 / parent spec). The TUI-mode local-prompt-prevention (ask-tool
-    signal-respect) is NOT exercisable by the RPC harness — manual smoke only.
+    AND the run settles with the turn ended (via the pre-existing non-TUI null
+    path, not the new TUI signal-respect branch) (pins the Stop fix, decision
+    7; use the existing question harness pattern from group 12 / parent spec).
+    The TUI-mode local-prompt-prevention (ask-tool signal-respect) is NOT
+    exercisable by the RPC harness — manual smoke only.
+12. `command new` after an RPC `new_session` replacement (non-rc path) →
+    `stale_session` error. Runs LAST in the group: it stale-poisons the
+    child's `commandCtx` (recovery = terminal `/rc`), so every item that needs
+    a working `command new` must run before it.
 
 ### Swift unit tests (run order per parent spec C3)
 
