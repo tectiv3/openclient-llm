@@ -4885,6 +4885,18 @@
         }
       }
     },
+    "Compacting context" : {
+
+    },
+    "Compacting context…" : {
+
+    },
+    "Compaction ended" : {
+
+    },
+    "Compaction failed" : {
+
+    },
     "Compaction summary" : {
 
     },
@@ -25818,6 +25830,9 @@
         }
       }
     },
+    "Stop compaction" : {
+
+    },
     "Stop Recording" : {
       "localizations" : {
         "de" : {
@@ -31527,6 +31542,9 @@
           }
         }
       }
+    },
+    "Type something" : {
+
     },
     "Type something..." : {
 

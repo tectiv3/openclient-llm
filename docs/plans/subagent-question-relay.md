@@ -1,90 +1,96 @@
-# Subagent question relay — state, plan, ideas
+# Subagent question relay
 
-Status: PARKED (APNs push Swift client is the active priority; revisit after it ships).
-Date: 2026-09-06.
+Status: SPEC FINAL, implementation pending.
+Date: 2026-09-09 (supersedes the parked 2026-09-06 Unix-socket draft).
 
-Related: `docs/plans/subagent-persistence.md` — complementary, not alternative.
-Persistence makes aborted/failed runs *recoverable*; this track makes subagents able to
-*ask the user mid-task* (the question tools are still dead in headless children). Both
-touch the same spawn region of `index.ts` — this relay must land AFTER the
-persistence track is fully done, or the two will rebase through each other.
-Model-inheritance open question 1 is resolved by the fork (see "Repo fork" below).
+## Problem
 
-## Goal
+Subagent children run `--mode rpc`. In that mode:
+1. `ask_user_question` tries `rcRemote()` → not serving → skipped.
+2. Falls through to TUI guard → `ctx.mode !== 'tui'` → error "UI not available".
+3. Agent aborts. The question never reaches the user.
 
-Subagents (child pi processes spawned by the subagent extension) get the
-`question`/`questionnaire` tools, but in a headless `--mode json` child there is
-no TUI and usually no RC server — the tools are dead. This feature relays a
-child's question to the **parent session's TUI** and returns the user's answer
-to the child, so a subagent can ask the human mid-task.
+The `extension_ui_request` auto-responder (subagent/index.ts) only covers `ctx.ui.*`
+calls, not the `ask_user_question` tool — two different dead-end paths.
 
-## Current state
+Observed: 2026-09-08, worker run 01a082d3 — question recovered manually from transcript.
 
-The subagent extension is forked into this repo (`pi-extensions/subagent/`) and the
-live symlink repointed here. All three extensions — question, questionnaire, subagent
-— are under one repo, so the relay protocol is fully ours to design (no pi core
-patching, no upstream constraints). The fork copy is the clean pre-relay version; the
-relay is re-added separately with the socket design below.
+## Design
 
-Model inheritance (open question 1 — RESOLVED): the fork **keeps** it —
-`dispatchDefaults.model` is built from `ctx.model` (parent's active model) at
-registration, and the child uses `agent.model ?? dispatchDefaults.model`.
-Observed caveat (live, 2026-09-06): agent model pins that are unresolvable in the
-pi config are **silently ignored** — `scout` pins `claude-haiku-4-5`, which is absent
-from `~/.pi/agent/*.json`, and both live scout runs executed on the config default
-(`lmstudio/qwen3.8-27b`). Unresolved: should an unresolvable pin fall back silently
-(current) or be surfaced as an error?
+Reuse the existing rpc stdio channel (`extension_ui_request` / `extension_ui_response`).
+No new transport, no sockets, no env vars.
 
-## Why stdin cannot work
+### Child side (ask-user-question/index.ts)
 
-- pi's own startup reads piped stdin (all non-RPC modes); a response channel on
-  fd 0 is mutually exclusive with that. Patching pi's `main.ts` to skip
-  `readPipedStdin()` under an env flag is rejected: it means patching
-  npx-managed `node_modules` that disappears on the next pi update (plus a
-  duplicate patch in pi-mono).
-- ⇒ Use a side channel: **Unix domain socket**, path passed via env
-  (`PI_SUBAGENT_RELAY_SOCK`). Zero pi changes, no stdout protocol pollution,
-  no fd 0 involvement.
+When `ctx.mode !== 'tui'` (rpc mode), instead of returning error:
 
-## Proposed design (ideas — not final)
+1. For each question, call `ctx.ui.select(prompt, options)` — pi serializes this as
+   `extension_ui_request {method:'select', title, options}` on stdout and blocks for
+   `extension_ui_response`.
+2. Prefix the prompt with `[agentName] ` for identity (agent name passed via env or
+   derived from the question context).
+3. `allowOther`: append "Type something..." as the last option. If selected, follow up
+   with `ctx.ui.input(prompt)`. Two-step UX, no custom transport needed.
+4. Multi-question: sequential `ctx.ui.select()` calls, one per question.
+5. Cancellation: `ctx.ui.select()` returns `undefined` → return `errorResult('User
+   cancelled the question', questions)`.
+6. Collect all answers, format the same `answerLines` text as the normal path.
 
-- **Parent (subagent extension)**: before each spawn, `fs.mkdtemp` in a tmpdir,
-  `net.createServer()` on `sockPath`, spawn child with `stdio:
-  ["ignore","pipe","pipe"]` + `env: { ..., PI_SUBAGENT_RELAY_SOCK: sockPath }`.
-  On child connect: read NDJSON question, relay to `ctx.ui.select`/`input`
-  (same mapping as the stdio draft), write one response frame back on the same
-  connection, close. On child exit: close server, unlink socket + tmpdir.
-- **Child (question/questionnaire extensions)**: relay path gated on
-  `PI_SUBAGENT_RELAY_SOCK` being set. `net.connect(sockPath)` per question (no
-  persistent-connection bookkeeping), send one JSON frame, await one response
-  frame, close. Failure semantics: ECONNREFUSED / connect timeout (5 s) /
-  response timeout (30 min) → resolve "cancelled or closed" error (subagent
-  proceeds, never hangs).
-- **Protocol**: 1:1 NDJSON request/response per connection —
-  `{"type":"pi_subagent_question", id, kind, question?, options?|questions?}` →
-  `{"type":"pi_subagent_question_response", id, answer, cancelled}`.
-  `id` kept for correlation even though 1:1. No auth (per-user tmpdir, 0700).
-- **Cancellation**: user Escape in the parent UI → `cancelled: true`. Parent
-  session dead / no UI (`ctx.hasUI` false) → immediate `cancelled: true`
-  (keeps the stdio draft's semantics).
-- **v1 scope (open question)**: `question` only, or `question` + `questionnaire`
-  (the stdio draft already maps both, including "Other…" free text).
+### Parent side (subagent/index.ts — handleExtensionUiRequest)
 
-## Open questions (decision log)
+Upgrade from auto-responding to interactive relay. Always-on for `select`, `confirm`,
+and `input` methods — all child extension UI requests get relayed, not just
+ask_user_question.
 
-1. ~~Scope of immediate revert~~ — resolved by the fork (DONE `5c0e921`): live file
-   becomes the repo copy. ~~Does the fork carry model inheritance~~ — resolved:
-   kept (see "Repo fork" above), with the silent-fallback caveat on unresolvable pins.
-2. v1 scope: question only vs question + questionnaire.
-3. Response timeout value (30 min proposed) and whether per-question reconnect
-   is acceptable (proposed: yes).
-4. Where the fork lives (`pi-extensions/subagent/` proposed) and how live
-   question/questionnaire stay synced (plain-file copies today — repoint them
-   to symlinks like subagent/rc, or keep manual copy steps?).
+**Relay priority** (same as parent's own questions):
+1. RC (phone) if `rc.askAvailable()` → translate to `rc.ask()` call → phone renders.
+2. TUI fallback → present via parent's `ctx.ui.select()` / `ctx.ui.confirm()` /
+   `ctx.ui.input()`.
 
-## Parking lot
+**Queueing:** If the parent is mid-stream (`!ctx.isIdle()`), queue the request. Drain
+the queue FIFO when the parent settles (`agent_settled` event). The child stays blocked
+on `ctx.ui.select()` — this is fine because the child produces no other output while
+waiting.
 
-- Model inheritance for subagents (separate feature, uncommitted in pi-mono).
-- Deep links for relayed answers (out of scope: answer goes back to the child,
-  nothing else).
-- Relay for `handoff`/`wait-what` style extensions — none needed today.
+**Stall watchdog:** Pause the watchdog for a child that has a pending relayed question.
+The child is intentionally idle (waiting for user input), not stalled. Resume the
+watchdog when the response is sent back.
+
+**Response flow:**
+- User answers → `writeChildStdin({ type: 'extension_ui_response', id, value })`.
+- User cancels (Esc / phone dismiss) → `writeChildStdin({ type: 'extension_ui_response',
+  id, cancelled: true })`.
+- Run abort → cancel any pending relayed question for that child (same as current
+  abort-with-pending-ask flow).
+
+### Unchanged
+
+- `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text` — fire-and-forget,
+  no relay needed (already handled).
+- `custom` — not supported in rpc mode (`return undefined as never` in pi). No change.
+- `editor` — relay via `ctx.ui.input()` (editor is overkill for relay; input suffices).
+
+## Decisions
+
+1. **Transport:** rpc stdio (extension_ui_request/response). No Unix socket, no new IPC.
+   The old socket design is dropped — the rpc channel already carries these events.
+2. **Multi-question:** Sequential selects, not tabbed UI. Acceptable for relay.
+3. **Relay target:** RC first, TUI fallback (same priority as parent's own questions).
+4. **Interruption:** Queue until parent settles. FIFO drain on agent_settled.
+5. **Identity:** Prefix question text with `[agentName]`.
+6. **allowOther:** Two-step — select with "Type something..." option, then input if chosen.
+7. **Cancellation:** Return 'cancelled' tool result. Subagent decides how to proceed.
+8. **confirm relay:** Yes — relay to user (previously auto-denied).
+9. **Scope:** Always-on for select/confirm/input. No opt-in flag.
+
+## Implementation order
+
+1. Parent: upgrade `handleExtensionUiRequest` — add relay logic, question queue,
+   watchdog pause, FIFO drain on settle.
+2. Child: `ask-user-question/index.ts` — add rpc-mode path using `ctx.ui.select()` /
+   `ctx.ui.input()`.
+3. Test: manual with a subagent that calls ask_user_question. Harness test if feasible
+   (the rpc child can call ctx.ui.select, parent intercepts — testable in group 5 or a
+   new group).
+4. Phone: no Swift changes needed — the RC path uses the existing `rc.ask()` and the
+   phone already renders questions.
