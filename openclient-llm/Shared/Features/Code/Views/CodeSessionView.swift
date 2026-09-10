@@ -22,6 +22,11 @@ struct CodeSessionView: View {
     @State private var isManuallyScrolling: Bool = false
     @State private var scrollEdgeMetrics = ScrollEdgeMetrics()
     @State private var showReconnectSuccess = false
+    @State private var showModelsSheet = false
+    @State private var showNewSessionConfirm = false
+    @State private var showCompactConfirm = false
+    @State private var showRenameAlert = false
+    @State private var renameText = ""
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // MARK: - View
@@ -81,6 +86,10 @@ struct CodeSessionView: View {
             }
 
             ToolbarItem(placement: .automatic) {
+                sessionMenu
+            }
+
+            ToolbarItem(placement: .automatic) {
                 Button {
                     viewModel.send(.disconnect)
                 } label: {
@@ -122,6 +131,55 @@ struct CodeSessionView: View {
             .frame(width: 480, height: 520)
         }
         #endif
+        .sheet(isPresented: $showModelsSheet) {
+            CodeModelsSheetView(
+                models: session.models,
+                selected: session.model,
+                onSelect: { model in
+                    viewModel.send(
+                        .setModel(provider: model.provider, modelId: model.id)
+                    )
+                    showModelsSheet = false
+                }
+            )
+            #if os(macOS)
+            .frame(width: 400, height: 480)
+            #endif
+        }
+        .confirmationDialog(
+            String(localized: "New Session"),
+            isPresented: $showNewSessionConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(String(localized: "New Session"), role: .destructive) {
+                viewModel.send(.newSession)
+            }
+            Button(String(localized: "Cancel"), role: .cancel) {}
+        } message: {
+            Text(newSessionConfirmMessage)
+        }
+        .confirmationDialog(
+            String(localized: "Compact Context"),
+            isPresented: $showCompactConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(String(localized: "Compact"), role: .destructive) {
+                viewModel.send(.compact(instructions: nil))
+            }
+            Button(String(localized: "Cancel"), role: .cancel) {}
+        } message: {
+            Text(compactConfirmMessage)
+        }
+        .alert(
+            String(localized: "Rename Session"),
+            isPresented: $showRenameAlert
+        ) {
+            TextField(String(localized: "Session name"), text: $renameText)
+            Button(String(localized: "Cancel"), role: .cancel) {}
+            Button(String(localized: "Rename")) {
+                handleRenameSubmit()
+            }
+        }
         .animation(
             reduceMotion ? nil : .spring(duration: 0.3),
             value: viewModel.transientToast
@@ -164,6 +222,72 @@ private extension CodeSessionView {
                 }
             }
         )
+    }
+
+    // MARK: - Session Commands
+
+    var sessionMenu: some View {
+        Menu {
+            Button {
+                showNewSessionConfirm = true
+            } label: {
+                Label(String(localized: "New Session"), systemImage: "plus")
+            }
+
+            Button {
+                showModelsSheet = true
+            } label: {
+                Label(
+                    String(localized: "Models"),
+                    systemImage: "brain.head.profile"
+                )
+            }
+
+            // Disabled while a compaction is in flight: the server rejects a
+            // second compact with command_failed ("compact already in progress").
+            Button {
+                showCompactConfirm = true
+            } label: {
+                Label(
+                    String(localized: "Compact"),
+                    systemImage: "line.3.horizontal.decrease.circle"
+                )
+            }
+            .disabled(session.compacting != nil)
+
+            Button {
+                renameText = session.sessionName
+                showRenameAlert = true
+            } label: {
+                Label(String(localized: "Rename"), systemImage: "pencil")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityLabel(String(localized: "Session Options"))
+    }
+
+    var newSessionConfirmMessage: String {
+        session.isStreaming || session.compacting != nil
+            ? String(localized: "The in-flight run will be aborted.")
+            : String(localized: "The current session will be replaced.")
+    }
+
+    var compactConfirmMessage: String {
+        session.isStreaming
+            ? String(localized: "The in-flight run will be aborted before compacting.")
+            : String(localized: "Summarize the transcript to free context space.")
+    }
+
+    func handleRenameSubmit() {
+        let name = renameText.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        showRenameAlert = false
+        // Client-side reject: an empty/whitespace name sends no frame.
+        guard !name.isEmpty else { return }
+        viewModel.send(.rename(name: name))
     }
 
     // MARK: - Question Modal (iOS card)

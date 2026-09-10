@@ -30,7 +30,7 @@ struct CodeCompacting: Equatable, Sendable, Codable {
     let willRetry: Bool?
 }
 
-struct CodeModelInfo: Equatable, Sendable, Codable {
+struct CodeModelInfo: Equatable, Hashable, Sendable, Codable {
     let provider: String
     let id: String
 

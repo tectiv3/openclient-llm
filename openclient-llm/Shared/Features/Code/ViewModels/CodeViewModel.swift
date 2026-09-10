@@ -61,6 +61,7 @@ final class CodeViewModel {
     struct SessionState: Equatable {
         var sessionId: String = ""
         var cwd: String = ""
+        var sessionName: String = ""
         var model: CodeModelInfo?
         var models: [CodeModelInfo] = []
         var isStreaming: Bool = false
@@ -474,6 +475,8 @@ extension CodeViewModel {
 
         session.sessionId = info.sessionId
         session.cwd = info.cwd
+        // nil means unnamed: reset (the state frame is authoritative)
+        session.sessionName = info.sessionName ?? ""
         session.model = info.model
         if let models = info.models {
             session.models = models

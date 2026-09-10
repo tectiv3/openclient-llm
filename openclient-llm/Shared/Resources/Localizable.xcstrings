@@ -4758,6 +4758,12 @@
     "Command failed" : {
 
     },
+    "Compact" : {
+
+    },
+    "Compact Context" : {
+
+    },
     "comments" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -11963,6 +11969,9 @@
         }
       }
     },
+    "New Session" : {
+
+    },
     "http://localhost:4000" : {
       "comment" : "A placeholder URL for the server URL field.",
       "localizations" : {
@@ -17198,6 +17207,9 @@
         }
       }
     },
+    "No models available" : {
+
+    },
     "No pinned conversations" : {
       "comment" : "A message displayed when the user has no pinned conversations.",
       "localizations" : {
@@ -21929,6 +21941,9 @@
         }
       }
     },
+    "Rename Session" : {
+
+    },
     "Report Issue" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -24141,7 +24156,13 @@
     "Server-side MCP tools handled by LM Studio. Register servers in LM Studio's mcp.json first." : {
 
     },
+    "Session Options" : {
+
+    },
     "Session loading, try again shortly" : {
+
+    },
+    "Session name" : {
 
     },
     "Session replaced — run /rc in terminal" : {
@@ -24938,6 +24959,9 @@
           }
         }
       }
+    },
+    "Switch the session to this model" : {
+
     },
     "sk-..." : {
       "comment" : "A placeholder for the API key field.",
@@ -26436,6 +26460,9 @@
         }
       }
     },
+    "Summarize the transcript to free context space." : {
+
+    },
     "Summarizer" : {
       "comment" : "Name of a prompt template that summarizes text.",
       "localizations" : {
@@ -27084,6 +27111,15 @@
           }
         }
       }
+    },
+    "The current session will be replaced." : {
+
+    },
+    "The in-flight run will be aborted before compacting." : {
+
+    },
+    "The in-flight run will be aborted." : {
+
     },
     "tag.audio" : {
       "comment" : "Label for the audio input capability.",
