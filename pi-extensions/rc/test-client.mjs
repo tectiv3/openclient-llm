@@ -1804,6 +1804,13 @@ registerTest(14, "command_new_streaming", async (ctx) => {
     );
     const turnEnd = events.find((m) => m?.type === "event" && m.name === "turn_end");
     check(turnEnd !== undefined, "must see turn_end (aborted-run tail) before the new session");
+    // stopReason is informational only (sometimes absent, like the group-4/5
+    // abort tests); turn_end-before-new-session is the real pin.
+    const stopReason = turnEnd.message?.stopReason;
+    check(
+      stopReason === undefined || stopReason === "aborted",
+      `stopReason, when present, must be aborted, got ${JSON.stringify(stopReason)}`,
+    );
     const newState = events.at(-1);
     assertValidStateShape(newState);
     check(newState.sessionId !== oldId, "sessionId must change");
@@ -1863,12 +1870,19 @@ registerTest(14, "command_set_model", async (ctx) => {
     );
     check(other !== undefined, "must find a model different from current");
     ws.send(JSON.stringify({ type: "command", command: "set_model", provider: other.provider, modelId: other.id }));
-    const state = await waitForMessage(
+    // Single read, dual outcome: the new-model state OR a model_not_set error.
+    // The picked provider may lack configured auth in this env; the spec treats
+    // that as infeasible in the harness, so the error is a skip, not a hang.
+    const outcome = await readMessages(
       next,
-      (m) => m?.type === "state" && m.model?.id === other.id && m.model?.provider === other.provider,
+      (m) => (m?.type === "state" && m.model?.id === other.id && m.model?.provider === other.provider) || (m?.type === "error" && m.code === "model_not_set"),
       15_000,
-      "state with new model after set_model",
+      "set_model outcome (new-model state or model_not_set)",
     );
+    if (outcome.some((m) => m?.type === "error" && m.code === "model_not_set")) {
+      throw skip("set_model returned model_not_set — provider auth not configured in this env");
+    }
+    const state = outcome.at(-1);
     assertValidStateShape(state);
     ctx.lastState = state;
   });
@@ -1887,18 +1901,54 @@ registerTest(14, "command_set_model_not_found", async (ctx) => {
   });
 });
 
-// T5: command compact (seeded session).
+// T5: mid-stream command compact (spec item 5): seed, start a live LONG
+// run, and issue compact while it is streaming. AgentSession.compact's
+// first line is await this.abort() (agent-session.ts:2641-2649), so the
+// aborted-run tail (turn_end) lands on this stream strictly BEFORE the
+// session_before_compact state broadcast, then the compacting window,
+// then the completion snapshot (state + history with the compaction entry).
 registerTest(14, "command_compact_seeded", async (ctx) => {
   await withConnection(ctx, async ({ ws, next }) => {
-    // Seed the session with enough content for compaction.
+    // Seed the session with enough content for compaction (group-12 settle
+    // pattern; test-project settings lower keepRecentTokens so two short
+    // exchanges give a cut point).
     for (const marker of ["RC-CMD-SEED-14a", "RC-CMD-SEED-14b"]) {
       ws.send(JSON.stringify({ type: "prompt", text: `Reply with exactly: ${marker}` }));
       await waitForEventByName(next, "agent_settled", 60_000);
     }
+    // Start a live run: LONG makes the model generate 1..400
+    // (test-project/AGENTS.md), so the run is streaming when compact lands.
+    ws.send(JSON.stringify({ type: "prompt", text: "LONG" }));
+    await waitForEventByName(next, "message_update", 45_000);
+    // Issue compact mid-stream. The command is fire-and-forget (no ack);
+    // every side effect arrives as a broadcast frame on this stream.
     ws.send(JSON.stringify({ type: "command", command: "compact" }));
-    // Compaction is fire-and-forget; the side effect arrives via
-    // session_before_compact (state with compacting) → session_compact
-    // (state + history snapshot).
+    // (a) Aborted-run tail + (b) in-flight window: read until the
+    // session_before_compact state broadcast; the LONG run's turn_end must
+    // already be in the captured window (compact aborts the run first, so
+    // turn_end strictly precedes the compacting state).
+    const window = await readMessages(
+      next,
+      (m) => m?.type === "state" && m.compacting !== undefined,
+      120_000,
+      "state with compacting (mid-stream compact window)",
+    );
+    const turnEnd = window.find((m) => m?.type === "event" && m.name === "turn_end");
+    check(turnEnd !== undefined, "must see turn_end (aborted-run tail) before the compacting state");
+    // stopReason is informational only (sometimes absent, like the group-4/5
+    // abort tests); the tail-before-window ordering is the real pin.
+    const stopReason = turnEnd.message?.stopReason;
+    check(
+      stopReason === undefined || stopReason === "aborted",
+      `stopReason, when present, must be aborted, got ${JSON.stringify(stopReason)}`,
+    );
+    const compactingState = window.at(-1);
+    check(
+      compactingState.compacting?.reason === "manual",
+      `compacting.reason must be manual, got ${JSON.stringify(compactingState.compacting)}`,
+    );
+    // (c) Completion: state WITHOUT compacting, then the history snapshot
+    // carrying the compaction entry (group-15 pattern).
     const doneState = await waitForMessage(
       next,
       (m) => m?.type === "state" && m.compacting === undefined,
@@ -1906,12 +1956,12 @@ registerTest(14, "command_compact_seeded", async (ctx) => {
       "state without compacting (compact done)",
     );
     assertValidStateShape(doneState);
-    // History snapshot includes the compaction entry.
     const history = await waitForMessage(next, (m) => m?.type === "history", 10_000, "history after compact");
     check(
       (history.messages ?? []).some((m) => m?.role === "compaction"),
       "history must contain a role:compaction entry after compact command",
     );
+    // (d) Leave the group's shared state fresh for later tests.
     ctx.lastState = doneState;
   });
 }, { timeout: 180_000 });
