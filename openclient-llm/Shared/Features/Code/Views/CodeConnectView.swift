@@ -73,9 +73,9 @@ struct CodeConnectView: View {
                 portText = form.port > 0 ? "\(form.port)" : "47800"
                 didSyncPort = true
             }
-            if form.hasSavedHost {
+            if form.errorMessage != nil && form.code.isEmpty {
                 focusedField = .code
-            } else {
+            } else if !form.hasSavedHost {
                 focusedField = .host
             }
         }
@@ -107,16 +107,34 @@ private extension CodeConnectView {
 
     var repeatConnectLayout: some View {
         VStack(spacing: 16) {
-            Text(String(localized: "Enter the 6-digit code shown in pi"))
-                .font(.subheadline)
+            Text(form.host)
+                .font(.title3)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
 
-            codeField
+            if !form.recentConnections.isEmpty {
+                recentConnectionsSection
+            }
+
+            // The pairing code is optional: it is only requested after a
+            // failed attempt set an error message.
+            if form.errorMessage != nil {
+                Text(String(localized: "Enter the 6-digit code shown in pi"))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                codeField
+            }
         }
     }
 
     var firstTimeLayout: some View {
         VStack(spacing: 12) {
+            if !form.recentConnections.isEmpty {
+                recentConnectionsSection
+            }
+
             TextField(
                 String(localized: "Host (e.g. mac.ts.net)"),
                 text: $form.host
@@ -139,8 +157,62 @@ private extension CodeConnectView {
             #endif
                 .focused($focusedField, equals: .port)
 
-            codeField
+            if form.errorMessage != nil {
+                codeField
+            }
         }
+    }
+
+    /// Quick-pick of recent hosts, shown in both the repeat and the
+    /// change-host layouts.
+    var recentConnectionsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(String(localized: "Recent connections"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(spacing: 8) {
+                ForEach(form.recentConnections, id: \.self) { connection in
+                    recentConnectionRow(connection)
+                }
+            }
+        }
+    }
+
+    func recentConnectionRow(_ connection: CodeRecentConnection) -> some View {
+        let isSelected = connection.host == form.host
+
+        return Button {
+            if form.host != connection.host {
+                // The pairing code belongs to the previous host.
+                form.code = ""
+            }
+            form.host = connection.host
+            portText = String(connection.port)
+            focusedField = nil
+        } label: {
+            HStack(spacing: 8) {
+                Text(connection.host)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 8)
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.appAccent)
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
+        .accessibilityLabel(connection.host)
+        .accessibilityHint(String(localized: "Connects to this host"))
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     var codeField: some View {
@@ -188,7 +260,6 @@ private extension CodeConnectView {
         return !form.host.isEmpty
             && portValue > 0
             && portValue <= 65535
-            && form.code.count == 6
     }
 
     var isRateLimited: Bool {
@@ -223,7 +294,30 @@ private extension CodeConnectView {
 
 #Preview("Repeat") {
     CodeConnectView(
-        form: .constant(.init(host: "mac.ts.net", port: 47800, hasSavedHost: true))
+        form: .constant(.init(
+            host: "mac.ts.net",
+            port: 47800,
+            hasSavedHost: true,
+            recentConnections: [
+                CodeRecentConnection(host: "mac.ts.net", port: 47800),
+                CodeRecentConnection(host: "pi-mini.ts.net", port: 47800),
+            ]
+        ))
+    ) { _, _, _ in }
+}
+
+#Preview("Repeat Error") {
+    CodeConnectView(
+        form: .constant(.init(
+            host: "mac.ts.net",
+            port: 47800,
+            errorMessage: "Invalid code — check the code shown in pi",
+            hasSavedHost: true,
+            recentConnections: [
+                CodeRecentConnection(host: "mac.ts.net", port: 47800),
+                CodeRecentConnection(host: "pi-mini.ts.net", port: 47800),
+            ]
+        ))
     ) { _, _, _ in }
 }
 
@@ -253,6 +347,20 @@ private extension CodeConnectView {
             errorMessage: "Too many attempts — wait 60s",
             hasSavedHost: true,
             rateLimitedUntil: .now.addingTimeInterval(45)
+        ))
+    ) { _, _, _ in }
+}
+
+#Preview("Recent Connections") {
+    CodeConnectView(
+        form: .constant(.init(
+            host: "mac.ts.net",
+            port: 47800,
+            recentConnections: [
+                CodeRecentConnection(host: "mac.ts.net", port: 47800),
+                CodeRecentConnection(host: "pi-mini.ts.net", port: 47800),
+                CodeRecentConnection(host: "10.0.0.42", port: 47801),
+            ]
         ))
     ) { _, _, _ in }
 }

@@ -217,11 +217,34 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
 
     var codeHost: String?
     var codePort: Int = 47800
+    var codeRecentConnections: [CodeRecentConnection] = []
 
-    func getCodeHost() -> String? { codeHost }
-    func setCodeHost(_ value: String?) { codeHost = value }
-    func getCodePort() -> Int { codePort }
-    func setCodePort(_ value: Int) { codePort = value }
+    func getCodeHost() -> String? {
+        codeHost
+    }
+
+    func setCodeHost(_ value: String?) {
+        codeHost = value
+    }
+
+    func getCodePort() -> Int {
+        codePort
+    }
+
+    func setCodePort(_ value: Int) {
+        codePort = value
+    }
+
+    func getCodeRecentConnections() -> [CodeRecentConnection] {
+        codeRecentConnections
+    }
+
+    func recordCodeRecentConnection(host: String, port: Int) {
+        codeRecentConnections = CodeRecentConnection.upsert(
+            CodeRecentConnection(host: host, port: port),
+            into: codeRecentConnections
+        )
+    }
 
     func deleteAll() {
         isOnboardingCompleted = false
@@ -232,6 +255,7 @@ final class MockSettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         selectedSTTModelId = nil
         ttsVoices = [:]
         hasEnoughConversationsForMemoryTip = false
+        codeRecentConnections = []
         deleteAllCalled = true
     }
 }

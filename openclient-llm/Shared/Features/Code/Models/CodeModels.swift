@@ -274,6 +274,32 @@ struct CodeServerError: Equatable, Sendable, Codable {
     let message: String?
 }
 
+// MARK: - Recent Connections
+
+/// A previously used pi remote-control host/port pair, offered as a
+/// quick-pick above the connect form fields.
+struct CodeRecentConnection: Equatable, Hashable, Codable, Sendable {
+    let host: String
+    let port: Int
+
+    /// Most-recently-used upsert shared by the real store and test doubles:
+    /// rejects empty hosts, moves a matching entry to the front (updating
+    /// its port when it changed), prepends new entries, and drops overflow
+    /// past `cap`.
+    static func upsert(
+        _ connection: CodeRecentConnection,
+        into list: [CodeRecentConnection],
+        cap: Int = 5
+    ) -> [CodeRecentConnection] {
+        guard !connection.host.isEmpty else { return list }
+        var updated = [connection] + list.filter { $0.host != connection.host }
+        if updated.count > cap {
+            updated = Array(updated.prefix(cap))
+        }
+        return updated
+    }
+}
+
 // MARK: - Stream Events
 
 struct CodeStreamEvent: Equatable, Sendable, Codable {

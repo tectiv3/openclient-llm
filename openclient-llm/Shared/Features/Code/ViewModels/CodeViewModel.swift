@@ -55,6 +55,7 @@ final class CodeViewModel {
         /// When a rate_limited error is received, the date the pairing-code
         /// lockout (fixed 60s per spec A7) lifts, so the UI can show a countdown.
         var rateLimitedUntil: Date?
+        var recentConnections: [CodeRecentConnection] = []
     }
 
     struct SessionState: Equatable {
@@ -164,7 +165,8 @@ final class CodeViewModel {
         connectForm = ConnectForm(
             host: host,
             port: port > 0 ? port : 47800,
-            hasSavedHost: hasSaved
+            hasSavedHost: hasSaved,
+            recentConnections: settingsManager.getCodeRecentConnections()
         )
         state = .disconnected
         // nil client → build the real one; its reconnect hellos carry the
@@ -248,6 +250,7 @@ private extension CodeViewModel {
         isAutoConnectAttempt = false
         settingsManager.setCodeHost(host)
         settingsManager.setCodePort(port)
+        settingsManager.recordCodeRecentConnection(host: host, port: port)
         lastConnect = ConnectCredentials(
             host: host, port: port, code: code
         )
@@ -636,7 +639,8 @@ extension CodeViewModel {
             host: host,
             port: port > 0 ? port : 47800,
             errorMessage: errorMessage,
-            hasSavedHost: !host.isEmpty
+            hasSavedHost: !host.isEmpty,
+            recentConnections: settingsManager.getCodeRecentConnections()
         )
     }
 }

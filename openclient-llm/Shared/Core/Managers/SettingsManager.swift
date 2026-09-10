@@ -57,6 +57,8 @@ protocol SettingsManagerProtocol: Sendable {
     func setCodeHost(_ value: String?)
     func getCodePort() -> Int
     func setCodePort(_ value: Int)
+    func getCodeRecentConnections() -> [CodeRecentConnection]
+    func recordCodeRecentConnection(host: String, port: Int)
     func deleteAll()
 }
 
@@ -87,6 +89,7 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         static let capabilityOverrides = "capabilityOverrides"
         static let codeHost = "codeHost"
         static let codePort = "codePort"
+        static let codeRecentConnections = "codeRecentConnections"
 
         static func ttsVoiceKey(forModelId modelId: String) -> String {
             "tts_voice_\(modelId)"
@@ -214,7 +217,8 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
 
     func getAvailableSearchTools() -> [SearchToolItem] {
         guard let data = defaults.data(forKey: Keys.availableSearchTools),
-              let tools = try? JSONDecoder().decode([SearchToolItem].self, from: data) else {
+              let tools = try? JSONDecoder().decode([SearchToolItem].self, from: data)
+        else {
             return []
         }
         return tools
@@ -260,7 +264,8 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
 
     func getServerType() -> ServerType {
         guard let raw = defaults.string(forKey: Keys.serverType),
-              let type = ServerType(rawValue: raw) else {
+              let type = ServerType(rawValue: raw)
+        else {
             return .liteLLM
         }
         return type
@@ -272,7 +277,8 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
 
     func getGlobalMCPIntegrations() -> [MCPIntegration] {
         guard let data = defaults.data(forKey: Keys.globalMCPIntegrations),
-              let integrations = try? JSONDecoder().decode([MCPIntegration].self, from: data) else {
+              let integrations = try? JSONDecoder().decode([MCPIntegration].self, from: data)
+        else {
             return []
         }
         return integrations
@@ -302,7 +308,8 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
 
     func getCapabilityOverrides(forModelId modelId: String) -> [String]? {
         guard let data = defaults.data(forKey: Keys.capabilityOverrides),
-              let dict = try? JSONDecoder().decode([String: [String]].self, from: data) else {
+              let dict = try? JSONDecoder().decode([String: [String]].self, from: data)
+        else {
             return nil
         }
         return dict[modelId]
@@ -311,7 +318,8 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
     func setCapabilityOverrides(_ capabilities: [String]?, forModelId modelId: String) {
         var dict: [String: [String]] = [:]
         if let data = defaults.data(forKey: Keys.capabilityOverrides),
-           let existing = try? JSONDecoder().decode([String: [String]].self, from: data) {
+           let existing = try? JSONDecoder().decode([String: [String]].self, from: data)
+        {
             dict = existing
         }
         dict[modelId] = capabilities
@@ -337,6 +345,26 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.set(value, forKey: Keys.codePort)
     }
 
+    func getCodeRecentConnections() -> [CodeRecentConnection] {
+        guard let data = defaults.data(forKey: Keys.codeRecentConnections),
+              let connections = try? JSONDecoder().decode(
+                  [CodeRecentConnection].self, from: data
+              )
+        else {
+            return []
+        }
+        return connections
+    }
+
+    func recordCodeRecentConnection(host: String, port: Int) {
+        let updated = CodeRecentConnection.upsert(
+            CodeRecentConnection(host: host, port: port),
+            into: getCodeRecentConnections()
+        )
+        guard let data = try? JSONEncoder().encode(updated) else { return }
+        defaults.set(data, forKey: Keys.codeRecentConnections)
+    }
+
     func deleteAll() {
         defaults.removeObject(forKey: Keys.isOnboardingCompleted)
         defaults.removeObject(forKey: Keys.selectedModelId)
@@ -359,6 +387,7 @@ final class SettingsManager: SettingsManagerProtocol, @unchecked Sendable {
         defaults.removeObject(forKey: Keys.capabilityOverrides)
         defaults.removeObject(forKey: Keys.codeHost)
         defaults.removeObject(forKey: Keys.codePort)
+        defaults.removeObject(forKey: Keys.codeRecentConnections)
         defaults.removeObject(forKey: LegacyKeys.serverBaseURL)
         defaults.removeObject(forKey: LegacyKeys.apiKey)
         keychainManager.deleteAll()
