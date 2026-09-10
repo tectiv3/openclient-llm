@@ -879,6 +879,11 @@ async function handleCommand(
         }
     } catch (error) {
         const msg = errorMessage(error)
+        // Pin: text-match on pi 0.85.1's ExtensionRunner.invalidate() message
+        // ("...ctx is stale after..."); no error type is exposed, so the word
+        // 'stale' is the only seam — if pi rewords it, this silently falls to
+        // command_failed below. Group-14 command_new_stale_after_rpc_replacement
+        // pins the mapped code.
         if (msg.includes('stale')) {
             writeJson(client, {
                 type: 'error',

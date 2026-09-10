@@ -196,10 +196,14 @@ invalidated by a non-rc session replacement — the message instructs running
 `/rc` in the terminal), `model_not_found` (set_model ref not found by
 `modelRegistry.find` — full catalog; a catalog model whose provider lacks auth
 instead yields `model_not_set`), `model_not_set` (pi.setModel returned false —
-provider auth unavailable), `command_failed` (compact cancelled/failed;
-message carries the sanitized/truncated reason) — `command_failed` is ALSO
-the catch-all fallback code for any unexpected error in the `handleCommand`
-try/catch.
+provider auth unavailable), `command_failed` (catch-all fallback for any
+unexpected error in the `handleCommand` try/catch; message carries the
+sanitized/truncated reason). NOTE: a `compact` failure never reaches this
+path — `ctx.compact` is fire-and-forget (its rejection goes to an absent
+`options.onError`); pi surfaces the failure as a `session_compact_failed`
+event, which the server broadcasts as `error {code:'compaction_failed'}` to
+ALL clients (skipped when aborted — user Stop). The command sender therefore
+observes compact failure via the broadcast, not via a per-command frame.
 
 Note: the live rc code already emits `send_failed` (index.ts:781, 812),
 which is absent from the frozen parent's error-code list (pre-existing
