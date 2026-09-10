@@ -357,10 +357,17 @@ private extension CodeSessionView {
                 )
 
             VStack(spacing: 2) {
-                Text(truncatedCwd)
+                Text(session.sessionName.isEmpty ? truncatedCwd : session.sessionName)
                     .font(.subheadline)
                     .fontWeight(.medium)
                     .lineLimit(1)
+
+                if !session.sessionName.isEmpty {
+                    Text(truncatedCwd)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
 
                 if let model = session.model {
                     Text(model.name)
@@ -500,8 +507,8 @@ private extension CodeSessionView {
                 .font(.title3)
                 .fontWeight(.semibold)
 
-            if !session.cwd.isEmpty {
-                Text(truncatedCwd)
+            if !session.sessionName.isEmpty || !session.cwd.isEmpty {
+                Text(session.sessionName.isEmpty ? truncatedCwd : session.sessionName)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }

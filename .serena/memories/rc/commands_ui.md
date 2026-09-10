@@ -6,7 +6,7 @@ the impl plan (`docs/plans/rc-commands-impl.md`, Notes) deliberately deferred it
 the four ViewModel command events (`.newSession` / `.setModel` / `.compact` / `.rename`)
 were unreachable dead code in the app.
 
-Fixed 2026-09-10 (commit a5ee04f):
+Fixed 2026-09-10 (commit 1e114ac):
 - `CodeSessionView` toolbar: ellipsis "Session Options" menu — New Session, Models,
   Compact (disabled while `session.compacting`), Rename.
 - Confirmation dialogs (destructive) for New Session + Compact; copy adapts to
