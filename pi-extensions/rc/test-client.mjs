@@ -1845,6 +1845,18 @@ registerTest(14, "command_set_model", async (ctx) => {
     if (!Array.isArray(models) || models.length < 2) {
       throw skip("fewer than 2 models in catalog — cannot test set_model positive path");
     }
+    // Mapping pin: every entry must be a real (provider, id) pair — the scoped
+    // catalog is nested in pi, and a broken mapping degrades to "unknown" rows.
+    for (const [i, m] of models.entries()) {
+      check(
+        nonEmptyString(m?.provider) && m.provider !== "unknown",
+        `models[${i}].provider must be a non-empty real provider`,
+      );
+      check(
+        nonEmptyString(m?.id) && m.id !== "unknown",
+        `models[${i}].id must be a non-empty real model id`,
+      );
+    }
     const current = ctx.lastState?.model;
     const other = models.find(
       (m) => m.provider !== current?.provider || m.id !== current?.id,

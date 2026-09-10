@@ -907,11 +907,18 @@ async function handleCommandNew(state: RcSingleton, client: RcClient): Promise<v
     }
     commandInFlight = true
     try {
-        await cmdCtx.newSession({
+        const result = await cmdCtx.newSession({
             withSession: fresh => {
                 state.commandCtx = fresh
             },
         })
+        if (isObject(result) && result.cancelled === true) {
+            writeJson(client, {
+                type: 'error',
+                code: 'command_failed',
+                message: 'New session cancelled before it could run',
+            })
+        }
     } finally {
         commandInFlight = false
     }
@@ -979,14 +986,23 @@ function buildState(state: RcSingleton): JsonObject {
         scopedModels.length > 0
             ? scopedModels
             : safeArray(ctx?.modelRegistry?.getAvailable?.())
-    const models = catalogModels.filter(isObject).map(m => ({
-        provider:
-            stringFrom(m.provider) ??
-            stringFrom(m.providerId) ??
-            stringFrom(m.providerName) ??
-            'unknown',
-        id: stringFrom(m.id) ?? stringFrom(m.model) ?? stringFrom(m.name) ?? 'unknown',
-    }))
+    const models = catalogModels.filter(isObject).map(m => {
+        // Scoped entries are nested ({model, thinkingLevel?}); the unscoped
+        // catalog is flat ModelInfo — un-nest so both shapes map correctly.
+        const inner = isObject(m.model) ? m.model : m
+        return {
+            provider:
+                stringFrom(inner.provider) ??
+                stringFrom(inner.providerId) ??
+                stringFrom(inner.providerName) ??
+                'unknown',
+            id:
+                stringFrom(inner.id) ??
+                stringFrom(inner.model) ??
+                stringFrom(inner.name) ??
+                'unknown',
+        }
+    })
     return {
         type: 'state',
         sessionId: sessionId(state),
