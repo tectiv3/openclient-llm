@@ -4755,6 +4755,9 @@
         }
       }
     },
+    "Command failed" : {
+
+    },
     "comments" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -5375,6 +5378,9 @@
           }
         }
       }
+    },
+    "Connects to this host" : {
+
     },
     "Context compacted" : {
 
@@ -15362,6 +15368,9 @@
         }
       }
     },
+    "Model not found" : {
+
+    },
     "Model Parameters" : {
       "comment" : "A title for a view that allows the user to configure the parameters of a chat model.",
       "localizations" : {
@@ -15426,6 +15435,9 @@
           }
         }
       }
+    },
+    "Model unavailable (no provider auth)" : {
+
     },
     "Models" : {
       "localizations" : {
@@ -21185,6 +21197,9 @@
         }
       }
     },
+    "Recent connections" : {
+
+    },
     "Recent Conversations" : {
       "comment" : "Title of the widget.",
       "localizations" : {
@@ -24124,6 +24139,12 @@
       }
     },
     "Server-side MCP tools handled by LM Studio. Register servers in LM Studio's mcp.json first." : {
+
+    },
+    "Session loading, try again shortly" : {
+
+    },
+    "Session replaced — run /rc in terminal" : {
 
     },
     "Set instructions for the assistant's behavior in this conversation." : {
@@ -31806,6 +31827,9 @@
           }
         }
       }
+    },
+    "Unknown command" : {
+
     },
     "Unpin" : {
       "comment" : "A label for un-pinning a conversation.",

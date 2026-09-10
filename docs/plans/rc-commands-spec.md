@@ -203,7 +203,9 @@ path — `ctx.compact` is fire-and-forget (its rejection goes to an absent
 `options.onError`); pi surfaces the failure as a `session_compact_failed`
 event, which the server broadcasts as `error {code:'compaction_failed'}` to
 ALL clients (skipped when aborted — user Stop). The command sender therefore
-observes compact failure via the broadcast, not via a per-command frame.
+observes compact failure via the broadcast, not via a per-command frame (a
+second compact issued while one is in flight is a separate REJECTION path,
+see the compact design note).
 
 Note: the live rc code already emits `send_failed` (index.ts:781, 812),
 which is absent from the frozen parent's error-code list (pre-existing
@@ -295,7 +297,12 @@ never dereferenced in that window):
 - `compact`: `state.binding.ctx.compact(instructions ? { customInstructions:
   instructions } : undefined)` — verified fact 4. Fire-and-forget: completion is
   observed via the `session_compact`/`session_compact_failed` events, not a
-  return value.
+  return value. Double-compact gate (dispatch, 2026-09-10): a second `compact`
+  arriving while `state.compacting` is set is REJECTED with a per-command
+  `command_failed` frame (`"compact already in progress"`) — the in-flight
+  compaction is unaffected; a genuine compaction failure still surfaces only
+  via the `session_compact_failed` broadcast (see the corrected error table
+  above).
 - `name`: `state.binding.pi.setSessionName(trimmedName)` — verified fact 6:
   server trims and rejects empty after trim, applies NO cap of its own; the
   normalization (`[\r\n]+` → single space + trim, no whitespace collapsing)

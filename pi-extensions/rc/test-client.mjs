@@ -1966,6 +1966,73 @@ registerTest(14, "command_compact_seeded", async (ctx) => {
   });
 }, { timeout: 180_000 });
 
+// T5b: second compact while the first is in flight → per-command REJECTION.
+// Mirror of T5's seeding, but idle: the child's probe extension
+// (test-project/rc-compact-probe.ts) sleeps ~3 s on the compaction
+// SUMMARIZATION request (marker-based), so the window is guaranteed open
+// when the second compact lands; the gate must reject it with
+// command_failed "compact already in progress" while the FIRST compact
+// still completes normally (genuine failures stay on the broadcast path).
+registerTest(14, "command_compact_rejected_while_in_flight", async (ctx) => {
+  await withConnection(ctx, async ({ ws, next }) => {
+    // withConnection verified the handshake (hello_ok) and read the connect
+    // burst (state + history) into ctx.lastState — same base as T5.
+    const initialId = ctx.lastState?.sessionId;
+    check(nonEmptyString(initialId), "no initial sessionId");
+    // Seed the session with enough content for compaction (T5's seeding
+    // pattern; after T5's compaction entry the branch needs new messages
+    // before pi compacts again — "Already compacted" otherwise).
+    for (const marker of ["RC-CMD-SEED-14c", "RC-CMD-SEED-14d"]) {
+      ws.send(JSON.stringify({ type: "prompt", text: `Reply with exactly: ${marker}` }));
+      await waitForEventByName(next, "agent_settled", 60_000);
+    }
+    // (a) First compact (idle, fire-and-forget like T5). Window-open signal:
+    // the session_before_compact state broadcast carries compacting.
+    ws.send(JSON.stringify({ type: "command", command: "compact" }));
+    const compactingState = await waitForMessage(
+      next,
+      (m) => m?.type === "state" && m.compacting !== undefined,
+      10_000,
+      "state with compacting (first compact window)",
+    );
+    check(
+      compactingState.compacting?.reason === "manual",
+      `compacting.reason must be manual, got ${JSON.stringify(compactingState.compacting)}`,
+    );
+    // (b) Second compact while the window is open → the gate's per-command
+    // REJECTION (distinct from a real failure, which broadcasts
+    // compaction_failed to ALL clients instead).
+    ws.send(JSON.stringify({ type: "command", command: "compact" }));
+    const rejection = await waitForMessage(
+      next,
+      (m) => m?.type === "error" && m.code === "command_failed",
+      10_000,
+      "command_failed rejection for the second compact",
+    );
+    check(
+      typeof rejection.message === "string" && rejection.message.includes("in progress"),
+      `rejection must say compact is in progress, got ${JSON.stringify(rejection)}`,
+    );
+    // (c) First compact completes normally: state WITHOUT compacting (the
+    // completion snapshot), then the history page with the compaction entry.
+    const doneState = await waitForMessage(
+      next,
+      (m) => m?.type === "state" && m.compacting === undefined,
+      120_000,
+      "state without compacting (first compact done)",
+    );
+    assertValidStateShape(doneState);
+    check(doneState.sessionId === initialId, "compact must not change the sessionId");
+    const history = await waitForMessage(next, (m) => m?.type === "history", 10_000, "history after compact");
+    check(
+      (history.messages ?? []).some((m) => m?.role === "compaction"),
+      "history must contain a role:compaction entry after compact command",
+    );
+    // Leave the group's shared state fresh for later tests.
+    ctx.lastState = doneState;
+  });
+}, { timeout: 180_000 });
+
 // T6: command name + empty name rejection.
 registerTest(14, "command_name", async (ctx) => {
   await withConnection(ctx, async ({ ws, next }) => {

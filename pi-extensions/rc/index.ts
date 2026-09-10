@@ -869,6 +869,17 @@ async function handleCommand(
                 await handleCommandSetModel(state, client, binding, message)
                 break
             case 'compact':
+                // A second ctx.compact would queue a second summarization pass on the
+                // same branch — reject while the compacting window is open. A genuine
+                // failure still surfaces via the session_compact_failed broadcast.
+                if (state.compacting) {
+                    writeJson(client, {
+                        type: 'error',
+                        code: 'command_failed',
+                        message: 'compact already in progress',
+                    })
+                    break
+                }
                 handleCommandCompact(binding, message)
                 break
             case 'name':
