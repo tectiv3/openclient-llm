@@ -82,8 +82,10 @@ Shared business logic: `openclient-llm/Shared/`, referenced by both app targets.
 | Directory | Purpose |
 |---|---|
 | `rc/` | Remote control — WebSocket server + APNs push for mobile companion access to a pi session. |
-| `subagent/` | Subagent tool — delegates tasks to specialized agents with isolated context (single, parallel, chain modes). |
-| `ask-user-question/` | Structured question tool — single- and multi-question prompts with typed answers (tabbed per-question pages, `allowOther` "Type something" option). |
+
+The `subagent` and `ask-user-question` extensions live in the separate `pi-extensions` repo
+(GitHub `tectiv3/pi-extensions`; local checkout `~/code/pi-extensions`) — moved out 2026-09-11
+because they have no coupling to the iOS app.
 
 These run inside the pi process (Node/Bun). The Swift app's `Features/Code/` is the mobile client for `rc`.
 

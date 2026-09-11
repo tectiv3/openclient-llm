@@ -1,14 +1,10 @@
-rc/apns.ts(*): error TS2339: Property 'reason' does not exist on type 'KeyValidation'.
-rc/apns.ts(*): error TS2339: Property 'reason' does not exist on type 'KeyValidation'.
-rc/apns.ts(*): error TS2339: Property 'request' does not exist on type 'Http2Session'.
-rc/index.ts(*): error TS2322: Type 'unknown' is not assignable to type 'string'.
-rc/index.ts(*): error TS2339: Property 'authenticated' does not exist on type 'unknown'.
-rc/index.ts(*): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
-rc/index.ts(*): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
-rc/index.ts(*): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
-rc/index.ts(*): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
-rc/push-setup.ts(*): error TS2339: Property 'reason' does not exist on type 'KeyValidation'.
-subagent/index.ts(*): error TS2322: Type 'string' is not assignable to type 'ThinkingLevel'.
-subagent/index.ts(*): error TS2339: Property 'agent' does not exist on type 'unknown'.
-subagent/index.ts(*): error TS2339: Property 'cwd' does not exist on type 'unknown'.
-subagent/index.ts(*): error TS2339: Property 'task' does not exist on type 'unknown'.
+rc/apns.ts(374,63): error TS2339: Property 'reason' does not exist on type 'KeyValidation'.
+rc/apns.ts(375,56): error TS2339: Property 'reason' does not exist on type 'KeyValidation'.
+rc/apns.ts(435,24): error TS2339: Property 'request' does not exist on type 'Http2Session'.
+rc/index.ts(223,78): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
+rc/index.ts(239,29): error TS2339: Property 'authenticated' does not exist on type 'unknown'.
+rc/index.ts(240,32): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
+rc/index.ts(240,68): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
+rc/index.ts(672,5): error TS2322: Type 'unknown' is not assignable to type 'string'.
+rc/index.ts(673,21): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+rc/push-setup.ts(101,51): error TS2339: Property 'reason' does not exist on type 'KeyValidation'.
