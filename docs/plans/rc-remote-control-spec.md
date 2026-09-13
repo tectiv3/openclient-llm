@@ -218,7 +218,8 @@ Location: `pi-extensions/rc/` in this repo; symlink `~/.pi/agent/extensions/rc` 
 - `pi-extensions/rc/index.ts` — extension factory:
   - `pi.registerCommand("rc")` — **toggle** (no arguments):
     - If server is off → start it:
-      - Get Tailscale IPv4 (`tailscale ip -4` — take first line, trim whitespace),
+      - Resolve Tailscale IPv4 from local interfaces (`os.networkInterfaces()`, IPv4 in
+        `100.64.0.0/10`, prefer `utun*`),
         bind `node:http` + WS upgrade on `ws://<ip>:47800` (plain WebSocket, no TLS).
       - Generate fresh 6-digit decimal code (random, in-memory only — not persisted). Digits only so it is trivial to enter on a phone keypad.
       - Print in TUI: `ctx.ui.notify` + footer status
@@ -891,10 +892,11 @@ Automated Node.js script with assertions and exit codes (not manual "check" step
   `{"type":"prompt","message":"/rc"}` (response `{success:true}` only — the
   handler return value is NOT surfaced).
 - **Test seams** (env-gated, diagnostic-only, never active in production use):
-  - `PI_RC_BIND` — bind address override. Default resolution: `tailscale` on
-    PATH, then the CLI bundled in the macOS app
-    (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`), then fail with a
-    clear message (never `0.0.0.0`). Harness uses `127.0.0.1`.
+  - `PI_RC_BIND` — bind address override. Default resolution: first IPv4 in
+    `100.64.0.0/10` from `os.networkInterfaces()` (prefer `utun*`), then fail with
+    a clear message (never `0.0.0.0`). Harness uses `127.0.0.1`.
+    No subprocess: the macOS app's CLI is an App Sandbox binary and SIGTRAPs in
+    `libsecinit_appsandbox` when spawned from a seatbelt-sandboxed pi process.
   - `PI_RC_AUTH_FILE` — path to a status file the extension rewrites on every
     state change: `{"status":"running","host","port","code","ts"}` or
     `{"status":"stopped","reason","detail","ts"}`. Written ONLY when this env
@@ -1069,9 +1071,10 @@ completed task (linter and formatter run on commit hook); never push to remote.
   the single largest implementation risk. All three must be tested in the probe.
 - `contextUsage` availability: may be null right after compaction — treat as
   optional in UI.
-- Tailscale IPv4 lookup: `tailscale ip -4` must be on PATH in the pi process env;
-  may return multiple IPs — take first line, trim. Fail with a clear message if
-  not available (safety decision, no fallback to `0.0.0.0`).
+- Tailscale IPv4 lookup: scan `os.networkInterfaces()` for an IPv4 in
+  `100.64.0.0/10` (Tailscale's CGNAT range), preferring `utun*`; works inside a
+  seatbelt sandbox where shelling out to the Tailscale CLI does not. Fail with a
+  clear message if not available (safety decision, no fallback to `0.0.0.0`).
 - 6-digit decimal code = 20 bits: acceptable as a tailnet pairing code with
   rate-limiting (5 attempts per IP per 60 s). Digits-only for easy phone entry.
   Generated fresh per `/rc` toggle-on (ephemeral). Document that tailnet membership

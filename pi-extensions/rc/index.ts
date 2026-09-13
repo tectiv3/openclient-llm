@@ -1,8 +1,8 @@
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
+import { networkInterfaces } from 'node:os'
 import { dirname } from 'node:path'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
-import { execFileSync } from 'node:child_process'
 import type {
     ExtensionAPI,
     ExtensionCommandContext,
@@ -1392,34 +1392,25 @@ function sessionName(state: RcSingleton): string | undefined {
     return managerName ?? undefined
 }
 
-const TAILSCALE_BINS = ['tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale']
-
-function tailscaleIp4(bin: string): string | null {
-    const output = execFileSync(bin, ['ip', '-4'], { encoding: 'utf8' })
-    return (
-        output
-            .split('\n')
-            .map(line => line.trim())
-            .find(Boolean) ?? null
-    )
-}
-
 function resolveBindHost(): string {
     const override = process.env.PI_RC_BIND?.trim()
     if (override) return override
-    let lastError: unknown = null
-    for (const bin of TAILSCALE_BINS) {
-        try {
-            const host = tailscaleIp4(bin)
-            if (host) return host
-            lastError = new Error(`${bin} ip -4 returned no IPv4 address`)
-        } catch (error) {
-            lastError = error
+    const candidates: { name: string; address: string }[] = []
+    for (const [name, infos] of Object.entries(networkInterfaces())) {
+        if (!infos) continue
+        for (const info of infos) {
+            if (info.family !== 'IPv4') continue
+            // Tailscale assigns addresses from the CGNAT range 100.64.0.0/10.
+            const [first, second] = info.address.split('.').map(Number)
+            if (first === 100 && second >= 64 && second <= 127) {
+                candidates.push({ name, address: info.address })
+            }
         }
     }
-    const detail = lastError instanceof Error ? lastError.message : String(lastError)
+    const match = candidates.find(c => c.name.startsWith('utun')) ?? candidates[0]
+    if (match) return match.address
     throw new Error(
-        `could not determine tailnet IP: ${detail} (is Tailscale running? set PI_RC_BIND to override)`
+        'could not determine tailnet IP: no IPv4 address in 100.64.0.0/10 found on any interface (is Tailscale running? set PI_RC_BIND to override)'
     )
 }
 
