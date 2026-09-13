@@ -49,7 +49,10 @@ struct HomeView: View {
             CodeViewModel.shared = codeViewModel
             if CodeViewModel.pendingNotificationTap {
                 CodeViewModel.pendingNotificationTap = false
-                codeViewModel.send(.notificationTapped)
+                codeViewModel.handleNotificationTap(
+                    sessionId: CodeViewModel.pendingNotificationTapSessionId
+                )
+                CodeViewModel.pendingNotificationTapSessionId = nil
             }
         }
         .onDisappear {

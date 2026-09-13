@@ -60,7 +60,6 @@ struct CodeView: View {
                     failedView(errorMessage)
                 }
             }
-            .navigationTitle(String(localized: "Code"))
             .onAppear {
                 viewModel.send(.viewAppeared)
             }

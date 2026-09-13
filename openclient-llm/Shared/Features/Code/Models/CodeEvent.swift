@@ -17,6 +17,8 @@ enum CodeEvent: Sendable {
     case streamingBuffer(sessionId: String, content: [CodeContentBlock])
     case question(CodeQuestion)
     case questionResolved(CodeQuestionResolved)
+    case sessions([SessionInfo])
+    case sessionGone(id: String)
     case pong
     case error(CodeServerError)
     case connectionLost
@@ -30,7 +32,7 @@ enum CodeEvent: Sendable {
 
 extension CodeEvent: Decodable {
     private enum CodingKeys: String, CodingKey {
-        case type, version, sessionId, content
+        case type, version, sessionId, content, sessions, id
     }
 
     init(from decoder: Decoder) throws {
@@ -70,6 +72,16 @@ extension CodeEvent: Decodable {
         case "question_resolved":
             let resolved = try CodeQuestionResolved(from: decoder)
             self = .questionResolved(resolved)
+
+        case "sessions":
+            let list = try container.decode(
+                [SessionInfo].self, forKey: .sessions
+            )
+            self = .sessions(list)
+
+        case "session_gone":
+            let id = try container.decode(String.self, forKey: .id)
+            self = .sessionGone(id: id)
 
         case "pong":
             self = .pong

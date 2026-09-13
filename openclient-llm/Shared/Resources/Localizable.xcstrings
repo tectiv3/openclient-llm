@@ -113,6 +113,16 @@
     "%@:" : {
 
     },
+    "%@/%@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@/%2$@"
+          }
+        }
+      }
+    },
     "%@%@" : {
       "localizations" : {
         "en" : {
@@ -1826,6 +1836,9 @@
           }
         }
       }
+    },
+    "anchor" : {
+
     },
     "Anonymous" : {
       "extractionState" : "stale",
@@ -4758,12 +4771,6 @@
     "Command failed" : {
 
     },
-    "Compact" : {
-
-    },
-    "Compact Context" : {
-
-    },
     "comments" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -4893,6 +4900,15 @@
           }
         }
       }
+    },
+    "Compact" : {
+
+    },
+    "Compact Context" : {
+
+    },
+    "compacting" : {
+
     },
     "Compacting context" : {
 
@@ -5248,6 +5264,9 @@
 
     },
     "Connected to pi" : {
+
+    },
+    "Connecting to session…" : {
 
     },
     "Connecting..." : {
@@ -6680,6 +6699,9 @@
           }
         }
       }
+    },
+    "currently selected" : {
+
     },
     "Custom" : {
       "comment" : "A section title for the user's custom prompt templates.",
@@ -11969,9 +11991,6 @@
         }
       }
     },
-    "New Session" : {
-
-    },
     "http://localhost:4000" : {
       "comment" : "A placeholder URL for the server URL field.",
       "localizations" : {
@@ -16224,6 +16243,9 @@
           }
         }
       }
+    },
+    "New Session" : {
+
     },
     "New suggestion" : {
       "extractionState" : "stale",
@@ -21006,6 +21028,9 @@
         }
       }
     },
+    "question" : {
+
+    },
     "Question" : {
 
     },
@@ -24156,16 +24181,22 @@
     "Server-side MCP tools handled by LM Studio. Register servers in LM Studio's mcp.json first." : {
 
     },
-    "Session Options" : {
-
-    },
     "Session loading, try again shortly" : {
 
     },
     "Session name" : {
 
     },
+    "Session no longer exists" : {
+
+    },
+    "Session Options" : {
+
+    },
     "Session replaced — run /rc in terminal" : {
+
+    },
+    "Sessions" : {
 
     },
     "Set instructions for the assistant's behavior in this conversation." : {
@@ -24959,9 +24990,6 @@
           }
         }
       }
-    },
-    "Switch the session to this model" : {
-
     },
     "sk-..." : {
       "comment" : "A placeholder for the API key field.",
@@ -25942,6 +25970,9 @@
         }
       }
     },
+    "streaming" : {
+
+    },
     "Submit" : {
       "localizations" : {
         "de" : {
@@ -26723,6 +26754,12 @@
         }
       }
     },
+    "Switch the session to this model" : {
+
+    },
+    "Switch the view to this session" : {
+
+    },
     "Sync" : {
       "comment" : "A heading for the sync settings.",
       "localizations" : {
@@ -27111,15 +27148,6 @@
           }
         }
       }
-    },
-    "The current session will be replaced." : {
-
-    },
-    "The in-flight run will be aborted before compacting." : {
-
-    },
-    "The in-flight run will be aborted." : {
-
     },
     "tag.audio" : {
       "comment" : "Label for the audio input capability.",
@@ -29125,6 +29153,15 @@
           }
         }
       }
+    },
+    "The current session will be replaced." : {
+
+    },
+    "The in-flight run will be aborted before compacting." : {
+
+    },
+    "The in-flight run will be aborted." : {
+
     },
     "The latest message and its attachments exceed this context window. Increase the context window or shorten the message." : {
       "comment" : "Error message when the latest message and its attachments exceed the context window.",

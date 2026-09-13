@@ -105,22 +105,29 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     func userNotificationCenter(
         _: UNUserNotificationCenter,
-        didReceive _: UNNotificationResponse,
+        didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        // The payload carries no deep-link data. Per the RC push spec the
-        // tap always initiates a reconnect via `lastConnect` — the plain
-        // foregrounding pass would not reconnect after reconnect burn-out
-        // (VM state `.failed` with `backgroundDisconnected == false`).
-        // HomeView forwards the tap to the Code VM when it appears, covering
-        // cold launches where no VM exists yet.
+        // Deep link (multi-session rc spec): the custom `sessionId` payload
+        // key (added server-side alongside `aps`) resolves the tapped pi
+        // session at tap time; it is absent on legacy payloads, so a plain
+        // reconnect. The tap also bypasses the foregrounding pass's guards,
+        // which would not reconnect after reconnect burn-out (VM state
+        // `.failed` with `backgroundDisconnected == false`).
+        let sessionId =
+            response.notification.request.content.userInfo["sessionId"]
+                as? String
+
         if let viewModel = CodeViewModel.shared {
-            viewModel.send(.notificationTapped)
+            viewModel.handleNotificationTap(sessionId: sessionId)
         } else {
             // Cold launch: no VM yet. HomeView forwards the pending tap to
             // the fresh VM it creates (where it is a safe no-op: the
-            // in-memory `lastConnect` is gone after a process death).
+            // in-memory `lastConnect` is gone after a process death, so a
+            // `sessionId` cannot select anything — the tap only
+            // re-establishes the connection, the documented default).
             CodeViewModel.pendingNotificationTap = true
+            CodeViewModel.pendingNotificationTapSessionId = sessionId
         }
         completionHandler()
     }

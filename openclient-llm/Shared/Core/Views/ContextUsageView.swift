@@ -13,15 +13,19 @@ struct ContextUsageView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 4) { usageText }
+            // Compact gauge: the meter is the instrument, the numbers are
+            // its readout — one row instead of a caption stacked above a bar,
+            // so it composes with a header above it instead of competing.
+            HStack(spacing: 8) {
+                ProgressView(value: Double(usage.percentage), total: 100)
+                    .tint(tint)
+                    .controlSize(.mini)
+
                 usageText
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
-            ProgressView(value: Double(usage.percentage), total: 100)
-                .tint(tint)
-                .controlSize(.mini)
+            .monospacedDigit()
             if usage.compactedMessageCount > 0 || usage.excludedMessageCount > 0 || usage.isLatestTurnOverBudget {
                 Text(statusText)
                     .font(.caption2)
@@ -37,10 +41,12 @@ struct ContextUsageView: View {
 private extension ContextUsageView {
     @ViewBuilder
     var usageText: some View {
-        Text(String(localized: "Estimated context"))
         Text(usage.formattedUsage)
+            .lineLimit(1)
         Text("·")
+            .lineLimit(1)
         Text(Double(usage.percentage) / 100, format: .percent)
+            .lineLimit(1)
     }
 
     var statusText: String {
@@ -75,11 +81,31 @@ private extension ContextUsageView {
     }
 }
 
-#Preview {
+#Preview("Gauge — 74% (orange)") {
     ContextUsageView(
         usage: ContextUsage(
-            estimatedInputTokens: 7_200,
-            maxInputTokens: 8_192,
+            estimatedInputTokens: 94225,
+            maxInputTokens: 128_000
+        )
+    )
+    .padding()
+}
+
+#Preview("Gauge — low (secondary)") {
+    ContextUsageView(
+        usage: ContextUsage(
+            estimatedInputTokens: 20000,
+            maxInputTokens: 128_000
+        )
+    )
+    .padding()
+}
+
+#Preview("Gauge — over budget status line") {
+    ContextUsageView(
+        usage: ContextUsage(
+            estimatedInputTokens: 7200,
+            maxInputTokens: 8192,
             excludedMessageCount: 2,
             compactedMessageCount: 14
         )

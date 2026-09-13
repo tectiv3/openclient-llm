@@ -88,6 +88,7 @@ enum CodeClientMessage: Sendable {
     case ping
     case pushToken(token: String)
     case command(command: String, args: [String: AnyCodableValue] = [:])
+    case selectSession(id: String)
 }
 
 // MARK: - Implementation
@@ -577,6 +578,10 @@ private extension CodeServerClient {
             for (key, value) in args {
                 dict[key] = value
             }
+
+        case let .selectSession(id):
+            dict["type"] = .string("select_session")
+            dict["id"] = .string(id)
         }
 
         return try? encoder.encode(dict)

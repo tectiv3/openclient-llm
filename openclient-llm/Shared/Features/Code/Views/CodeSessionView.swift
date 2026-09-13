@@ -23,6 +23,7 @@ struct CodeSessionView: View {
     @State private var scrollEdgeMetrics = ScrollEdgeMetrics()
     @State private var showReconnectSuccess = false
     @State private var showModelsSheet = false
+    @State private var showSessionsSheet = false
     @State private var showNewSessionConfirm = false
     @State private var showCompactConfirm = false
     @State private var showRenameAlert = false
@@ -39,6 +40,8 @@ struct CodeSessionView: View {
                 reconnectedBanner
                     .transition(.opacity)
             }
+
+            identityHeader
 
             // Standalone condition on purpose: reconnecting and compacting
             // are independent states and both banners can coexist.
@@ -81,12 +84,21 @@ struct CodeSessionView: View {
                 )
             }
 
-            ToolbarItem(placement: .principal) {
-                headerContent
+            ToolbarItem(placement: .navigation) {
+                statusDot
+                    .accessibilityLabel(
+                        isReconnecting
+                            ? String(localized: "Reconnecting")
+                            : String(localized: "Connected")
+                    )
             }
 
             ToolbarItem(placement: .automatic) {
                 sessionMenu
+            }
+
+            ToolbarItem(placement: .automatic) {
+                sessionsButton
             }
 
             ToolbarItem(placement: .automatic) {
@@ -144,6 +156,19 @@ struct CodeSessionView: View {
             )
             #if os(macOS)
             .frame(width: 400, height: 480)
+            #endif
+        }
+        .sheet(isPresented: $showSessionsSheet) {
+            CodeSessionsSheetView(
+                sessions: viewModel.sessions,
+                effectiveSelectedId: effectiveSelectedId,
+                onSelect: { id in
+                    viewModel.selectSession(id: id)
+                    showSessionsSheet = false
+                }
+            )
+            #if os(macOS)
+            .frame(width: 420, height: 420)
             #endif
         }
         .confirmationDialog(
@@ -213,17 +238,6 @@ struct CodeSessionView: View {
 // MARK: - Private
 
 private extension CodeSessionView {
-    var pendingQuestion: Binding<CodeViewModel.PendingQuestion?> {
-        Binding(
-            get: { session.pendingQuestion },
-            set: { newValue in
-                if newValue == nil {
-                    viewModel.send(.abort)
-                }
-            }
-        )
-    }
-
     // MARK: - Session Commands
 
     var sessionMenu: some View {
@@ -268,16 +282,37 @@ private extension CodeSessionView {
         .accessibilityLabel(String(localized: "Session Options"))
     }
 
-    var newSessionConfirmMessage: String {
-        session.isStreaming || session.compacting != nil
-            ? String(localized: "The in-flight run will be aborted.")
-            : String(localized: "The current session will be replaced.")
+    /// Toolbar "sessions" affordance (multi-session rc, spec Decision 10).
+    /// Shown only while connected; disabled while the anchor has not
+    /// broadcast a session list yet (`sessions` frames), so a single-session
+    /// box sees an inert icon rather than an empty sheet.
+    var sessionsButton: some View {
+        Button {
+            showSessionsSheet = true
+        } label: {
+            Image(systemName: "square.stack.3d.up")
+                .overlay(alignment: .topTrailing) {
+                    if viewModel.sessions.count > 1 {
+                        Text("\(viewModel.sessions.count)")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(3)
+                            .background(Color.appAccent, in: .circle)
+                            .offset(x: 6, y: -6)
+                    }
+                }
+        }
+        .disabled(viewModel.sessions.isEmpty)
+        .accessibilityLabel(String(localized: "Sessions"))
     }
 
-    var compactConfirmMessage: String {
-        session.isStreaming
-            ? String(localized: "The in-flight run will be aborted before compacting.")
-            : String(localized: "Summarize the transcript to free context space.")
+    /// Row the sheet should mark: the explicit selection, or the anchor row
+    /// (the effective view when nothing is selected). `nil` → no mark.
+    var effectiveSelectedId: String? {
+        if let selectedId = viewModel.selectedId {
+            return selectedId
+        }
+        return viewModel.sessions.first(where: { $0.isAnchor })?.id
     }
 
     func handleRenameSubmit() {
@@ -288,249 +323,6 @@ private extension CodeSessionView {
         // Client-side reject: an empty/whitespace name sends no frame.
         guard !name.isEmpty else { return }
         viewModel.send(.rename(name: name))
-    }
-
-    // MARK: - Question Modal (iOS card)
-
-    @ViewBuilder
-    var questionCardOverlay: some View {
-        if let question = session.pendingQuestion {
-            ZStack {
-                Color.black.opacity(0.4)
-                    .ignoresSafeArea()
-                CodeQuestionCardView(
-                    question: question,
-                    onAnswer: { id, answers in
-                        viewModel.send(.answer(id: id, answers: answers))
-                    },
-                    onDismiss: {
-                        viewModel.send(.abort)
-                    }
-                )
-                .padding(24)
-            }
-        }
-    }
-
-    var contextUsage: ContextUsage? {
-        guard let usage = session.contextUsage else { return nil }
-        return ContextUsage(
-            estimatedInputTokens: usage.tokens,
-            maxInputTokens: usage.contextWindow
-        )
-    }
-
-    var scrollContentTrigger: Int {
-        guard let last = session.items.last else { return 0 }
-        switch last {
-        case let .assistant(id, content, _):
-            var hasher = Hasher()
-            hasher.combine(id)
-            for block in content {
-                switch block {
-                case let .text(text): hasher.combine(text.count)
-                case let .thinking(text): hasher.combine(text.count)
-                case let .toolUse(tcId, _, _, _): hasher.combine(tcId)
-                case .unknown: break
-                }
-            }
-            return hasher.finalize()
-        case let .toolStep(id, _, _, _, output, _):
-            var hasher = Hasher()
-            hasher.combine(id)
-            hasher.combine(output?.count)
-            return hasher.finalize()
-        default:
-            return last.id.hashValue
-        }
-    }
-
-    // MARK: - Header
-
-    var headerContent: some View {
-        HStack(spacing: 8) {
-            statusDot
-                .accessibilityLabel(
-                    isReconnecting
-                        ? String(localized: "Reconnecting")
-                        : String(localized: "Connected")
-                )
-
-            VStack(spacing: 2) {
-                Text(session.sessionName.isEmpty ? truncatedCwd : session.sessionName)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
-
-                if !session.sessionName.isEmpty {
-                    Text(truncatedCwd)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                if let model = session.model {
-                    Text(model.name)
-                        .font(.caption2)
-                        .lineLimit(1)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 2)
-                        .glassEffect(.regular, in: .capsule)
-                }
-            }
-        }
-    }
-
-    var statusDot: some View {
-        Circle()
-            .fill(isReconnecting ? Color.orange : Color.green)
-            .frame(width: 8, height: 8)
-    }
-
-    var truncatedCwd: String {
-        let components = session.cwd.split(separator: "/")
-        if components.count <= 2 {
-            return session.cwd.isEmpty
-                ? String(localized: "Connected")
-                : session.cwd
-        }
-        let last2 = components.suffix(2).joined(separator: "/")
-        return "~/\(last2)"
-    }
-
-    // MARK: - Reconnecting
-
-    var reconnectingBanner: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
-            Text(String(localized: "Reconnecting..."))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .glassEffect(
-            .regular.tint(.orange.opacity(0.3)),
-            in: .rect(cornerRadius: 12)
-        )
-        .padding(.horizontal, 16)
-        .padding(.top, 4)
-    }
-
-    var reconnectedBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.green)
-            Text(String(localized: "Reconnected"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .glassEffect(
-            .regular.tint(.green.opacity(0.3)),
-            in: .rect(cornerRadius: 12)
-        )
-        .padding(.horizontal, 16)
-        .padding(.top, 4)
-    }
-
-    // MARK: - Compacting
-
-    var compactingBanner: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text(String(localized: "Compacting context…"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(String(localized: "Compacting context"))
-
-            Spacer()
-
-            Button {
-                viewModel.send(.abort)
-            } label: {
-                Image(systemName: "stop.fill")
-                    .font(.body)
-                    .foregroundStyle(.red)
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(String(localized: "Stop compaction"))
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .glassEffect(
-            .regular.tint(.orange.opacity(0.3)),
-            in: .rect(cornerRadius: 12)
-        )
-        .padding(.horizontal, 16)
-        .padding(.top, 4)
-    }
-
-    // MARK: - Toast
-
-    func toastView(_ message: String) -> some View {
-        Text(message)
-            .font(.subheadline)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .glassEffect(.regular, in: .capsule)
-            .padding(.top, 8)
-            .transition(.move(edge: .top).combined(with: .opacity))
-            .onAppear {
-                // Announce to VoiceOver: transient toast that appears and dismisses
-                AccessibilityNotification.Announcement(message).post()
-            }
-    }
-
-    // MARK: - Empty State
-
-    var emptyState: some View {
-        VStack(spacing: 16) {
-            Spacer()
-
-            Image(systemName: "chevron.left.forwardslash.chevron.right")
-                .font(.system(size: 32))
-                .foregroundStyle(Color.appAccent)
-                .frame(width: 64, height: 64)
-                .glassEffect(.regular, in: .circle)
-
-            Text(String(localized: "Connected to pi"))
-                .font(.title3)
-                .fontWeight(.semibold)
-
-            if !session.sessionName.isEmpty || !session.cwd.isEmpty {
-                Text(session.sessionName.isEmpty ? truncatedCwd : session.sessionName)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-
-            if let model = session.model {
-                Text(model.name)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 4)
-                    .glassEffect(.regular, in: .capsule)
-            }
-
-            Text(String(localized: "Send a message or use pi directly — activity will appear here."))
-                .font(.subheadline)
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 40)
-
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Transcript
@@ -627,17 +419,40 @@ private extension CodeSessionView {
     }
 }
 
-#Preview {
+private func previewSession(
+    name: String = "",
+    tokens: Int = 94225
+) -> CodeViewModel.SessionState {
+    var session = CodeViewModel.SessionState(
+        sessionId: "test",
+        cwd: "/Users/fenrir/code/openclient-llm",
+        model: CodeModelInfo(
+            provider: "zai",
+            id: "qwen3.8-27b"
+        )
+    )
+    if !name.isEmpty {
+        session.sessionName = name
+    }
+    session.contextUsage = CodeContextUsage(
+        tokens: tokens, contextWindow: 128_000, percent: Double(tokens) / 128_000
+    )
+    return session
+}
+
+#Preview("Header — cwd (orange gauge)") {
     NavigationStack {
         CodeSessionView(
-            session: .init(
-                sessionId: "test",
-                cwd: "/Users/dev/code/myproject",
-                model: CodeModelInfo(
-                    provider: "anthropic",
-                    id: "claude-sonnet-5"
-                )
-            ),
+            session: previewSession(),
+            viewModel: CodeViewModel()
+        )
+    }
+}
+
+#Preview("Header — named session (low usage)") {
+    NavigationStack {
+        CodeSessionView(
+            session: previewSession(name: "openclient-llm", tokens: 20000),
             viewModel: CodeViewModel()
         )
     }

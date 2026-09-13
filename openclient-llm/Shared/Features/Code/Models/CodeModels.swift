@@ -45,6 +45,26 @@ struct CodeContextUsage: Equatable, Sendable, Codable {
     let percent: Double
 }
 
+// MARK: - Sessions List
+
+/// One pi session served by the box's rc anchor, as broadcast in a
+/// `sessions` frame. `id` is the stable registry identity that
+/// `select_session` targets; `sessionId` is the live pi session id (changes
+/// on in-process `/new`). Optional fields decode to nil when the key is
+/// absent or null, so one malformed badge cannot fail the whole frame.
+struct SessionInfo: Equatable, Sendable, Codable {
+    let id: String
+    let sessionId: String
+    let cwd: String
+    let name: String?
+    let model: CodeModelInfo?
+    let isStreaming: Bool
+    let hasQuestion: Bool
+    let compacting: Bool
+    let lastActivity: String?
+    let isAnchor: Bool
+}
+
 // MARK: - History
 
 struct CodeHistory: Equatable, Sendable, Codable {

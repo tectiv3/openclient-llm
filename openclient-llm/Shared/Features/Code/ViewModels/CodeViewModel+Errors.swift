@@ -32,6 +32,9 @@ extension CodeViewModel {
             transientToast = error.message
                 ?? String(localized: "Session replaced — run /rc in terminal")
 
+        case "session_not_found":
+            handleSessionNotFound()
+
         case "model_not_found":
             transientToast = error.message
                 ?? String(localized: "Model not found")

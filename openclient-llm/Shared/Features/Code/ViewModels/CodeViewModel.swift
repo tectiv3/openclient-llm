@@ -58,24 +58,6 @@ final class CodeViewModel {
         var recentConnections: [CodeRecentConnection] = []
     }
 
-    struct SessionState: Equatable {
-        var sessionId: String = ""
-        var cwd: String = ""
-        var sessionName: String = ""
-        var model: CodeModelInfo?
-        var models: [CodeModelInfo] = []
-        var isStreaming: Bool = false
-        var compacting: CodeCompacting?
-        var contextUsage: CodeContextUsage?
-        var items: [CodeTranscriptItem] = []
-        var pendingQuestion: PendingQuestion?
-    }
-
-    struct PendingQuestion: Equatable, Identifiable {
-        let id: String
-        let params: CodeQuestionParams
-    }
-
     /// Last-used connect credentials, retained in-memory because the pairing
     /// code is ephemeral (not persisted) and needed for auto-reconnect.
     struct ConnectCredentials: Equatable {
@@ -96,6 +78,12 @@ final class CodeViewModel {
     @MainActor
     static var pendingNotificationTap = false
 
+    /// Deep-link `sessionId` (custom payload key, multi-session rc spec)
+    /// carried by the pending tap above; nil on legacy payloads. HomeView
+    /// forwards both and clears both.
+    @MainActor
+    static var pendingNotificationTapSessionId: String?
+
     private(set) var state: State
 
     private(set) var client: CodeServerClientProtocol
@@ -115,14 +103,12 @@ final class CodeViewModel {
     var backgroundDisconnected = false
 
     /// True while the in-flight connection was auto-initiated from
-    /// `viewAppeared` (push-token auth). WHY: lets auth failures
-    /// distinguish "server no longer knows this device's token" from a
-    /// user-typed bad pairing code, so the former can fail silently.
+    /// `viewAppeared` (push-token auth): auth failures fail silently, unlike
+    /// a user-typed bad pairing code.
     private(set) var isAutoConnectAttempt = false
 
-    /// WHY: bounds auto-connect to one attempt per ViewModel lifetime —
-    /// a failed auto attempt or a user-initiated disconnect must not be
-    /// silently retried when the tab re-appears.
+    /// WHY: bounds auto-connect to one attempt per ViewModel lifetime — no
+    /// silent retry when the tab re-appears.
     private(set) var autoConnectSuppressed = false
 
     /// Question id that already produced a local notification, keeping the
@@ -139,6 +125,22 @@ final class CodeViewModel {
     /// because the server never rejects them not_idle. Shared with the
     /// CodeViewModel+Messages extension (agent_start clears the list).
     var pendingPromptEchoes: [UUID] = []
+
+    /// Sessions list from the anchor (`sessions` frames); empty = today's UX.
+    var sessions: [SessionInfo] = []
+
+    /// Registry `id` of the selected session; `nil` = default anchor view.
+    var selectedId: String?
+
+    /// Target pi session id of the in-flight select; its `state` frame is the ack.
+    var pendingSelectSessionId: String?
+
+    /// Two-phase 10 s select watchdog (toast at 10 s, silent clear at 20 s).
+    var selectTimeoutTask: Task<Void, Never>?
+
+    /// Testability seam (spec §Wire protocol): tests shorten the two-phase
+    /// select watchdog. Class-level like `isBackgrounded` (not the extension).
+    var selectTimeoutSeconds: TimeInterval = 10
 
     /// Testability seam: production reads UIApplication state on every call;
     /// tests override this to simulate backgrounding without UIApplication.
@@ -193,54 +195,6 @@ final class CodeViewModel {
             self.state = state
         }
     #endif
-
-    func send(_ event: Event) {
-        switch event {
-        case .viewAppeared:
-            handleViewAppeared()
-        case let .connect(host, port, code):
-            handleConnect(host: host, port: port, code: code)
-        case .cancelConnect:
-            handleCancelConnect()
-        case .disconnect:
-            handleDisconnect()
-        case let .sendPrompt(text):
-            handleSendPrompt(text)
-        case let .sendSteer(text):
-            handleSendSteer(text)
-        case let .retryPrompt(id):
-            handleRetryPrompt(id: id)
-        case .abort:
-            handleAbort()
-        case let .answer(id, answers):
-            handleAnswer(id: id, answers: answers)
-        case .retry:
-            handleRetry()
-        case .refreshState:
-            Task { await client.send(.getState) }
-        case .appDidEnterBackground:
-            handleAppDidEnterBackground()
-        case .appWillEnterForeground:
-            handleAppWillEnterForeground()
-        case .notificationTapped:
-            handleNotificationTapped()
-        case .clearToast:
-            transientToast = nil
-        case .newSession:
-            sendCommand("new")
-        case let .setModel(provider, modelId):
-            sendCommand("set_model", args: [
-                "provider": .string(provider),
-                "modelId": .string(modelId),
-            ])
-        case let .compact(instructions):
-            sendCommand("compact", args: instructions.flatMap {
-                $0.isEmpty ? nil : ["instructions": AnyCodableValue.string($0)]
-            } ?? [:])
-        case let .rename(name):
-            sendCommand("name", args: ["name": .string(name)])
-        }
-    }
 }
 
 // MARK: - Connection Lifecycle
@@ -304,23 +258,6 @@ private extension CodeViewModel {
         establishConnection(host: last.host, port: last.port, code: last.code)
     }
 
-    /// Notification tap (APNs push): always reconnect via `lastConnect`,
-    /// bypassing the foregrounding pass's guards — the burn-out case where
-    /// the VM sits in `.failed` and that pass would never reconnect.
-    func handleNotificationTapped() {
-        // Consume the flag so the foregrounding pass cannot double-connect
-        // when it runs after this handler.
-        backgroundDisconnected = false
-        guard let last = lastConnect else { return }
-        if case .connected = state {
-            return
-        }
-        if case .connecting = state {
-            return
-        }
-        establishConnection(host: last.host, port: last.port, code: last.code)
-    }
-
     func handleDisconnect() {
         eventTask?.cancel()
         eventTask = nil
@@ -349,6 +286,54 @@ private extension CodeViewModel {
 // MARK: - Event Handling
 
 extension CodeViewModel {
+    func send(_ event: Event) {
+        switch event {
+        case .viewAppeared:
+            handleViewAppeared()
+        case let .connect(host, port, code):
+            handleConnect(host: host, port: port, code: code)
+        case .cancelConnect:
+            handleCancelConnect()
+        case .disconnect:
+            handleDisconnect()
+        case let .sendPrompt(text):
+            handleSendPrompt(text)
+        case let .sendSteer(text):
+            handleSendSteer(text)
+        case let .retryPrompt(id):
+            handleRetryPrompt(id: id)
+        case .abort:
+            handleAbort()
+        case let .answer(id, answers):
+            handleAnswer(id: id, answers: answers)
+        case .retry:
+            handleRetry()
+        case .refreshState:
+            Task { await client.send(.getState) }
+        case .appDidEnterBackground:
+            handleAppDidEnterBackground()
+        case .appWillEnterForeground:
+            handleAppWillEnterForeground()
+        case .notificationTapped:
+            handleNotificationTapped()
+        case .clearToast:
+            transientToast = nil
+        case .newSession:
+            sendCommand("new")
+        case let .setModel(provider, modelId):
+            sendCommand("set_model", args: [
+                "provider": .string(provider),
+                "modelId": .string(modelId),
+            ])
+        case let .compact(instructions):
+            sendCommand("compact", args: instructions.flatMap {
+                $0.isEmpty ? nil : ["instructions": AnyCodableValue.string($0)]
+            } ?? [:])
+        case let .rename(name):
+            sendCommand("name", args: ["name": .string(name)])
+        }
+    }
+
     func establishConnection(host: String, port: Int, code: String) {
         state = .connecting
         queuedAnswer = nil
@@ -392,6 +377,12 @@ extension CodeViewModel {
         case let .questionResolved(resolved):
             handleQuestionResolved(resolved)
 
+        case let .sessions(list):
+            handleSessions(list)
+
+        case let .sessionGone(id):
+            handleSessionGone(id: id)
+
         case .pong:
             break
 
@@ -428,10 +419,12 @@ extension CodeViewModel {
         case .connecting:
             state = .connected(SessionState())
             sendPushTokenIfNeeded()
+            restoreSelectionIfAny()
         case let .reconnecting(session):
             state = .connected(session)
             sendQueuedAnswerIfNeeded()
             sendPushTokenIfNeeded()
+            restoreSelectionIfAny()
         default:
             break
         }
@@ -464,6 +457,10 @@ extension CodeViewModel {
             return
         }
 
+        // Select ack: the selected session's snapshot arrived, so the local
+        // select watchdog is satisfied (rebind or no-op re-select alike).
+        noteSelectedSessionSnapshot(sessionId: info.sessionId)
+
         let isRebind = !session.sessionId.isEmpty
             && session.sessionId != info.sessionId
 
@@ -485,9 +482,6 @@ extension CodeViewModel {
         session.compacting = info.compacting
         session.contextUsage = info.contextUsage
 
-        // Authoritative server state: when not streaming, close out any
-        // bubbles still marked as streaming (agent_settled may not arrive,
-        // e.g. after reconnect).
         if !info.isStreaming {
             finalizeStreamingBubbles(in: &session)
         }
@@ -503,10 +497,6 @@ extension CodeViewModel {
         // gone: a failure mark arriving for one is a safe no-op.
         pendingPromptEchoes.removeAll()
         var items = mapHistoryToItems(history.messages)
-        // Steers queued in pi are absent from `messages`, so a plain history
-        // resync would wipe their local echoes. Re-create them from the
-        // server's queue (source of truth); a text already in `messages`
-        // was delivered and maps from history instead.
         let existingTexts = Set(items.compactMap {
             if case let .user(_, text, _, _) = $0 {
                 text
@@ -538,6 +528,9 @@ extension CodeViewModel {
     }
 
     private func transitionToReconnecting() {
+        // The in-flight select dies with the socket; its watchdog must not
+        // fire across the gap (selectedId is restored post-helloOk).
+        cancelPendingSelect()
         switch state {
         case let .connected(session):
             state = .reconnecting(session)
@@ -618,6 +611,7 @@ extension CodeViewModel {
 
     func resetToDisconnected() {
         pendingPromptEchoes.removeAll()
+        cancelPendingSelect()
         connectForm = disconnectedForm()
         state = .disconnected
     }
