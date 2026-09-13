@@ -18,9 +18,6 @@ const JWT_TTL_SECONDS = 3000
 const JWT_REUSE_SKEW_SECONDS = 60
 const SEND_TIMEOUT_MS = 15_000
 
-export const FINISHED_COLLAPSE_ID = 'rc-finished'
-export const QUESTION_COLLAPSE_ID = 'rc-question'
-
 type JsonObject = Record<string, unknown>
 
 export type ApnsSources = {
@@ -331,6 +328,18 @@ export function closeApns(): void {
     }
 }
 
+// Per-session collapse ids (spec: rc-multi-session-spec.md, Decision 9): a
+// push only replaces a prior push of the same kind in the SAME session, so
+// one session's settle can no longer eat another session's alert. Within a
+// session the "latest settle wins" dedupe is preserved.
+export function finishedCollapseId(sessionId: string): string {
+    return `finished:${sessionId}`
+}
+
+export function questionCollapseId(sessionId: string): string {
+    return `question:${sessionId}`
+}
+
 export function finishedPayload(sessionId: string, body: string): JsonObject {
     return {
         aps: {
@@ -338,6 +347,10 @@ export function finishedPayload(sessionId: string, body: string): JsonObject {
             sound: 'default',
             'thread-id': sessionId,
         },
+        // thread-id is not exposed to the app; this custom top-level key is
+        // what the iOS client reads from userInfo to deep-link the tapped
+        // session (spec: rc-multi-session-spec.md, deep-link payload key).
+        sessionId,
     }
 }
 
@@ -349,15 +362,16 @@ export function questionPayload(sessionId: string, body: string): JsonObject {
             'thread-id': sessionId,
             timeSensitive: true,
         },
+        sessionId,
     }
 }
 
 // Bodies are built by title.ts: session identity (name/cwd basename, never
 // agent text) for finished pushes, and the question's own capped,
 // sanitized text for question pushes — the documented 2026-09-07 relaxation.
-// Everything else in the payload is fixed server-side strings, so a verbose
-// or compromised agent cannot place arbitrary session content on a lock
-// screen beyond that capped question text.
+// Everything else in the payload is server-computed (fixed strings plus the
+// session id UUID), so a verbose or compromised agent cannot place arbitrary
+// session content on a lock screen beyond that capped question text.
 export async function sendApnsPush(
     token: string,
     collapseId: string,

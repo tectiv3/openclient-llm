@@ -11,12 +11,24 @@ import type {
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import { dbgLog } from './debug'
+import {
+    generateEntryToken,
+    newEntryId,
+    probePort,
+    pruneStaleEntries,
+    readRegistry,
+    removeEntry,
+    upsertEntry,
+    watchRegistry,
+    type RcModelRef,
+    type RcSessionEntry,
+} from './registry'
 import { runPushSetup } from './push-setup'
 import { finishedBody, questionBody } from './title'
 import {
-    FINISHED_COLLAPSE_ID,
-    QUESTION_COLLAPSE_ID,
+    finishedCollapseId,
     finishedPayload,
+    questionCollapseId,
     questionPayload,
     readStoredDeviceToken,
     resolveApnsConfig,
@@ -27,6 +39,9 @@ import {
 
 const RC_KEY = Symbol.for('pi-rc')
 const PORT = 47800
+const SIBLING_PORT_START = 47801
+const SIBLING_PORT_END = 47899
+const REGISTRY_DEBOUNCE_MS = 250
 const VERSION = 1
 const STALE_CHECK_MS = 10_000
 const STALE_MS = 90_000
@@ -35,6 +50,12 @@ const MAX_BUFFER_BYTES = 2 * 1024 * 1024
 const RATE_LIMIT_FAILURES = 5
 const RATE_LIMIT_LOCK_MS = 60_000
 const RATE_LIMIT_EXPIRE_MS = 5 * 60_000
+// Select deadline: from the proxy open attempt to the sibling's hello_ok
+// (spec: rc-multi-session-spec.md §Wire protocol — select ack semantics).
+const SELECT_TIMEOUT_MS = 10_000
+// Proxy keepalive cadence: the sibling's STALE_MS is 90 s, so a 30 s ping
+// leaves a 3x margin before an idle-but-selected proxy stale-closes.
+const PROXY_KEEPALIVE_MS = 30_000
 const STATUS_KEY = 'pi-rc'
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
@@ -93,12 +114,41 @@ type RcSocket = {
     on(event: string, listener: (...args: unknown[]) => void): RcSocket
 }
 
+// Proxy connection (anchor only): a live anchor→sibling WebSocket standing in
+// for the phone client, opened lazily on select_session (spec:
+// rc-multi-session-spec.md §Proxy connection lifecycle). authRetried is false
+// while the hello is using the first token read for this open attempt; a
+// bad_code then arms a registry-change retry (spec: keep the selection pending,
+// re-read the entry at probe time, retry once).
+type RcProxy = {
+    id: string
+    ws: WebSocket
+    helloDone: boolean
+    authRetried: boolean
+    openTimer: ReturnType<typeof setTimeout> | null
+    keepalive: ReturnType<typeof setInterval> | null
+}
+
 type RcClient = {
     socket: RcSocket
     buffer: Buffer
     authenticated: boolean
     ip: string
     lastMessageAt: number
+    // Per-connection selection (anchor only; spec: rc-multi-session-spec.md
+    // §Wire protocol — "one selected session at a time" per phone connection).
+    // null = default: the anchor's own session view.
+    selectedId: string | null
+    proxy: RcProxy | null
+    // Select whose proxy hello failed with bad_code: the selection stays
+    // pending and reopens (with a fresh registry token read) on the NEXT
+    // registry change. One retry; the second failure is terminal
+    // (session_not_found) — a retry loop is forbidden (spec).
+    pendingProxyAuth: string | null
+    // The select-deadline timer for the FIRST open attempt of the current
+    // selection (spec: the 10 s window runs from the select, not from each
+    // retry). Null when no selection is in flight.
+    selectDeadlineAt: ReturnType<typeof setTimeout> | null
 }
 
 type RcSingleton = {
@@ -107,10 +157,14 @@ type RcSingleton = {
     binding: Binding | null
     host: string | null
     port: number
+    isAnchor: boolean
     code: string | null
+    entryId: string | null
+    entryToken: string | null
     heartbeat: ReturnType<typeof setInterval> | null
+    watcher: { stop(): void } | null
+    lastBroadcastSessions: string | null
     rateLimits: Map<string, RateLimitEntry>
-    pushToken: string | null
     lastPush: string | null
     lastStopReason: string | null
     isStreaming: boolean
@@ -148,10 +202,14 @@ function singleton(): RcSingleton {
         binding: null,
         host: null,
         port: PORT,
+        isAnchor: false,
         code: null,
+        entryId: null,
+        entryToken: null,
         heartbeat: null,
+        watcher: null,
+        lastBroadcastSessions: null,
         rateLimits: new Map<string, RateLimitEntry>(),
-        pushToken: readStoredDeviceToken(),
         lastPush: null,
         lastStopReason: null,
         isStreaming: false,
@@ -183,42 +241,99 @@ function singleton(): RcSingleton {
             server.on('upgrade', (req, socket, head) =>
                 this.handleUpgrade(req, socket as RcSocket, head)
             )
+            this.code = randomInt(0, 1_000_000).toString().padStart(6, '0')
+            this.isAnchor = true
+            this.port = PORT
             try {
                 this.host = resolveBindHost()
-                this.code = randomInt(0, 1_000_000).toString().padStart(6, '0')
                 await listen(server, PORT, this.host)
             } catch (error) {
-                server.close()
-                this.host = null
-                this.code = null
                 if (isListenError(error, 'EADDRINUSE')) {
-                    ctx.ui.notify(
-                        'port 47800 busy — another pi session is serving; toggle /rc there first',
-                        'warning'
-                    )
-                    writeStoppedAuth('port_busy', 'port 47800 busy')
+                    // 47800 is owned by the anchor. The sibling role is the
+                    // normal multi-session case (spec: rc-multi-session-spec.md
+                    // §Roles), not an error: bind loopback-only on the first
+                    // free port in the sibling range.
+                    this.isAnchor = false
+                    let siblingPort: number | null = null
+                    let siblingError: unknown = null
+                    for (let port = SIBLING_PORT_START; port <= SIBLING_PORT_END; port++) {
+                        try {
+                            await listen(server, port, '127.0.0.1')
+                            siblingPort = port
+                            break
+                        } catch (innerError) {
+                            if (!isListenError(innerError, 'EADDRINUSE')) {
+                                siblingError = innerError
+                                break
+                            }
+                        }
+                    }
+                    if (siblingError !== null) {
+                        server.close()
+                        this.host = null
+                        this.code = null
+                        const message =
+                            siblingError instanceof Error
+                                ? siblingError.message
+                                : String(siblingError)
+                        dbgLog('server start failed:', message)
+                        ctx.ui.notify(`rc failed to start: ${message}`, 'error')
+                        writeStoppedAuth('start_failed', message)
+                        return
+                    }
+                    if (siblingPort === null) {
+                        // Pathological exhaustion: degrade to no server (the
+                        // process keeps running, unregistered).
+                        server.close()
+                        this.host = null
+                        this.code = null
+                        dbgLog('server start failed: sibling port range exhausted')
+                        ctx.ui.notify(
+                            'rc not serving: ports 47800-47899 are all busy on this machine',
+                            'warning'
+                        )
+                        writeStoppedAuth('port_busy', `ports ${PORT}-${SIBLING_PORT_END} busy`)
+                        return
+                    }
+                    this.host = '127.0.0.1'
+                    this.port = siblingPort
+                } else {
+                    server.close()
+                    this.host = null
+                    this.code = null
+                    const message = error instanceof Error ? error.message : String(error)
+                    dbgLog('server start failed:', message)
+                    ctx.ui.notify(`rc failed to start: ${message}`, 'error')
+                    writeStoppedAuth('start_failed', message)
                     return
                 }
-                const message = error instanceof Error ? error.message : String(error)
-                dbgLog('server start failed:', message)
-                ctx.ui.notify(`rc failed to start: ${message}`, 'error')
-                writeStoppedAuth('start_failed', message)
-                return
             }
             this.server = server
             this.quitAuthWritten = false
             this.heartbeat = setInterval(() => closeStaleClients(this), STALE_CHECK_MS)
-            const status = `rc: ws://${this.host}:${PORT} code ${this.code}`
+            // Anchor-only: the list of every session on this box is the
+            // anchor's to prune and broadcast (spec: rc-multi-session-spec.md
+            // §Registry). Siblings keep their loopback server but take no
+            // part in the list.
+            if (this.isAnchor) startSessionsWatcher(this)
+            const status = `rc: ws://${this.host}:${this.port} code ${this.code}`
             dbgLog('server started:', status)
-            ctx.ui.notify(status, 'info')
+            ctx.ui.notify(
+                this.isAnchor
+                    ? status
+                    : `${status} (sibling — another session on this machine serves the phone on port ${PORT})`,
+                'info'
+            )
             refreshStatus(this)
-            writeRunningAuth(this.host, PORT, this.code)
+            writeRunningAuth(this.host, this.port, this.code)
+            registerRcEntry(this)
         },
         async stop(reason, detail) {
             dbgLog('server stopped:', reason, detail ?? '')
             cancelPendingAsk(this)
             if (this.heartbeat) clearInterval(this.heartbeat)
             this.heartbeat = null
+            stopSessionsWatcher(this)
             const closeCode = reason === 'quit' ? 1001 : undefined
             for (const client of Array.from(this.clients)) closeClient(this, client, closeCode)
             if (this.server) await closeServer(this.server)
@@ -230,11 +345,41 @@ function singleton(): RcSingleton {
             // pendingSteers is intentionally NOT reset here: toggling /rc off
             // does not clear pi's in-memory steering queue, so a toggle-on
             // snapshot must still report it. Process death is the real reset.
+            unregisterRcEntry(this)
             safeSetStatus(this.binding?.ctx, undefined)
             if (reason === 'quit') writeQuitStoppedAuth(this, detail)
             else writeStoppedAuth(reason, detail)
         },
         broadcast(message) {
+            // Suppression rule (spec: rc-multi-session-spec.md §Wire protocol,
+            // "Anchor's own frames while a sibling is selected"): broadcast is
+            // the anchor's OWN-session channel — state/history/event/question/
+            // question_resolved/streaming_buffer/error all flow through it and
+            // must not reach a client that has a non-anchor entry selected,
+            // or the phone's session-agnostic handlers would rebind/overlay the
+            // sibling view. Protocol frames (hello_ok, sessions, error codes,
+            // session_gone) are per-client writeJson calls and never land
+            // here, so they are never suppressed. A client whose selection is
+            // null (default) or the anchor entry itself sees everything.
+            const type = message.type
+            if (
+                this.isAnchor &&
+                (type === 'state' ||
+                    type === 'history' ||
+                    type === 'event' ||
+                    type === 'question' ||
+                    type === 'question_resolved' ||
+                    type === 'streaming_buffer' ||
+                    type === 'error')
+            ) {
+                for (const client of Array.from(this.clients)) {
+                    if (!client.authenticated) continue
+                    if (client.selectedId !== null && client.selectedId !== this.entryId)
+                        continue
+                    if (!writeJson(client, message)) closeClient(this, client)
+                }
+                return
+            }
             for (const client of Array.from(this.clients)) {
                 if (!client.authenticated) continue
                 if (!writeJson(client, message)) closeClient(this, client)
@@ -247,7 +392,7 @@ function singleton(): RcSingleton {
             return this.server !== null
         },
         askAvailable() {
-            return this.server !== null && (this.hasConnectedClients() || canPush(this))
+            return this.server !== null && (this.hasConnectedClients() || canPush())
         },
         async ask(opts) {
             if (!this.askAvailable()) return null
@@ -265,11 +410,15 @@ function singleton(): RcSingleton {
             const pending: PendingAsk = { id, kind: opts.kind, message, resolve: () => {} }
             this.pendingAsk = pending
             dbgLog('ask created:', id, opts.kind)
+            notifyRcStatus(this)
             this.broadcast(message)
             fireQuestionPush(this)
             const askPromise = new Promise<RemoteAnswer[] | 'dismissed' | null>(resolve => {
                 pending.resolve = result => {
-                    if (this.pendingAsk === pending) this.pendingAsk = null
+                    if (this.pendingAsk === pending) {
+                        this.pendingAsk = null
+                        notifyRcStatus(this)
+                    }
                     resolve(result)
                 }
             })
@@ -309,6 +458,7 @@ function cancelPendingAsk(
     })
     state.pendingAsk.resolve(result)
     state.pendingAsk = null
+    notifyRcStatus(state)
 }
 
 function handleUpgrade(
@@ -355,6 +505,10 @@ function handleUpgrade(
         authenticated: false,
         ip: normalizeIp(req.socket.remoteAddress ?? socket.remoteAddress ?? 'unknown'),
         lastMessageAt: Date.now(),
+        selectedId: null,
+        proxy: null,
+        pendingProxyAuth: null,
+        selectDeadlineAt: null,
     }
     state.clients.add(client)
     dbgLog('connection opened:', client.ip)
@@ -467,6 +621,10 @@ function writeFrame(socket: RcSocket, payload: Buffer, opcode: number): void {
 }
 
 function closeClient(state: RcSingleton, client: RcClient, code?: number): void {
+    // Phone disconnect closes its proxies (spec: rc-multi-session-spec.md §Proxy
+    // connection lifecycle). Must run BEFORE clients.delete so the cleanup can
+    // still find the client.
+    if (state.isAnchor && client.proxy !== null) closeProxyForClient(state, client)
     state.clients.delete(client)
     refreshStatus(state)
     if (!client.socket.destroyed) {
@@ -511,54 +669,94 @@ function handleClientMessage(state: RcSingleton, client: RcClient, message: unkn
     }
     switch (message.type) {
         case 'prompt':
-            handlePrompt(state, client, message)
-            break
         case 'steer':
-            handleSteer(state, client, message)
-            break
         case 'abort':
-            // A pending ask owns the run: the ask tool cannot observe the
-            // agent-loop abort signal, so resolving the ask is the only way the
-            // tool returns. 'dismissed' (not null) makes the tool report the
-            // cancellation instead of falling through to the local TUI prompt,
-            // which would hold the run hostage on an unattended terminal. The
-            // owner decision: dismiss = cancel the question AND abort the run.
-            if (state.pendingAsk) cancelPendingAsk(state, 'dismissed')
-            if (!state.binding?.ctx.isIdle()) state.binding?.ctx.abort()
-            break
-        case 'get_state':
-            writeJson(client, buildState(state))
-            break
-        case 'get_history':
-            writeJson(
-                client,
-                buildHistory(
-                    state,
-                    typeof message.cursor === 'string' ? message.cursor : undefined
-                )
-            )
-            break
-        case 'ping':
-            writeJson(client, { type: 'pong' })
-            break
         case 'answer':
-            handleAnswer(state, client, message)
+        case 'get_state':
+        case 'get_history':
+        case 'command': {
+            // Proxy transparency (spec: rc-multi-session-spec.md §Wire
+            // protocol): while the phone has a non-anchor entry selected, its
+            // session frames go VERBATIM to that sibling over the proxy —
+            // prompt, steer, abort, answer, get_state, get_history, command
+            // (all four command names). The sibling runs its own handlers and
+            // the responses come back through the sibling→phone forward list.
+            if (
+                state.isAnchor &&
+                client.selectedId !== null &&
+                client.selectedId !== state.entryId
+            ) {
+                sendToProxy(client, message)
+                break
+            }
+            // No active non-anchor selection: fall through to the anchor's
+            // own handling of the same frame below.
+            switch (message.type) {
+                case 'prompt':
+                    handlePrompt(state, client, message)
+                    return
+                case 'steer':
+                    handleSteer(state, client, message)
+                    return
+                case 'abort':
+                    // A pending ask owns the run: the ask tool cannot observe
+                    // the agent-loop abort signal, so resolving the ask is the
+                    // only way the tool returns. 'dismissed' (not null) makes
+                    // the tool report the cancellation instead of falling
+                    // through to the local TUI prompt, which would hold the
+                    // run hostage on an unattended terminal. Owner decision:
+                    // dismiss = cancel the question AND abort the run.
+                    if (state.pendingAsk) cancelPendingAsk(state, 'dismissed')
+                    if (!state.binding?.ctx.isIdle()) state.binding?.ctx.abort()
+                    return
+                case 'answer':
+                    handleAnswer(state, client, message)
+                    return
+                case 'get_state':
+                    writeJson(client, buildState(state))
+                    return
+                case 'get_history':
+                    writeJson(
+                        client,
+                        buildHistory(
+                            state,
+                            typeof message.cursor === 'string' ? message.cursor : undefined
+                        )
+                    )
+                    return
+                case 'command':
+                    void handleCommand(state, client, message)
+                    return
+            }
+            return
+        }
+        case 'ping':
+            // The phone's keepalive stays with the anchor (never forwarded):
+            // the anchor answers it and keeps the proxy alive with its OWN
+            // 30 s pings (spec: rc-multi-session-spec.md §Proxy connection
+            // lifecycle).
+            writeJson(client, { type: 'pong' })
             break
         case 'push_token':
             handlePushToken(state, client, message)
             break
-        case 'command':
-            void handleCommand(state, client, message)
+        case 'select_session':
+            // Anchor-only by construction: the phone only ever connects to the
+            // anchor (port 47800); a sibling's loopback server is unreachable
+            // off-box, so this case cannot fire on a sibling (task contract).
+            selectSession(state, client, stringFrom(message.id) ?? '')
             break
         default:
             writeJson(client, { type: 'error', code: 'invalid_message' })
     }
 }
 
-// Timing-safe comparison of a presented token against the registered one;
-// length checked first because timingSafeEqual throws on unequal lengths.
-function helloTokenMatches(state: RcSingleton, presented: string): boolean {
-    const registered = state.pushToken
+// Timing-safe comparison of a presented token against the one currently in
+// rc-push.json — read fresh per hello (never cached): a process started
+// before the phone paired must auto-authenticate once the token lands (N1).
+// Length checked first because timingSafeEqual throws on unequal lengths.
+function helloTokenMatches(presented: string): boolean {
+    const registered = readStoredDeviceToken()
     if (registered === null || presented.length !== registered.length) return false
     // Tokens are stored lowercase (write-point normalization); lowercase the
     // presented side too so casing differences never fail auto-auth.
@@ -571,10 +769,17 @@ function handleHello(state: RcSingleton, client: RcClient, message: JsonObject):
         sendErrorAndClose(state, client, 'version_mismatch')
         return
     }
-    const limit = state.rateLimits.get(client.ip)
-    if (limit && limit.lockedUntil > Date.now()) {
-        sendErrorAndClose(state, client, 'rate_limited')
-        return
+    // Loopback clients are never rate-limited: the limiter exists for tailnet
+    // strangers, and the only loopback client is the anchor proxy (a failed
+    // proxy hello would otherwise lock out all proxy connects to this
+    // process for RATE_LIMIT_LOCK_MS).
+    const loopback = client.ip === '127.0.0.1' || client.ip === '::1'
+    if (!loopback) {
+        const limit = state.rateLimits.get(client.ip)
+        if (limit && limit.lockedUntil > Date.now()) {
+            sendErrorAndClose(state, client, 'rate_limited')
+            return
+        }
     }
     const code = typeof message.code === 'string' ? message.code : ''
     const token = typeof message.token === 'string' ? message.token : ''
@@ -583,10 +788,13 @@ function handleHello(state: RcSingleton, client: RcClient, message: JsonObject):
     // without this every session would force re-pairing of an already-paired
     // device. First-time pairing (no token registered yet) still requires
     // the code; a stale code plus a matching token is the auto-auth path.
+    // The entry token is the third credential: it lets the anchor's proxy
+    // connect to this process (spec: rc-multi-session-spec.md §Registry).
     const codeOk = /^[0-9]{6}$/.test(code) && code === state.code
-    const tokenOk = helloTokenMatches(state, token)
-    if (!codeOk && !tokenOk) {
-        recordFailedHello(state, client.ip)
+    const tokenOk = helloTokenMatches(token)
+    const entryTokenOk = entryTokenMatches(state, token)
+    if (!codeOk && !tokenOk && !entryTokenOk) {
+        if (!loopback) recordFailedHello(state, client.ip)
         const failed = state.rateLimits.get(client.ip)
         sendErrorAndClose(
             state,
@@ -595,12 +803,25 @@ function handleHello(state: RcSingleton, client: RcClient, message: JsonObject):
         )
         return
     }
-    state.rateLimits.delete(client.ip)
+    if (!loopback) state.rateLimits.delete(client.ip)
     client.authenticated = true
     refreshStatus(state)
     writeJson(client, { type: 'hello_ok', version: VERSION })
+    // The phone builds its picker from this; a fresh connect (or the anchor
+    // proxy's connect, whose reader ignores it) must not wait for a registry
+    // change to see the list.
+    if (state.isAnchor) sendSessions(client)
     writeSessionSnapshot(client, state)
     if (state.pendingAsk) writeJson(client, state.pendingAsk.message)
+}
+
+// Same timing-safe pattern as helloTokenMatches, against the registry entry
+// token (32-byte hex, generated at registration; never lowercased — the
+// presented side is hex and the comparison is byte-for-byte).
+function entryTokenMatches(state: RcSingleton, presented: string): boolean {
+    const registered = state.entryToken
+    if (registered === null || presented.length !== registered.length) return false
+    return timingSafeEqual(Buffer.from(presented), Buffer.from(registered))
 }
 
 function handleAnswer(state: RcSingleton, client: RcClient, message: JsonObject): void {
@@ -669,7 +890,9 @@ function handlePushToken(state: RcSingleton, client: RcClient, message: JsonObje
     // lowercase (readStoredDeviceToken lowercases on read as well, and
     // helloTokenMatches lowercases the presented side before comparing).
     token = token.toLowerCase()
-    state.pushToken = token
+    // The file (rc-push.json) is the single source of truth: every process on
+    // the box resolves the token from it at use time, so this registration
+    // reaches siblings that started before the phone paired (N1).
     saveDeviceToken(token)
     refreshStatus(state)
     dbgLog('push_token registered:', client.ip)
@@ -689,11 +912,13 @@ function fireFinishedPush(state: RcSingleton): void {
     // remote-control session is live, matching the question-push gate (ask
     // requires a serving server via askAvailable).
     if (!state.isServing()) return
-    const token = state.pushToken
+    // Resolved from rc-push.json at push time (N1): a sibling started before
+    // the phone paired must push once the token file exists.
+    const token = readStoredDeviceToken()
     if (!token) return
     void sendApnsPush(
         token,
-        FINISHED_COLLAPSE_ID,
+        finishedCollapseId(sessionId(state)),
         finishedPayload(sessionId(state), finishedBody(state))
     )
         .then(outcome => handlePushOutcome(state, outcome, 'finished', token))
@@ -714,7 +939,8 @@ function pendingAskText(pending: PendingAsk | null): string | undefined {
 
 function fireQuestionPush(state: RcSingleton): void {
     if (!pushAllowed(state)) return
-    const token = state.pushToken
+    // Resolved from rc-push.json at push time (N1), mirroring fireFinishedPush.
+    const token = readStoredDeviceToken()
     if (!token) return
     // Capture the ask's identity BEFORE any await: if it is answered,
     // cancelled, or superseded while the body resolves (LLM shortening can
@@ -726,7 +952,7 @@ function fireQuestionPush(state: RcSingleton): void {
             if (state.pendingAsk !== pending) return
             return sendApnsPush(
                 token,
-                QUESTION_COLLAPSE_ID,
+                questionCollapseId(sessionId(state)),
                 questionPayload(sessionId(state), body)
             ).then(outcome => handlePushOutcome(state, outcome, 'question', token))
         })
@@ -739,10 +965,10 @@ function handlePushOutcome(
     label: string,
     token: string
 ): void {
-    // Only clear the token if it is still the one APNs rejected: a newer
-    // registration that landed while this send was in flight must survive.
-    if (outcome.ok === 'dropped' && state.pushToken === token) {
-        state.pushToken = null
+    // Only clear the token if the file still holds the one APNs rejected:
+    // a newer registration that landed while this send was in flight must
+    // survive (re-read at outcome time, not the pre-send value).
+    if (outcome.ok === 'dropped' && readStoredDeviceToken() === token) {
         saveDeviceToken(null)
         recordPushOutcome(state, outcome)
         dbgLog(
@@ -1188,6 +1414,9 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
         state.pendingSteers.length = 0
         state.compacting = null
         forward('session_start', event, ctx)
+        // forward() rebinds to the new ctx; this (debounced) is what updates
+        // the entry's sessionId/name/cwd/model after an in-process /new.
+        notifyRcStatus(state)
     })
     pi.on('session_shutdown', async (event, ctx) => {
         state.compacting = null
@@ -1197,7 +1426,11 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
         } else {
             // Non-quit (new/resume/fork): the old ctx is about to be
             // invalidated; null the binding so handlers return not_ready
-            // instead of dereferencing a stale ctx.
+            // instead of dereferencing a stale ctx. The entry survives the
+            // replacement (process-level), so schedule a flush here: the
+            // follow-up session_start (immediate in the /new flow) coalesces
+            // into the same debounce and the flush carries the NEW sessionId.
+            notifyRcStatus(state)
             state.binding = null
         }
     })
@@ -1212,7 +1445,10 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
         if (!ctx.hasPendingMessages()) state.pendingSteers.length = 0
         forward('agent_settled', event, ctx)
     })
-    pi.on('turn_end', (event, ctx) => forward('turn_end', event, ctx))
+    pi.on('turn_end', (event, ctx) => {
+        forward('turn_end', event, ctx)
+        notifyRcStatus(state)
+    })
     pi.on('message_start', (event, ctx) => forward('message_start', event, ctx))
     pi.on('message_update', (event, ctx) => forward('message_update', event, ctx))
     // Not forwarded: message_end would widen the frozen wire protocol; it is
@@ -1241,12 +1477,14 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
             ...(typeof event.willRetry === 'boolean' ? { willRetry: event.willRetry } : {}),
         }
         dbgLog('compaction started:', state.compacting.reason)
+        notifyRcStatus(state)
         state.broadcast(buildState(state))
     })
     pi.on('session_compact', (event, ctx) => {
         state.bind(pi, ctx)
         dbgLog('compaction finished:', isObject(event) ? event.reason : 'unknown')
         state.compacting = null
+        notifyRcStatus(state)
         broadcastSessionSnapshot(state)
     })
     pi.on('session_compact_failed', (event, ctx) => {
@@ -1260,6 +1498,7 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
                 : 'compaction failed'
         dbgLog('compaction failed:', aborted ? 'aborted (user Stop)' : message)
         state.compacting = null
+        notifyRcStatus(state)
         broadcastSessionSnapshot(state)
         // D3: an aborted compaction was the user's own Stop — the banner
         // clearing above is the feedback, no error frame. A genuine failure
@@ -1268,10 +1507,12 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
     })
     pi.on('model_select', (_event, ctx) => {
         state.bind(pi, ctx)
+        notifyRcStatus(state)
         state.broadcast(buildState(state))
     })
     pi.on('session_info_changed', (_event, ctx) => {
         state.bind(pi, ctx)
+        notifyRcStatus(state)
         state.broadcast(buildState(state))
     })
 }
@@ -1280,9 +1521,11 @@ function trackEvent(state: RcSingleton, name: string, event: unknown): void {
     if (name === 'agent_start') {
         state.isStreaming = true
         state.lastStopReason = null
+        notifyRcStatus(state)
     }
     if (name === 'agent_settled') {
         state.isStreaming = false
+        notifyRcStatus(state)
         // Aborted runs settle too, but the user cancelled — no "finished" ping.
         if (state.lastStopReason === 'aborted') return
         // Fires on every settled turn by design; the constant collapse id
@@ -1465,16 +1708,17 @@ function safeSetStatus(ctx: ExtensionContext | undefined, text: string | undefin
 
 // Push sendability for ask() routing. A registered token alone is not enough:
 // with unresolved credentials the question push would silently no-op and the
-// ask would block forever, so the local fallback must stay. Mirrors the status
-// line's readiness and resolves per call — /rc push-setup can rewrite creds
-// while the server is serving, so readiness must never be cached at startup.
-function canPush(state: RcSingleton): boolean {
-    return state.pushToken !== null && resolveApnsConfig() !== null
+// ask would block forever, so the local fallback must stay. Token and creds
+// are resolved from their files per call (the phone can pair, or /rc push-setup
+// can rewrite creds, while the server is serving), so readiness is never
+// cached at startup.
+function canPush(): boolean {
+    return readStoredDeviceToken() !== null && resolveApnsConfig() !== null
 }
 
-function pushStatusText(state: RcSingleton): string {
+function pushStatusText(): string {
     if (!resolveApnsConfig()) return 'push: not configured'
-    return state.pushToken ? 'push ok' : 'push: no token'
+    return readStoredDeviceToken() ? 'push ok' : 'push: no token'
 }
 
 function pushOutcomeText(outcome: PushOutcome): string {
@@ -1505,11 +1749,13 @@ function buildRcInspectReport(state: RcSingleton): string {
         // and pair a rogue client. Agents can check status without it.
         const maskedCode = `•••${state.code.slice(-2)}`
         lines.push(`serving: ws://${state.host}:${state.port} code ${maskedCode}`)
+        lines.push(`role: ${state.isAnchor ? 'anchor' : 'sibling (loopback)'}`)
+        lines.push(`registry entry: ${state.entryId ?? 'none'}`)
         lines.push(`clients: ${clients === 0 ? 'none' : String(clients)}`)
     } else {
         lines.push('serving: no')
     }
-    lines.push(`push: ${pushStatusText(state)}`)
+    lines.push(`push: ${pushStatusText()}`)
     lines.push(`last apns: ${state.lastPush ?? 'none'}`)
     lines.push(`pending question: ${state.pendingAsk ? 'yes' : 'no'}`)
     lines.push(
@@ -1526,7 +1772,7 @@ function refreshStatus(state: RcSingleton): void {
     const lastPush = state.lastPush ? ` · ${state.lastPush}` : ''
     safeSetStatus(
         state.binding?.ctx,
-        `rc: ws://${state.host}:${state.port} code ${state.code} · ${clientsText} · ${pushStatusText(state)}${lastPush}`
+        `rc: ws://${state.host}:${state.port} code ${state.code} · ${clientsText} · ${pushStatusText()}${lastPush}`
     )
 }
 
@@ -1535,7 +1781,563 @@ function registerProcessExitHandler(state: RcSingleton): void {
     state.processHooksRegistered = true
     process.once('exit', () => {
         if (state.server || state.code) writeQuitStoppedAuth(state)
+        // Covers any path that exits without /rc disable (stop() already
+        // removed the entry, so this is a no-op then); entryId null (never
+        // enabled) is also a no-op.
+        if (state.entryId !== null) removeEntry(state.entryId)
     })
+}
+
+// ── Registry entry lifecycle (spec: rc-multi-session-spec.md) ───────────────
+
+// Rebuilds the full registry entry from live singleton state. Called on
+// registration and from every status-change point through notifyRcStatus.
+function currentRcEntry(state: RcSingleton): RcSessionEntry | null {
+    const id = state.entryId
+    const token = state.entryToken
+    if (id === null || token === null) return null
+    const ctx = state.binding?.ctx
+    // Same field resolution as buildState's model mapping, so the registry
+    // never disagrees with the wire state frame.
+    const modelRef = ctx?.model as JsonObject | undefined
+    const model: RcModelRef = {
+        provider:
+            stringFrom(modelRef?.provider) ??
+            stringFrom(modelRef?.providerId) ??
+            stringFrom(modelRef?.providerName) ??
+            'unknown',
+        id:
+            stringFrom(modelRef?.id) ??
+            stringFrom(modelRef?.model) ??
+            stringFrom(modelRef?.name) ??
+            'unknown',
+    }
+    const cwd = stringFrom(ctx?.cwd) ?? process.cwd()
+    const name =
+        sessionName(state) ??
+        cwd
+            .split('/')
+            .filter(part => part.length > 0)
+            .pop() ??
+        cwd
+    const pending = state.pendingAsk
+    return {
+        id,
+        port: state.port,
+        pid: process.pid,
+        host: state.host ?? '127.0.0.1',
+        token,
+        isAnchor: state.isAnchor,
+        sessionId: sessionId(state),
+        cwd,
+        name,
+        model,
+        isStreaming: state.isStreaming,
+        // Spec invariant: the badge tracks the CURRENT session only. A stale
+        // ask left over from a replaced session (pre-existing wart, frozen
+        // Decision 7) must not light the badge.
+        hasQuestion: pending !== null && pending.message.sessionId === sessionId(state),
+        compacting: state.compacting !== null,
+        lastActivity: new Date().toISOString(),
+    }
+}
+
+// Creates this process's registry entry (both roles) and keeps the entry id
+// and its proxy-auth token on the singleton.
+function registerRcEntry(state: RcSingleton): void {
+    if (state.entryId !== null) return
+    state.entryId = newEntryId()
+    state.entryToken = generateEntryToken()
+    dbgLog('registry entry registered:', state.entryId, `port ${state.port}`)
+    const entry = currentRcEntry(state)
+    if (entry !== null) void upsertEntry(entry)
+}
+
+// Removes the entry and drops the proxy token. Idempotent (disable + exit both
+// run this, and the exit hook also runs after a failed start that never
+// registered).
+function unregisterRcEntry(state: RcSingleton): void {
+    if (state.entryId === null) return
+    dbgLog('registry entry removed:', state.entryId)
+    void removeEntry(state.entryId)
+    state.entryId = null
+    state.entryToken = null
+}
+
+let rcStatusDebounce: ReturnType<typeof setTimeout> | null = null
+
+// The single status-sync path: coalesces bursts of state changes (a
+// session_start snapshot, streaming flips, ask set/clear, ...) into one
+// debounced registry write. The entry is rebuilt from live state at FLUSH
+// time, never captured here — the merge-on-write rule in registry.ts relies
+// on fresh reads happening after the debounce.
+function notifyRcStatus(state: RcSingleton): void {
+    if (state.entryId === null) return
+    if (rcStatusDebounce) clearTimeout(rcStatusDebounce)
+    rcStatusDebounce = setTimeout(() => {
+        rcStatusDebounce = null
+        const entry = currentRcEntry(state)
+        if (entry === null) return
+        void upsertEntry(entry)
+    }, REGISTRY_DEBOUNCE_MS)
+}
+
+// ── Sessions list broadcast (anchor only; spec: rc-multi-session-spec.md) ─
+
+// The phone-visible projection of a registry entry. Mapped field-by-field so
+// the internal fields (port, pid, host, token) never reach the wire.
+type RcSessionInfo = {
+    id: string
+    sessionId: string
+    cwd: string
+    name: string
+    model: RcModelRef
+    isStreaming: boolean
+    hasQuestion: boolean
+    compacting: boolean
+    lastActivity: string
+    isAnchor: boolean
+}
+
+function buildSessionsList(): RcSessionInfo[] {
+    const registry = readRegistry()
+    if (registry === null) return []
+    return (
+        registry.sessions
+            .map(entry => ({
+                id: entry.id,
+                sessionId: entry.sessionId,
+                cwd: entry.cwd,
+                name: entry.name,
+                model: entry.model,
+                isStreaming: entry.isStreaming,
+                hasQuestion: entry.hasQuestion,
+                compacting: entry.compacting,
+                lastActivity: entry.lastActivity,
+                isAnchor: entry.isAnchor,
+            }))
+            // ISO-8601 UTC strings: lexicographic order is time order. Newest first.
+            .sort((a, b) =>
+                a.lastActivity === b.lastActivity
+                    ? 0
+                    : a.lastActivity < b.lastActivity
+                      ? 1
+                      : -1
+            )
+    )
+}
+
+// Sends the current list to one client without touching change detection.
+// The per-client hello delivery and the anchor's broadcast path share the
+// builder so the two can never disagree on the wire shape.
+function sendSessions(client: RcClient): void {
+    writeJson(client, { type: 'sessions', sessions: buildSessionsList() })
+}
+
+// Single-flight for the async callback: a prune pass probes every entry
+// (up to ~500 ms per dead port), and the next watch/poll tick must not start
+// a second pass before the first broadcast is decided.
+let sessionsChangeInFlight = false
+
+function onSessionsChange(state: RcSingleton): void {
+    if (sessionsChangeInFlight) return
+    sessionsChangeInFlight = true
+    void (async () => {
+        try {
+            // Prune first (write-only-if-changed, so a no-op prune cannot
+            // re-trigger this callback), then read the registry the prune
+            // may have rewritten. The anchor self-excludes: its listener is
+            // this process's own, bound to the tailnet interface (not
+            // loopback), so a loopback probe of it would refuse.
+            await pruneStaleEntries(state.entryId ?? undefined)
+            // A failed proxy hello arms a retry on the NEXT registry change:
+            // the sibling may have re-registered with a new token, and the
+            // entry must be re-read at probe time, not at failure time
+            // (spec: rc-multi-session-spec.md §Proxy connection lifecycle).
+            retryPendingProxies(state)
+            const list = buildSessionsList()
+            const serialized = JSON.stringify(list)
+            if (serialized === state.lastBroadcastSessions) return
+            state.lastBroadcastSessions = serialized
+            state.broadcast({ type: 'sessions', sessions: list })
+        } catch (error) {
+            dbgLog('sessions broadcast failed:', errorMessage(error))
+        } finally {
+            sessionsChangeInFlight = false
+        }
+    })()
+}
+
+function startSessionsWatcher(state: RcSingleton): void {
+    // A restart must not skip the first change: reset the diff baseline so
+    // the next callback re-broadcasts even an unchanged list.
+    state.lastBroadcastSessions = null
+    if (state.watcher) state.watcher.stop()
+    state.watcher = watchRegistry(() => onSessionsChange(state))
+}
+
+function stopSessionsWatcher(state: RcSingleton): void {
+    if (state.watcher) {
+        state.watcher.stop()
+        state.watcher = null
+    }
+    state.lastBroadcastSessions = null
+}
+
+// ── select_session + proxy (anchor only; spec: rc-multi-session-spec.md) ───────────
+//
+// The anchor brokers every local pi session to one phone connection
+// (Decision 2). Selection is PER PHONE CONNECTION (RcClient.selectedId);
+// a non-anchor selection holds a live WebSocket to that sibling
+// (RcClient.proxy) through which the phone's session frames go verbatim and
+// the sibling's frames are forwarded back. The proxy authenticates with the
+// entry token read from the registry at open time — never from cache, the
+// sibling may have re-registered with a new token.
+
+// Sibling→phone forward list. sessionId rides on the frames, so no
+// retagging. ping/pong are deliberately absent: the proxy keepalive is
+// invisible to the phone (the proxy reader swallows pongs). session_done is
+// forwarded because the phone's handleStateInfo rebinds on any state frame
+// (the sibling's replacement session IS the new view).
+const SIBLING_FORWARD_TYPES = new Set([
+    'state',
+    'history',
+    'event',
+    'question',
+    'question_resolved',
+    'streaming_buffer',
+    'error',
+    'session_done',
+])
+
+function clearProxyTimers(proxy: RcProxy): void {
+    if (proxy.openTimer) clearTimeout(proxy.openTimer)
+    if (proxy.keepalive) clearInterval(proxy.keepalive)
+    proxy.openTimer = null
+    proxy.keepalive = null
+}
+
+// Detaches and closes the proxy the client currently holds (re-select,
+// phone disconnect, terminal failure). The sibling is not told WHY — a
+// plain close is enough; its ask()/status logic is unaffected by a proxy
+// client going away.
+function closeProxyForClient(state: RcSingleton, client: RcClient): void {
+    const proxy = client.proxy
+    client.proxy = null
+    client.pendingProxyAuth = null
+    if (proxy === null) return
+    clearProxyTimers(proxy)
+    proxy.ws.onopen = null
+    proxy.ws.onmessage = null
+    proxy.ws.onerror = null
+    proxy.ws.onclose = null
+    try {
+        if (proxy.ws.readyState === 0 || proxy.ws.readyState === 1) {
+            proxy.ws.close(1000, 'client_deselect')
+        }
+    } catch (error) {
+        dbgLog('proxy close failed:', errorMessage(error))
+    }
+}
+
+// Phone→sibling: verbatim JSON over the proxy. A throw must never propagate
+// into the phone's frame path — the send is best-effort on an OPEN socket.
+function sendToProxy(client: RcClient, message: JsonObject): void {
+    const proxy = client.proxy
+    if (proxy === null) return
+    try {
+        if (proxy.ws.readyState === 1) proxy.ws.send(JSON.stringify(message))
+    } catch (error) {
+        dbgLog('proxy send failed:', errorMessage(error))
+    }
+}
+
+// Phone-facing selection failure. `id` rides on the frame so the phone can
+// clear `selectedId` exactly when the missing entry is the one it was
+// viewing (spec: "session_not_found with id == selectedId clears
+// selectedId").
+function failSessionNotFound(client: RcClient, id: string): void {
+    writeJson(client, { type: 'error', code: 'session_not_found', id })
+}
+
+// The select deadline: 10 s from the FIRST open attempt to the sibling's
+// hello_ok (spec: §Wire protocol — select ack semantics). Keyed on the entry
+// id, not the proxy object: a bad_code closes the proxy socket (client.proxy
+// goes null) while the selection stays PENDING, and the deadline must outlive
+// that window. A re-select or a terminal failure clears the matching
+// markers, which disarms the timer when it eventually fires.
+function failSelectTimeout(state: RcSingleton, client: RcClient, id: string): void {
+    const stillPending =
+        client.proxy !== null ? client.proxy.id === id : client.pendingProxyAuth === id
+    if (!stillPending) return
+    dbgLog('select timeout:', id, 'for', client.ip)
+    client.selectedId = null
+    client.pendingProxyAuth = null
+    if (client.selectDeadlineAt) {
+        clearTimeout(client.selectDeadlineAt)
+        client.selectDeadlineAt = null
+    }
+    closeProxyForClient(state, client)
+    failSessionNotFound(client, id)
+    triggerSessionsRefresh(state)
+}
+
+// The one-shot auth retry (spec: "retry ONCE when the registry next
+// changes… if it fails again, session_not_found + clear"). Consumes the
+// pending marker BEFORE re-opening so a failing retry is terminal, not
+// re-armed.
+function retryPendingProxies(state: RcSingleton): void {
+    for (const client of Array.from(state.clients)) {
+        if (!client.authenticated) continue
+        const id = client.pendingProxyAuth
+        if (id === null) continue
+        client.pendingProxyAuth = null
+        openProxy(state, client, id, true)
+    }
+}
+
+// Sibling→phone: exactly the forward list, verbatim; everything else
+// (hello_ok, sessions, pong — and anything else a future sibling might send)
+// is dropped. The frames already carry the sibling's sessionId, so the
+// phone's sessionId guards adopt the view; no retagging.
+function forwardToClient(state: RcSingleton, client: RcClient, message: JsonObject): void {
+    if (!SIBLING_FORWARD_TYPES.has(message.type)) return
+    if (!writeJson(client, message)) closeClient(state, client)
+}
+
+// Opens (or re-opens) the proxy for `id` on `client`. The entry is read
+// FRESH at open time — the token must be the one the sibling currently
+// answers, and a re-registration may have landed between the phone's select
+// and now (spec: "re-read the entry at probe time, not at failure time").
+// `retrying` marks the single registry-change re-attempt after a bad_code;
+// a second bad_code is terminal.
+function openProxy(state: RcSingleton, client: RcClient, id: string, retrying: boolean): void {
+    const registry = readRegistry()
+    if (registry === null) {
+        // Corrupt registry: do NOT report the session as gone — an empty or
+        // unparseable read must never look like "all sessions gone" (the
+        // watch module's own invariant). Arm the retry slot so the next
+        // registry change re-opens; the open timer bounds the wait.
+        dbgLog('proxy open aborted: registry unparseable for', id)
+        client.pendingProxyAuth = id
+        return
+    }
+    const entry = registry.sessions.find(candidate => candidate.id === id)
+    if (entry === undefined) {
+        // The registry change that triggered a retry may have removed the
+        // entry (sibling deregistered): terminal, nothing left to select.
+        client.selectedId = null
+        client.pendingProxyAuth = null
+        if (client.selectDeadlineAt) {
+            clearTimeout(client.selectDeadlineAt)
+            client.selectDeadlineAt = null
+        }
+        failSessionNotFound(client, id)
+        return
+    }
+    // Close any existing proxy for this client (re-select, or a retry
+    // replacing a half-dead socket) before opening the fresh one. (This does
+    // NOT clear the select deadline: it is selection-scoped, not
+    // proxy-scoped, and a retry must not get a fresh 10 s.)
+    closeProxyForClient(state, client)
+    const ws = new globalThis.WebSocket(`ws://127.0.0.1:${entry.port}`)
+    // Selection-scoped deadline: the first attempt starts the 10 s timer
+    // (spec: from the select, not from each retry); a retry reuses the
+    // still-pending one, so the total wait is bounded by one window.
+    let openTimer: ReturnType<typeof setTimeout> | null
+    if (retrying) {
+        openTimer = client.selectDeadlineAt
+    } else {
+        if (client.selectDeadlineAt) clearTimeout(client.selectDeadlineAt)
+        openTimer = setTimeout(
+            () => failSelectTimeout(state, client, entry.id),
+            SELECT_TIMEOUT_MS
+        )
+        client.selectDeadlineAt = openTimer
+    }
+    const proxy: RcProxy = {
+        id: entry.id,
+        ws,
+        helloDone: false,
+        authRetried: retrying,
+        openTimer,
+        keepalive: null,
+    }
+    client.proxy = proxy
+    ws.onopen = () => {
+        if (client.proxy !== proxy) return
+        // The hello is the ONLY frame the anchor sends before hello_ok. The
+        // entry token (read above, at open time) is the credential — the
+        // sibling's handleHello accepts it as a third credential alongside
+        // the 6-digit code and the push token. VERSION rides along so a
+        // future protocol split fails loud, not silent.
+        try {
+            ws.send(JSON.stringify({ type: 'hello', version: VERSION, token: entry.token }))
+        } catch (error) {
+            dbgLog('proxy hello send failed:', errorMessage(error))
+        }
+    }
+    ws.onmessage = event => {
+        if (client.proxy !== proxy) return
+        let message: unknown
+        try {
+            message = JSON.parse(String(event.data))
+        } catch {
+            return
+        }
+        if (!isObject(message) || typeof message.type !== 'string') return
+        if (message.type === 'hello_ok') {
+            // Selection confirmed: the sibling's snapshot burst (state +
+            // history + streaming_buffer, sent by the sibling's own
+            // handleHello immediately after this frame) IS the ack (spec:
+            // no separate ack frame) and arrives over this socket as the
+            // next frames — forwarded below, which re-bonds the phone to the
+            // sibling's view. Mark selected FIRST so that forwarding is
+            // enabled for them. Stop the select deadline and start the
+            // keepalive that keeps the sibling's 90 s stale-close from
+            // firing on an idle-but-selected proxy (the phone's own pings
+            // stop at the anchor and never reach the sibling).
+            proxy.helloDone = true
+            const deadline = proxy.openTimer
+            if (deadline) clearTimeout(deadline)
+            proxy.openTimer = null
+            if (client.selectDeadlineAt === deadline) client.selectDeadlineAt = null
+            client.selectedId = proxy.id
+            client.pendingProxyAuth = null
+            proxy.keepalive = setInterval(() => {
+                try {
+                    if (proxy.ws.readyState === 1)
+                        proxy.ws.send(JSON.stringify({ type: 'ping' }))
+                } catch (error) {
+                    dbgLog('proxy keepalive failed:', errorMessage(error))
+                }
+            }, PROXY_KEEPALIVE_MS)
+            return
+        }
+        if (message.type === 'pong') {
+            // The proxy reader swallows pongs: never forwarded, never
+            // toasted (spec: the proxy keepalive is invisible to the phone).
+            return
+        }
+        if (message.type === 'error' && message.code === 'bad_code') {
+            // Auth failure: NOT a retry loop. The first failure keeps the
+            // selection PENDING and arms the one-shot registry-change retry
+            // (the sibling may re-register with a new token); this proxy's
+            // 10 s timer still bounds the wait. A failure on the retry is
+            // terminal: session_not_found + clear.
+            if (!proxy.authRetried) {
+                // First failure: keep the FIRST attempt's deadline running
+                // (it bounds how long the pending selection waits for the
+                // registry change that may carry a fresh token) and arm the
+                // one-shot retry.
+                proxy.authRetried = true
+                client.pendingProxyAuth = proxy.id
+            } else {
+                // The retry failed too: terminal (spec: no retry loop).
+                client.selectedId = null
+                client.pendingProxyAuth = null
+                if (client.selectDeadlineAt) {
+                    clearTimeout(client.selectDeadlineAt)
+                    client.selectDeadlineAt = null
+                }
+                closeProxyForClient(state, client)
+                failSessionNotFound(client, proxy.id)
+                triggerSessionsRefresh(state)
+            }
+            return
+        }
+        if (client.selectedId === null) {
+            // A session frame before hello_ok (out-of-order delivery): drop
+            // it — the phone has not re-bonded to this view yet and the
+            // snapshot burst carries the current state.
+            return
+        }
+        forwardToClient(state, client, message)
+    }
+    ws.onclose = () => {
+        if (client.proxy !== proxy) return
+        client.proxy = null
+        if (!proxy.helloDone) {
+            // A connect that never hellos: the bad_code path re-armed the
+            // retry, or the sibling wedged — either way there is no
+            // selection to lose (selectedId is still null), so no frame to
+            // the phone. Do NOT report session_gone. The select deadline
+            // KEEPS RUNNING (it is the bound on the pending selection) and
+            // no keepalive exists yet, so nothing is cleared here.
+            return
+        }
+        // Sibling died mid-selection (spec: §Proxy connection lifecycle):
+        // tell the phone, clear its selection, and refresh the list so the
+        // picker drops the dead row. The select deadline was already cleared
+        // by hello_ok, so there is nothing selection-scoped left to clean.
+        clearProxyTimers(proxy)
+        client.selectedId = null
+        client.pendingProxyAuth = null
+        writeJson(client, { type: 'session_gone', id: proxy.id })
+        triggerSessionsRefresh(state)
+    }
+}
+
+// The phone-facing entry point (case 'select_session'). Runs the validation
+// ladder from the spec: (a) id not in a FRESH registry read → immediate
+// session_not_found (no probe, no open); (b) id == the anchor's own entry →
+// in-process switch (close any proxy, mark selected, re-send the anchor's
+// snapshot to THIS client only); (c) a live sibling → open the proxy (dead
+// port → synchronous prune + session_not_found, no 10 s wait).
+function selectSession(state: RcSingleton, client: RcClient, id: string): void {
+    if (!state.isAnchor) return
+    const registry = readRegistry()
+    if (registry === null) {
+        dbgLog('select_session aborted: registry unparseable')
+        return
+    }
+    const entry = registry.sessions.find(candidate => candidate.id === id)
+    if (entry === undefined) {
+        failSessionNotFound(client, id)
+        return
+    }
+    // (b) the anchor's own session: a pure in-process switch, no proxy.
+    if (entry.id === state.entryId) {
+        closeProxyForClient(state, client)
+        client.selectedId = entry.id
+        client.pendingProxyAuth = null
+        // Targeted at THIS client only (the spec's "re-send the anchor's own
+        // snapshot to that client") — a broadcast would leak the switch to
+        // every phone.
+        writeSessionSnapshot(client, state)
+        if (state.pendingAsk) writeJson(client, state.pendingAsk.message)
+        return
+    }
+    // (c) a sibling: TCP-probe 127.0.0.1:port first (the 500 ms check in
+    // registry.ts; loopback, never the entry's host). Dead → prune
+    // synchronously and reply session_not_found — no 10 s wait (spec).
+    void (async () => {
+        const alive = await probePort(entry.port)
+        if (!alive) {
+            const result = removeEntry(entry.id)
+            dbgLog('select_session pruned dead entry:', entry.id, result)
+            failSessionNotFound(client, id)
+            triggerSessionsRefresh(state)
+            return
+        }
+        openProxy(state, client, id, false)
+    })().catch(error => {
+        dbgLog('select_session probe failed:', errorMessage(error))
+        failSessionNotFound(client, id)
+    })
+}
+
+// Re-broadcasts the sessions list after a selection outcome that changed the
+// registry out-of-band (a synchronous prune on a dead select, a session_gone
+// whose pruner rewrite has not re-triggered the watcher yet). Shares the
+// watcher's diff baseline so an unchanged list is never re-sent; the
+// watch/poll cycle remains the liveness path, this is only a latency cut.
+function triggerSessionsRefresh(state: RcSingleton): void {
+    const list = buildSessionsList()
+    const serialized = JSON.stringify(list)
+    if (serialized === state.lastBroadcastSessions) return
+    state.lastBroadcastSessions = serialized
+    state.broadcast({ type: 'sessions', sessions: list })
 }
 
 function listen(server: Server, port: number, host: string): Promise<void> {
