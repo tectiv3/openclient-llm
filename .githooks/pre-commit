@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Pre-commit hook: Swift (swiftformat + swiftlint) and TypeScript (prettier + eslint + tsc)
+set -euo pipefail
+export PATH="/run/current-system/sw/bin:$PATH"
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+
+# ── Swift ──────────────────────────────────────────────────────────
+
+STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACM -- '*.swift' | grep -v 'Package.swift' || true)
+
+if [ -n "$STAGED_SWIFT" ]; then
+    # Auto-fix with swiftformat
+    for FILE in $STAGED_SWIFT; do
+        [ -f "$FILE" ] || continue
+        swiftformat "$FILE" --quiet
+        git add "$FILE"
+    done
+
+    # Auto-fix with swiftlint
+    for FILE in $STAGED_SWIFT; do
+        [ -f "$FILE" ] || continue
+        swiftlint lint --fix --quiet --path "$FILE" 2>/dev/null || true
+        git add "$FILE"
+    done
+
+    # Final lint check - block on remaining issues
+    LINT_OUTPUT=$(swiftlint lint --quiet $STAGED_SWIFT 2>/dev/null || true)
+    if [ -n "$LINT_OUTPUT" ]; then
+        echo "$LINT_OUTPUT"
+        if echo "$LINT_OUTPUT" | grep -q ": error:"; then
+            echo "pre-commit: swiftlint errors remain after auto-fix"
+            exit 1
+        fi
+    fi
+fi
+
+# ── TypeScript (pi-extensions/) ────────────────────────────────────
+
+STAGED_TS=$(git diff --cached --name-only --diff-filter=ACM -- 'pi-extensions/*.ts' 'pi-extensions/**/*.ts' 'pi-extensions/*.mts' 'pi-extensions/**/*.mts' | grep -v 'test-project/' | grep -v 'test-client' || true)
+
+if [ -z "$STAGED_TS" ]; then
+    exit 0
+fi
+
+PI_DIR="$REPO_ROOT/pi-extensions"
+
+# Prettier: auto-format staged TS files, re-stage
+for FILE in $STAGED_TS; do
+    [ -f "$FILE" ] || continue
+    prettier --write "$FILE" --log-level error 2>/dev/null || true
+    git add "$FILE"
+done
+
+# ESLint: auto-fix staged TS files, re-stage, then check
+ESLINT_BIN="$PI_DIR/node_modules/.bin/eslint"
+if [ -x "$ESLINT_BIN" ]; then
+    for FILE in $STAGED_TS; do
+        [ -f "$FILE" ] || continue
+        "$ESLINT_BIN" --fix "$FILE" -c "$PI_DIR/eslint.config.mjs" 2>/dev/null || true
+        git add "$FILE"
+    done
+
+    # Final eslint check — block on remaining errors
+    ESLINT_OUTPUT=$("$ESLINT_BIN" $STAGED_TS -c "$PI_DIR/eslint.config.mjs" 2>&1 || true)
+    if [ -n "$ESLINT_OUTPUT" ]; then
+        echo "$ESLINT_OUTPUT"
+        echo "pre-commit: eslint errors remain after auto-fix"
+        exit 1
+    fi
+fi
+
+# tsc: type-check with baseline — only block on NEW errors
+# Baseline is line-number-stripped (sed replaces (row,col) with (*)) so
+# formatting changes don't invalidate it.
+TSC_BIN="$PI_DIR/node_modules/.bin/tsc"
+BASELINE="$PI_DIR/.tsc-baseline"
+if [ -x "$TSC_BIN" ] && [ -f "$PI_DIR/tsconfig.json" ]; then
+    TSC_RAW=$(cd "$PI_DIR" && "$TSC_BIN" --noEmit 2>&1 | grep "error TS" || true)
+    TSC_NORMALIZED=$(echo "$TSC_RAW" | sed 's/([0-9]*,[0-9]*)/(*)/' | sort)
+
+    if [ -n "$TSC_NORMALIZED" ] && [ -f "$BASELINE" ]; then
+        BASELINE_NORMALIZED=$(sed 's/([0-9]*,[0-9]*)/(*)/' "$BASELINE" | sort)
+        NEW_ERRORS=$(comm -23 <(echo "$TSC_NORMALIZED") <(echo "$BASELINE_NORMALIZED") || true)
+        if [ -n "$NEW_ERRORS" ]; then
+            echo "pre-commit: new TypeScript errors (not in baseline):"
+            echo "$NEW_ERRORS"
+            exit 1
+        fi
+    elif [ -n "$TSC_NORMALIZED" ] && [ ! -f "$BASELINE" ]; then
+        echo "pre-commit: TypeScript errors:"
+        echo "$TSC_RAW"
+        exit 1
+    fi
+fi
