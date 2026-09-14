@@ -1,12 +1,20 @@
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto'
-import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
+import {
+    existsSync,
+    mkdirSync,
+    readdirSync,
+    readFileSync,
+    renameSync,
+    writeFileSync,
+} from 'node:fs'
 import { networkInterfaces } from 'node:os'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
-import type {
-    ExtensionAPI,
-    ExtensionCommandContext,
-    ExtensionContext,
+import {
+    getAgentDir,
+    type ExtensionAPI,
+    type ExtensionCommandContext,
+    type ExtensionContext,
 } from '@earendil-works/pi-coding-agent'
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
@@ -36,6 +44,17 @@ import {
     sendApnsPush,
     type PushOutcome,
 } from './apns'
+import { pruneBufferForSnapshot, tailClassification } from './turnBuffer'
+import {
+    SUBAGENT_EVENT_WHITELIST,
+    buildSubagentSnapshot,
+    classifySettle,
+    mapBusEvent,
+    parseSubagentMeta,
+    resolveAttachCandidate,
+    scanLiveSubagents,
+    type ScannedSubagent,
+} from './subagents'
 
 const RC_KEY = Symbol.for('pi-rc')
 const PORT = 47800
@@ -139,6 +158,11 @@ type RcClient = {
     // §Wire protocol — "one selected session at a time" per phone connection).
     // null = default: the anchor's own session view.
     selectedId: string | null
+    // Feature B: the subagent run this connection is attached to (null =
+    // none). ONE attach per client — a new attach_subagent implicitly detaches
+    // the previous one; cleared on session-selection change, client close, and
+    // run settle.
+    attachedSubagentId: string | null
     proxy: RcProxy | null
     // Select whose proxy hello failed with bad_code: the selection stays
     // pending and reopens (with a fresh registry token read) on the NEXT
@@ -169,6 +193,11 @@ type RcSingleton = {
     lastStopReason: string | null
     isStreaming: boolean
     currentTurnBuffer: ContentBlock[]
+    // Feature B: per-run in-flight state, lazily keyed by subagentId from the
+    // FIRST observed bus event (M2: attach mid-run is the normal case; the
+    // in-flight turn is uncommitted and absent from the child's .jsonl, so it
+    // must be tracked independently of attach state).
+    subagentRunState: Map<string, { buffer: ContentBlock[]; lastStopReason: string | null }>
     pendingAsk: PendingAsk | null
     pendingSteers: string[]
     compacting: CompactingInfo | null
@@ -214,6 +243,7 @@ function singleton(): RcSingleton {
         lastStopReason: null,
         isStreaming: false,
         currentTurnBuffer: [],
+        subagentRunState: new Map(),
         pendingAsk: null,
         pendingSteers: [],
         compacting: null,
@@ -506,6 +536,7 @@ function handleUpgrade(
         ip: normalizeIp(req.socket.remoteAddress ?? socket.remoteAddress ?? 'unknown'),
         lastMessageAt: Date.now(),
         selectedId: null,
+        attachedSubagentId: null,
         proxy: null,
         pendingProxyAuth: null,
         selectDeadlineAt: null,
@@ -746,6 +777,20 @@ function handleClientMessage(state: RcSingleton, client: RcClient, message: unkn
             // off-box, so this case cannot fire on a sibling (task contract).
             selectSession(state, client, stringFrom(message.id) ?? '')
             break
+        case 'get_subagents':
+        case 'attach_subagent':
+        case 'detach_subagent': {
+            // Feature B: anchor-only by construction, like select_session. A
+            // NEW phone may reach an OLD rc (extensions load at pi start):
+            // those requests land here only because the phone checks the
+            // hello_ok capability first; pre-gate restarts answer
+            // invalid_message, which the Swift side treats as "no support".
+            if (message.type === 'get_subagents') sendSubagentsToClient(state, client)
+            else if (message.type === 'attach_subagent')
+                handleAttachSubagent(state, client, message)
+            else handleDetachSubagent(state, client, message)
+            break
+        }
         default:
             writeJson(client, { type: 'error', code: 'invalid_message' })
     }
@@ -806,12 +851,16 @@ function handleHello(state: RcSingleton, client: RcClient, message: JsonObject):
     if (!loopback) state.rateLimits.delete(client.ip)
     client.authenticated = true
     refreshStatus(state)
-    writeJson(client, { type: 'hello_ok', version: VERSION })
+    writeJson(client, { type: 'hello_ok', version: VERSION, features: ['subagents'] })
     // The phone builds its picker from this; a fresh connect (or the anchor
     // proxy's connect, whose reader ignores it) must not wait for a registry
     // change to see the list.
     if (state.isAnchor) sendSessions(client)
     writeSessionSnapshot(client, state)
+    // Feature B: the attach picker is part of the connect snapshot burst —
+    // the phone's session view must not wait for a lifecycle event to see
+    // live runs (and an empty list still means "clear stale state").
+    sendSubagentsToClient(state, client)
     if (state.pendingAsk) writeJson(client, state.pendingAsk.message)
 }
 
@@ -1008,10 +1057,17 @@ function hasStreamingBuffer(state: RcSingleton): boolean {
 }
 
 function streamingBuffer(state: RcSingleton): JsonObject {
+    // Reconnect dedupe (spec Feature A): the committed turn's text/thinking
+    // and finished tool carriers are already in the branch history, so the
+    // snapshot buffer is pruned to what the client genuinely lacks. This
+    // frame builder is the single choke point of both snapshot emitters, so
+    // no other prune hook is needed.
+    const branch = safeArray(state.binding?.ctx.sessionManager.getBranch())
+    const tail = tailClassification(branch[branch.length - 1])
     return {
         type: 'streaming_buffer',
         sessionId: sessionId(state),
-        content: state.currentTurnBuffer,
+        content: pruneBufferForSnapshot(state.currentTurnBuffer, tail),
     }
 }
 
@@ -1413,10 +1469,17 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
         // which must not carry stale entries from the old session.
         state.pendingSteers.length = 0
         state.compacting = null
+        // Feature B: an in-process /new changes the anchor session — attaches
+        // and per-run in-flight state belong to the old session and die with
+        // it (the run's files survive on disk, just out of scope).
+        for (const client of state.clients) client.attachedSubagentId = null
+        state.subagentRunState.clear()
         forward('session_start', event, ctx)
         // forward() rebinds to the new ctx; this (debounced) is what updates
         // the entry's sessionId/name/cwd/model after an in-process /new.
         notifyRcStatus(state)
+        // The new session has no live runs yet — clear the phones' pickers.
+        broadcastSubagents(state)
     })
     pi.on('session_shutdown', async (event, ctx) => {
         state.compacting = null
@@ -1515,6 +1578,22 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
         notifyRcStatus(state)
         state.broadcast(buildState(state))
     })
+    // Feature B: the subagent extension emits 'subagent:event' for EVERY
+    // child stdout event on the cross-extension bus (payload {subagentId,
+    // agent, event}, event name = event.type). The subscription is idempotent
+    // across pi re-bindings (the rc(pi) registration itself runs once per pi
+    // instance, but the guard keeps a re-registration from double-forwarding).
+    subscribeSubagentBus(pi, state)
+}
+
+let subagentBusSubscribed = false
+
+function subscribeSubagentBus(pi: ExtensionAPI, state: RcSingleton): void {
+    if (subagentBusSubscribed) return
+    subagentBusSubscribed = true
+    pi.events.on('subagent:event', data => {
+        handleSubagentBusEvent(state, data)
+    })
 }
 
 function trackEvent(state: RcSingleton, name: string, event: unknown): void {
@@ -1562,7 +1641,7 @@ function trackEvent(state: RcSingleton, name: string, event: unknown): void {
         if (index !== -1) state.pendingSteers.splice(index, 1)
     }
     if (name === 'message_update' && isObject(event))
-        appendAssistantDelta(state, event.assistantMessageEvent)
+        appendAssistantDelta(state.currentTurnBuffer, event.assistantMessageEvent)
     if (name === 'tool_execution_start' && isObject(event)) {
         state.currentTurnBuffer.push({
             type: 'toolUse',
@@ -1571,42 +1650,47 @@ function trackEvent(state: RcSingleton, name: string, event: unknown): void {
             args: isObject(event.args) ? event.args : {},
         })
     }
-    if (name === 'tool_execution_update' && isObject(event)) updateToolOutput(state, event)
-    if (name === 'tool_execution_end' && isObject(event)) updateToolOutput(state, event)
+    if (name === 'tool_execution_update' && isObject(event))
+        updateToolOutput(state.currentTurnBuffer, event)
+    if (name === 'tool_execution_end' && isObject(event))
+        updateToolOutput(state.currentTurnBuffer, event)
     if (name === 'turn_end') state.currentTurnBuffer = []
 }
 
-function appendAssistantDelta(state: RcSingleton, assistantEvent: unknown): void {
+// Buffer parameterized (not state-bound): the main session passes
+// state.currentTurnBuffer; Feature B passes one per subagent run, so both
+// share the exact same delta/tool-output semantics.
+function appendAssistantDelta(buffer: ContentBlock[], assistantEvent: unknown): void {
     if (!isObject(assistantEvent)) return
     const type = stringFrom(assistantEvent.type)
     const delta = stringFrom(assistantEvent.delta) ?? stringFrom(assistantEvent.text) ?? ''
     const index =
         typeof assistantEvent.contentIndex === 'number'
             ? assistantEvent.contentIndex
-            : state.currentTurnBuffer.length
+            : buffer.length
     if (type === 'text_delta' || type === 'thinking_delta') {
         const blockType = type === 'thinking_delta' ? 'thinking' : 'text'
-        let block = state.currentTurnBuffer[index]
+        let block = buffer[index]
         if (!block || block.type !== blockType) {
             block = { type: blockType, text: '' } as ContentBlock
-            state.currentTurnBuffer[index] = block
+            buffer[index] = block
         }
         if (block.type !== 'toolUse') block.text += delta
     } else if (type === 'toolcall_delta') {
-        let block = state.currentTurnBuffer[index]
+        let block = buffer[index]
         if (!block || block.type !== 'toolUse') {
             block = { type: 'toolUse', toolCallId: '', toolName: 'tool', args: {} }
-            state.currentTurnBuffer[index] = block
+            buffer[index] = block
         }
         if (block.type === 'toolUse' && delta.length > 0)
             block.output = `${block.output ?? ''}${delta}`
     }
-    state.currentTurnBuffer = state.currentTurnBuffer.filter(Boolean)
+    for (let i = buffer.length - 1; i >= 0; i--) if (!buffer[i]) buffer.splice(i, 1)
 }
 
-function updateToolOutput(state: RcSingleton, event: JsonObject): void {
+function updateToolOutput(buffer: ContentBlock[], event: JsonObject): void {
     const toolCallId = stringFrom(event.toolCallId)
-    const block = [...state.currentTurnBuffer]
+    const block = [...buffer]
         .reverse()
         .find(
             item => item.type === 'toolUse' && (!toolCallId || item.toolCallId === toolCallId)
@@ -2203,6 +2287,10 @@ function openProxy(state: RcSingleton, client: RcClient, id: string, retrying: b
             proxy.openTimer = null
             if (client.selectDeadlineAt === deadline) client.selectDeadlineAt = null
             client.selectedId = proxy.id
+            // Feature B: the attach is scoped to the client's effective
+            // session — a sibling selection invalidates it (the run's events
+            // no longer belong to the viewed session).
+            client.attachedSubagentId = null
             client.pendingProxyAuth = null
             proxy.keepalive = setInterval(() => {
                 try {
@@ -2414,6 +2502,333 @@ function stringFromDeep(value: unknown): string | undefined {
 
 function safeArray(value: unknown): unknown[] {
     return Array.isArray(value) ? value : []
+}
+
+// ── Feature B: subagent attach (spec: 2026-09-13-rc-subagent-attach-stop-ux.md) ─
+// The subagent extension writes its per-run files into getAgentDir()/subagents
+// (verified: the pi-extensions repo's getSubagentsDir) — the GLOBAL agent
+// directory, not per-session. The parentSessionId filter inside
+// scanLiveSubagents is what scopes a scan to one session.
+function subagentsDir(): string {
+    return join(getAgentDir(), 'subagents')
+}
+
+function fsListSubagentFiles(dir: string): string[] {
+    try {
+        return readdirSync(dir)
+    } catch {
+        return []
+    }
+}
+
+function fsReadSubagentFile(path: string): string {
+    return readFileSync(path, 'utf8')
+}
+
+// kill(pid, 0) probes across processes (a child run is a separate pi process,
+// same user). EPERM = "alive but not ours" — alive either way.
+function isSubagentPidAlive(pid: number): boolean {
+    try {
+        process.kill(pid, 0)
+        return true
+    } catch (error) {
+        return isObject(error) && error.code === 'EPERM'
+    }
+}
+
+// The RECEIVING client's effective session (M3 fix: "current session"
+// without the per-connection qualifier leaked the anchor's runs to a phone
+// viewing a sibling). A sibling-selected client's runs still live in the
+// same global directory, keyed by the sibling's sessionId from the registry.
+function effectiveSessionId(state: RcSingleton, client: RcClient): string | null {
+    if (client.selectedId === null || client.selectedId === state.entryId)
+        return sessionId(state)
+    const registry = readRegistry()
+    if (registry === null) return null
+    const entry = registry.sessions.find(candidate => candidate.id === client.selectedId)
+    return entry?.sessionId ?? null
+}
+
+function scanEffectiveSubagents(
+    state: RcSingleton,
+    client: RcClient
+): ScannedSubagent[] | null {
+    const sessionId = effectiveSessionId(state, client)
+    if (sessionId === null) return null
+    return scanLiveSubagents({
+        dir: subagentsDir(),
+        sessionId,
+        listFiles: fsListSubagentFiles,
+        readFile: fsReadSubagentFile,
+        isAlive: isSubagentPidAlive,
+    })
+}
+
+function toSubagentsFrame(run: ScannedSubagent): JsonObject {
+    return {
+        id: run.id,
+        agent: run.meta.agent,
+        task: run.meta.task,
+        startedAt: run.meta.startedAt,
+        ...(run.meta.toolCallId !== undefined ? { toolCallId: run.meta.toolCallId } : {}),
+        ...(run.meta.model !== undefined ? { model: run.meta.model } : {}),
+    }
+}
+
+// Always an array — empty when no live runs (or the session cannot be
+// resolved): the Swift client CLEARS liveSubagents from this frame, so an
+// omitted/absent frame would leak stale state.
+function sendSubagentsToClient(state: RcSingleton, client: RcClient): void {
+    const runs = scanEffectiveSubagents(state, client)
+    writeJson(client, { type: 'subagents', subagents: (runs ?? []).map(toSubagentsFrame) })
+}
+
+function broadcastSubagents(state: RcSingleton): void {
+    for (const client of state.clients) sendSubagentsToClient(state, client)
+}
+
+// Per-run in-flight state, lazily created from the first observed bus event
+// (M2: attach mid-run is the normal case — the in-flight turn is uncommitted
+// and absent from the child's .jsonl, so it must be tracked regardless of
+// attach state).
+function subagentRunState(
+    state: RcSingleton,
+    subagentId: string
+): { buffer: ContentBlock[]; lastStopReason: string | null } {
+    let run = state.subagentRunState.get(subagentId)
+    if (run === undefined) {
+        run = { buffer: [], lastStopReason: null }
+        state.subagentRunState.set(subagentId, run)
+    }
+    return run
+}
+
+// One whitelisted child bus event → per-run buffer update + forward to the
+// attached clients. Everything else is consumed for internal state only
+// (message_end → lastStopReason; agent_* → lifecycle). Mirrors trackEvent's
+// main-session buffer semantics on a per-run buffer instead.
+function handleSubagentBusEvent(state: RcSingleton, busPayload: unknown): void {
+    const subagentId = isObject(busPayload) ? stringFrom(busPayload.subagentId) : undefined
+    const mapped = mapBusEvent(busPayload)
+    if (subagentId === undefined || mapped === null) return
+    const name = mapped.name
+    const payload = mapped.payload
+    const run = subagentRunState(state, subagentId)
+    if (
+        name === 'message_start' &&
+        isObject(payload.message) &&
+        payload.message.role === 'assistant'
+    ) {
+        run.buffer = []
+    }
+    if (name === 'message_update')
+        appendAssistantDelta(run.buffer, payload.assistantMessageEvent)
+    if (name === 'tool_execution_start') {
+        run.buffer.push({
+            type: 'toolUse',
+            toolCallId: stringFrom(payload.toolCallId) ?? '',
+            toolName: stringFrom(payload.toolName) ?? 'tool',
+            args: isObject(payload.args) ? payload.args : {},
+        })
+    }
+    if (name === 'tool_execution_update' || name === 'tool_execution_end')
+        updateToolOutput(run.buffer, payload)
+    if (name === 'turn_end') run.buffer = []
+    if (
+        (name === 'message_end' || name === 'turn_end') &&
+        isObject(payload.message) &&
+        typeof payload.message.stopReason === 'string'
+    ) {
+        run.lastStopReason = payload.message.stopReason
+    }
+    if (name === 'agent_start') broadcastSubagents(state)
+    if (name === 'agent_settled') startSubagentSettlePoll(state, subagentId)
+    if (!SUBAGENT_EVENT_WHITELIST.has(name)) return
+    const frame: JsonObject = { type: 'subagent_event', subagentId, name, ...payload }
+    for (const client of state.clients) {
+        if (client.attachedSubagentId === subagentId) writeJson(client, frame)
+    }
+}
+
+function readSubagentMeta(
+    dir: string,
+    subagentId: string
+): {
+    present: boolean
+    meta: unknown
+} {
+    try {
+        const meta = JSON.parse(fsReadSubagentFile(join(dir, `${subagentId}.meta`)))
+        return { present: true, meta }
+    } catch {
+        return { present: false, meta: null }
+    }
+}
+
+function readSubagentPid(dir: string, subagentId: string): number | undefined {
+    try {
+        const pid = Number.parseInt(
+            fsReadSubagentFile(join(dir, `${subagentId}.pid`)).trim(),
+            10
+        )
+        return Number.isNaN(pid) || pid <= 0 ? undefined : pid
+    } catch {
+        return undefined
+    }
+}
+
+// Settle lifecycle (spec): on a run's agent_settled, poll the TERMINAL FILE
+// STATE — keyed on META, never the pidfile (m1: the extension removes .pid
+// unconditionally first on every exit, so the pidfile is not a classifier).
+// 50 ms poll, 2 s deadline; classifySettle's `extend` keeps the loop alive
+// while the pid is still shutting down, and the deadline is the hard stop.
+const SETTLE_DEADLINE_MS = 2000
+const SETTLE_POLL_MS = 50
+
+// Settle pollers per run — a second agent_settled for the same run (a resumed
+// run settles again) must not start a second poller while one is running.
+const settlePollers = new Map<string, ReturnType<typeof setInterval>>()
+
+function startSubagentSettlePoll(state: RcSingleton, subagentId: string): void {
+    if (settlePollers.has(subagentId)) return
+    const startedAt = Date.now()
+    const timer = setInterval(() => {
+        const dir = subagentsDir()
+        const { present, meta } = readSubagentMeta(dir, subagentId)
+        const parsedMeta = parseSubagentMeta(meta)
+        const pid = readSubagentPid(dir, subagentId)
+        const result = classifySettle({
+            metaPresent: present,
+            metaStatus: parsedMeta?.status,
+            metaStopReason: parsedMeta?.stopReason,
+            pidAlive: pid !== undefined && isSubagentPidAlive(pid),
+            lastObservedStopReason: state.subagentRunState.get(subagentId)?.lastStopReason,
+            deadlineExceeded: Date.now() - startedAt > SETTLE_DEADLINE_MS,
+        })
+        if (result.extend) {
+            // Slow clean shutdown: the pid is still alive with no terminal
+            // status — keep polling until the status lands, the meta is
+            // deleted, or the deadline passes (classifySettle stops
+            // extending once deadlineExceeded, so the loop always ends).
+            return
+        }
+        clearInterval(timer)
+        settlePollers.delete(subagentId)
+        state.subagentRunState.delete(subagentId)
+        const frame: JsonObject = {
+            type: 'subagent_settled',
+            subagentId,
+            status: result.status,
+            ...(result.stopReason !== undefined ? { stopReason: result.stopReason } : {}),
+        }
+        state.broadcast(frame)
+        broadcastSubagents(state)
+    }, SETTLE_POLL_MS)
+    timer.unref?.()
+    settlePollers.set(subagentId, timer)
+}
+
+function buildSubagentHistory(
+    dir: string,
+    subagentId: string
+): {
+    history: unknown[]
+    lastEntry: unknown
+} {
+    // The child's .jsonl IS a pi session file — the same entry shapes the
+    // main session's branch has, so mapHistoryEntry renders it unmodified.
+    const path = join(dir, `${subagentId}.jsonl`)
+    let raw: string
+    try {
+        raw = fsReadSubagentFile(path)
+    } catch {
+        return { history: [], lastEntry: undefined }
+    }
+    const lines = raw.split('\n').filter(line => line.length > 0)
+    const entries: unknown[] = []
+    for (const line of lines) {
+        try {
+            entries.push(JSON.parse(line))
+        } catch {
+            // torn tail line (the child writes as it runs) — skip
+        }
+    }
+    const messages = entries
+        .filter(entry => isObject(entry) && entry.type === 'message')
+        .map(entry => entry as JsonObject)
+        .flatMap(entry => mapHistoryEntry(entry))
+    return { history: messages, lastEntry: entries[entries.length - 1] ?? undefined }
+}
+
+function sendSubagentSnapshot(
+    state: RcSingleton,
+    client: RcClient,
+    run: ScannedSubagent
+): void {
+    const dir = subagentsDir()
+    const { history, lastEntry } = buildSubagentHistory(dir, run.id)
+    const runState = state.subagentRunState.get(run.id)
+    const snapshot = buildSubagentSnapshot({
+        history,
+        buffer: runState?.buffer ?? [],
+        ...(lastEntry !== undefined ? { lastJsonlMessage: lastEntry } : {}),
+    })
+    writeJson(client, {
+        type: 'subagent_snapshot',
+        subagentId: run.id,
+        agent: run.meta.agent,
+        task: run.meta.task,
+        startedAt: run.meta.startedAt,
+        running: true,
+        history: snapshot.history,
+        ...(snapshot.buffer.length > 0 ? { buffer: snapshot.buffer } : {}),
+    })
+}
+
+function handleAttachSubagent(
+    state: RcSingleton,
+    client: RcClient,
+    message: JsonObject
+): void {
+    const runs = scanEffectiveSubagents(state, client)
+    if (runs === null) {
+        writeJson(client, {
+            type: 'error',
+            code: 'subagent_not_found',
+            message: 'No session to attach to.',
+        })
+        return
+    }
+    const candidate = resolveAttachCandidate(
+        runs,
+        stringFrom(message.subagentId),
+        stringFrom(message.toolCallId)
+    )
+    if (candidate.ok === false) {
+        writeJson(client, {
+            type: 'error',
+            code: 'subagent_not_found',
+            message: candidate.message,
+        })
+        return
+    }
+    // ONE attach per client: this assignment IS the implicit detach of the
+    // previous attach (spec wire protocol).
+    client.attachedSubagentId = candidate.run.id
+    sendSubagentSnapshot(state, client, candidate.run)
+}
+
+function handleDetachSubagent(
+    state: RcSingleton,
+    client: RcClient,
+    message: JsonObject
+): void {
+    const subagentId = stringFrom(message.subagentId)
+    if (subagentId === undefined) {
+        writeJson(client, { type: 'error', code: 'invalid_message' })
+        return
+    }
+    if (client.attachedSubagentId === subagentId) client.attachedSubagentId = null
 }
 
 export default function rc(pi: ExtensionAPI): void {
