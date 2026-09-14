@@ -77,6 +77,35 @@ struct CodeHistory: Equatable, Sendable, Codable {
     let pending: [String]?
 }
 
+// MARK: - Subagents (Feature B)
+
+/// One live subagent run of the receiving client's effective session, from
+/// a `subagents` frame. The frame is always an array (possibly empty) and
+/// is authoritative: the client replaces `liveSubagents` wholesale.
+struct CodeSubagentInfo: Equatable, Sendable, Codable {
+    let id: String
+    let agent: String
+    let task: String
+    let startedAt: String
+    /// The spawning `subagent` tool call id — the tap-routing key that
+    /// links a transcript tool step to its run (absent for non-tool spawns).
+    let toolCallId: String?
+    let model: String?
+}
+
+/// An attached run's state: committed history (byte-for-byte the
+/// `history.messages` shape) plus the pruned in-flight tail buffer.
+struct CodeSubagentSnapshot: Equatable, Sendable, Codable {
+    let subagentId: String
+    let agent: String
+    let task: String
+    let startedAt: String
+    let running: Bool
+    let history: [CodeHistoryMessage]
+    /// Absent when the run had no in-flight tail at snapshot time.
+    let buffer: [CodeContentBlock]?
+}
+
 // MARK: - Content Blocks
 
 enum CodeContentBlock: Equatable, Sendable {

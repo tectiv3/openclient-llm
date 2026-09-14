@@ -28,11 +28,86 @@ struct CodeSessionView: View {
     @State private var showCompactConfirm = false
     @State private var showRenameAlert = false
     @State private var renameText = ""
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    // Non-private: shared with the Panels extension (status dot pulse).
+    @Environment(\.accessibilityReduceMotion) var reduceMotion
 
     // MARK: - View
 
     var body: some View {
+        mainContent
+            .modifier(AttachCoverModifier(session: session, viewModel: viewModel))
+            .sheet(isPresented: $showModelsSheet) { modelsSheet }
+            .sheet(isPresented: $showSessionsSheet) { sessionsSheet }
+            .confirmationDialog(
+                String(localized: "New Session"),
+                isPresented: $showNewSessionConfirm,
+                titleVisibility: .visible
+            ) {
+                Button(String(localized: "New Session"), role: .destructive) {
+                    viewModel.send(.newSession)
+                }
+                Button(String(localized: "Cancel"), role: .cancel) {}
+            } message: {
+                Text(newSessionConfirmMessage)
+            }
+            .confirmationDialog(
+                String(localized: "Compact Context"),
+                isPresented: $showCompactConfirm,
+                titleVisibility: .visible
+            ) {
+                Button(String(localized: "Compact"), role: .destructive) {
+                    viewModel.send(.compact(instructions: nil))
+                }
+                Button(String(localized: "Cancel"), role: .cancel) {}
+            } message: {
+                Text(compactConfirmMessage)
+            }
+            .alert(
+                String(localized: "Rename Session"),
+                isPresented: $showRenameAlert
+            ) {
+                TextField(
+                    String(localized: "Session name"), text: $renameText
+                )
+                Button(String(localized: "Cancel"), role: .cancel) {}
+                Button(String(localized: "Rename")) {
+                    handleRenameSubmit()
+                }
+            }
+            .animation(
+                reduceMotion ? nil : .spring(duration: 0.3),
+                value: viewModel.transientToast
+            )
+            .onChange(of: session.compacting != nil) { _, isCompacting in
+                let message = isCompacting
+                    ? String(localized: "Compacting context")
+                    : String(localized: "Compaction ended")
+                AccessibilityNotification.Announcement(message).post()
+            }
+            .onChange(of: isReconnecting) { _, reconnecting in
+                guard !reconnecting else { return }
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) {
+                    showReconnectSuccess = true
+                }
+                Task {
+                    try? await Task.sleep(for: .seconds(2))
+                    withAnimation(
+                        reduceMotion ? nil : .easeInOut(duration: 0.3)
+                    ) {
+                        showReconnectSuccess = false
+                    }
+                }
+            }
+            .task(id: viewModel.transientToast) {
+                guard viewModel.transientToast != nil else { return }
+                try? await Task.sleep(for: .seconds(3))
+                viewModel.send(.clearToast)
+            }
+    }
+
+    /// The main content column (banner, header, transcript, input bar)
+    /// with its chrome — kept out of `body` for the type-checker.
+    private var mainContent: some View {
         VStack(spacing: 0) {
             if isReconnecting {
                 reconnectingBanner
@@ -67,52 +142,10 @@ struct CodeSessionView: View {
                 isStreaming: session.isStreaming,
                 isDisabled: isReconnecting,
                 isQuestionPresented: session.pendingQuestion != nil,
-                onSend: handleSend,
-                onStop: { viewModel.send(.abort) }
+                onSend: handleSend
             )
         }
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    onBack()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .foregroundStyle(.secondary)
-                }
-                .accessibilityLabel(
-                    String(localized: "Back")
-                )
-            }
-
-            ToolbarItem(placement: .navigation) {
-                statusDot
-                    .accessibilityLabel(
-                        isReconnecting
-                            ? String(localized: "Reconnecting")
-                            : String(localized: "Connected")
-                    )
-            }
-
-            ToolbarItem(placement: .automatic) {
-                sessionMenu
-            }
-
-            ToolbarItem(placement: .automatic) {
-                sessionsButton
-            }
-
-            ToolbarItem(placement: .automatic) {
-                Button {
-                    viewModel.send(.disconnect)
-                } label: {
-                    Image(systemName: "xmark.circle")
-                        .foregroundStyle(.secondary)
-                }
-                .accessibilityLabel(
-                    String(localized: "Disconnect")
-                )
-            }
-        }
+        .toolbar { mainToolbar }
         .overlay(alignment: .bottom) {
             if !shouldAutoScroll && !session.items.isEmpty {
                 jumpToBottomButton
@@ -143,101 +176,83 @@ struct CodeSessionView: View {
             .frame(width: 480, height: 520)
         }
         #endif
-        .sheet(isPresented: $showModelsSheet) {
-            CodeModelsSheetView(
-                models: session.models,
-                selected: session.model,
-                onSelect: { model in
-                    viewModel.send(
-                        .setModel(provider: model.provider, modelId: model.id)
-                    )
-                    showModelsSheet = false
-                }
-            )
-            #if os(macOS)
-            .frame(width: 400, height: 480)
-            #endif
-        }
-        .sheet(isPresented: $showSessionsSheet) {
-            CodeSessionsSheetView(
-                sessions: viewModel.sessions,
-                effectiveSelectedId: effectiveSelectedId,
-                onSelect: { id in
-                    viewModel.selectSession(id: id)
-                    showSessionsSheet = false
-                }
-            )
-            #if os(macOS)
-            .frame(width: 420, height: 420)
-            #endif
-        }
-        .confirmationDialog(
-            String(localized: "New Session"),
-            isPresented: $showNewSessionConfirm,
-            titleVisibility: .visible
-        ) {
-            Button(String(localized: "New Session"), role: .destructive) {
-                viewModel.send(.newSession)
-            }
-            Button(String(localized: "Cancel"), role: .cancel) {}
-        } message: {
-            Text(newSessionConfirmMessage)
-        }
-        .confirmationDialog(
-            String(localized: "Compact Context"),
-            isPresented: $showCompactConfirm,
-            titleVisibility: .visible
-        ) {
-            Button(String(localized: "Compact"), role: .destructive) {
-                viewModel.send(.compact(instructions: nil))
-            }
-            Button(String(localized: "Cancel"), role: .cancel) {}
-        } message: {
-            Text(compactConfirmMessage)
-        }
-        .alert(
-            String(localized: "Rename Session"),
-            isPresented: $showRenameAlert
-        ) {
-            TextField(String(localized: "Session name"), text: $renameText)
-            Button(String(localized: "Cancel"), role: .cancel) {}
-            Button(String(localized: "Rename")) {
-                handleRenameSubmit()
-            }
-        }
-        .animation(
-            reduceMotion ? nil : .spring(duration: 0.3),
-            value: viewModel.transientToast
-        )
-        .onChange(of: session.compacting != nil) { _, isCompacting in
-            let message = isCompacting
-                ? String(localized: "Compacting context")
-                : String(localized: "Compaction ended")
-            AccessibilityNotification.Announcement(message).post()
-        }
-        .onChange(of: isReconnecting) { _, reconnecting in
-            guard !reconnecting else { return }
-            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) {
-                showReconnectSuccess = true
-            }
-            Task {
-                try? await Task.sleep(for: .seconds(2))
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) {
-                    showReconnectSuccess = false
-                }
-            }
-        }
-        .task(id: viewModel.transientToast) {
-            guard viewModel.transientToast != nil else { return }
-            try? await Task.sleep(for: .seconds(3))
-            viewModel.send(.clearToast)
-        }
     }
 }
 
 // MARK: - Private
 
 private extension CodeSessionView {
+    // MARK: - Toolbar
+
+    @ToolbarContentBuilder
+    var mainToolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Button {
+                onBack()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityLabel(String(localized: "Back"))
+        }
+
+        ToolbarItem(placement: .navigation) {
+            statusDot
+        }
+
+        ToolbarItem(placement: .automatic) {
+            sessionMenu
+        }
+
+        ToolbarItem(placement: .automatic) {
+            sessionsButton
+        }
+
+        ToolbarItem(placement: .automatic) {
+            Button {
+                viewModel.send(.disconnect)
+            } label: {
+                Image(systemName: "xmark.circle")
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityLabel(String(localized: "Disconnect"))
+        }
+    }
+
+    // MARK: - Sheets
+
+    @ViewBuilder
+    var modelsSheet: some View {
+        CodeModelsSheetView(
+            models: session.models,
+            selected: session.model,
+            onSelect: { model in
+                viewModel.send(
+                    .setModel(provider: model.provider, modelId: model.id)
+                )
+                showModelsSheet = false
+            }
+        )
+        #if os(macOS)
+        .frame(width: 400, height: 480)
+        #endif
+    }
+
+    @ViewBuilder
+    var sessionsSheet: some View {
+        CodeSessionsSheetView(
+            sessions: viewModel.sessions,
+            effectiveSelectedId: effectiveSelectedId,
+            onSelect: { id in
+                viewModel.selectSession(id: id)
+                showSessionsSheet = false
+            }
+        )
+        #if os(macOS)
+        .frame(width: 420, height: 420)
+        #endif
+    }
+
     // MARK: - Session Commands
 
     var sessionMenu: some View {
@@ -331,10 +346,15 @@ private extension CodeSessionView {
         ScrollView {
             LazyVStack(spacing: 16) {
                 ForEach(session.items) { item in
+                    let liveRun = liveSubagentRun(for: item)
                     CodeTranscriptItemView(
                         item: item,
                         onRetry: { id in
                             viewModel.send(.retryPrompt(id: id))
+                        },
+                        subagentRun: liveRun,
+                        onOpenLive: liveRun.map {
+                            run in { viewModel.attachSubagent(info: run) }
                         }
                     )
                     .id(item.id)
@@ -401,6 +421,19 @@ private extension CodeSessionView {
         .transition(.scale.combined(with: .opacity))
     }
 
+    /// The live subagent run (Feature B) a transcript row links to, if any:
+    /// only `subagent` tool steps, only when the capability is advertised,
+    /// and only while the run is still live (matched by the toolCallId the
+    /// subagent extension records in the run's meta at spawn).
+    func liveSubagentRun(for item: CodeTranscriptItem) -> CodeSubagentInfo? {
+        guard viewModel.canAttachSubagents,
+              case let .toolStep(_, toolName, toolCallId, _, _, _)
+              = item,
+              toolName.lowercased() == "subagent"
+        else { return nil }
+        return session.liveSubagents.first { $0.toolCallId == toolCallId }
+    }
+
     // MARK: - Actions
 
     func handleSend() {
@@ -419,13 +452,62 @@ private extension CodeSessionView {
     }
 }
 
+/// Feature B attach presentation: fullScreenCover on iOS, .sheet on macOS.
+/// A ViewModifier keeps `body`'s chain a single simple call (the
+/// type-checker rejects the mid-chain #if version). The live attach state
+/// wins over the presentation-time copy so the view keeps streaming while
+/// presented; the finished state stays up (m6).
+private struct AttachCoverModifier: ViewModifier {
+    let session: CodeViewModel.SessionState
+    let viewModel: CodeViewModel
+
+    func body(content: Content) -> some View {
+        #if os(iOS)
+            content.fullScreenCover(item: attachBinding) {
+                attachView($0)
+            }
+        #else
+            content.sheet(item: attachBinding) {
+                attachView($0).frame(width: 520, height: 640)
+            }
+        #endif
+    }
+
+    /// sheet/fullScreenCover `item:` bindings take `Binding<Item?>`; the
+    /// setter routes dismissal through the explicit detach (the same path
+    /// as the view's Close button).
+    private var attachBinding: Binding<CodeViewModel.AttachedSubagent?> {
+        Binding(
+            get: { session.attachedSubagent },
+            set: { newValue in
+                guard newValue == nil else { return }
+                if let id = session.attachedSubagent?.info.id {
+                    viewModel.detachSubagent(subagentId: id)
+                }
+            }
+        )
+    }
+
+    func attachView(
+        _ presented: CodeViewModel.AttachedSubagent
+    ) -> some View {
+        CodeSubagentAttachView(
+            attached: session.attachedSubagent ?? presented,
+            isConnecting: viewModel.pendingAttach != nil,
+            onDetach: { id in
+                viewModel.detachSubagent(subagentId: id)
+            }
+        )
+    }
+}
+
 private func previewSession(
     name: String = "",
     tokens: Int = 94225
 ) -> CodeViewModel.SessionState {
     var session = CodeViewModel.SessionState(
         sessionId: "test",
-        cwd: "/Users/fenrir/code/openclient-llm",
+        cwd: "~/code/openclient-llm",
         model: CodeModelInfo(
             provider: "zai",
             id: "qwen3.8-27b"

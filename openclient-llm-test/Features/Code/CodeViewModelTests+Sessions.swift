@@ -169,7 +169,7 @@ extension CodeViewModelTests {
             }
             return false
         }
-        mockClient.emit(.helloOk(version: 1))
+        mockClient.emit(.helloOk(version: 1, features: []))
         try await waitUntil {
             if case .connected = self.sut.state {
                 return true
@@ -314,7 +314,7 @@ extension CodeViewModelTests {
         XCTAssertEqual(sut.selectedId, "c", "Tap rewrites selectedId at tap time")
 
         // Then — after the reconnect's helloOk, the restore re-sends C (not B)
-        mockClient.emit(.helloOk(version: 1))
+        mockClient.emit(.helloOk(version: 1, features: []))
         try await waitUntil {
             if case .connected = self.sut.state {
                 return true

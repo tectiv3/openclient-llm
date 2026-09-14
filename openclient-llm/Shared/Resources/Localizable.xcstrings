@@ -4507,6 +4507,9 @@
         }
       }
     },
+    "Close subagent view" : {
+
+    },
     "Cloud" : {
       "localizations" : {
         "de" : {
@@ -5264,6 +5267,9 @@
 
     },
     "Connected to pi" : {
+
+    },
+    "Connecting to run…" : {
 
     },
     "Connecting to session…" : {
@@ -8015,6 +8021,9 @@
     "Double tap to enter a custom answer" : {
 
     },
+    "Double tap to stop the run" : {
+
+    },
     "Drag image here" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -10757,6 +10766,12 @@
           }
         }
       }
+    },
+    "Finished" : {
+
+    },
+    "Finished — %@" : {
+
     },
     "Focused" : {
       "localizations" : {
@@ -13888,6 +13903,9 @@
       }
     },
     "LiteLLM" : {
+
+    },
+    "Live" : {
 
     },
     "LM Studio" : {
@@ -17230,6 +17248,9 @@
       }
     },
     "No models available" : {
+
+    },
+    "No output yet" : {
 
     },
     "No pinned conversations" : {
@@ -25973,6 +25994,9 @@
     "streaming" : {
 
     },
+    "Subagent not found" : {
+
+    },
     "Submit" : {
       "localizations" : {
         "de" : {
@@ -32421,6 +32445,9 @@
           }
         }
       }
+    },
+    "View live subagent: %@" : {
+
     },
     "Voice" : {
       "comment" : "A label displayed above a list of available voices.",

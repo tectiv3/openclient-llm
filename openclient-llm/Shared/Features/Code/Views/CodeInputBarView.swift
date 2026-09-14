@@ -15,7 +15,6 @@ struct CodeInputBarView: View {
     var isDisabled: Bool = false
     var isQuestionPresented: Bool = false
     let onSend: () -> Void
-    let onStop: () -> Void
 
     @FocusState private var inputFocused: Bool
 
@@ -76,14 +75,10 @@ private extension CodeInputBarView {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .isEmpty
 
-        // Streaming: Stop (abort) and Send (steer) coexist; the send button
-        // only appears while there is text to steer with.
-        if isStreaming {
-            stopButton
-            if hasText {
-                sendButton
-            }
-        } else if hasText {
+        // Send/steer is the bar's only button in every state (the Stop
+        // affordance lives on the pulsing header status dot). The send
+        // button only appears while there is text to send/steer with.
+        if hasText {
             sendButton
         }
     }
@@ -102,27 +97,13 @@ private extension CodeInputBarView {
         .accessibilityLabel(String(localized: "Send"))
         .transition(.scale.combined(with: .opacity))
     }
-
-    var stopButton: some View {
-        Button { onStop() } label: {
-            Image(systemName: "square.fill")
-                .font(.title2)
-                .foregroundStyle(.red)
-                .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(String(localized: "Stop"))
-        .transition(.scale.combined(with: .opacity))
-    }
 }
 
 #Preview("Idle") {
     CodeInputBarView(
         inputText: .constant(""),
         isStreaming: false,
-        onSend: {},
-        onStop: {}
+        onSend: {}
     )
 }
 
@@ -130,8 +111,7 @@ private extension CodeInputBarView {
     CodeInputBarView(
         inputText: .constant(""),
         isStreaming: true,
-        onSend: {},
-        onStop: {}
+        onSend: {}
     )
 }
 
@@ -139,8 +119,7 @@ private extension CodeInputBarView {
     CodeInputBarView(
         inputText: .constant("focus on tests"),
         isStreaming: true,
-        onSend: {},
-        onStop: {}
+        onSend: {}
     )
 }
 
@@ -149,7 +128,6 @@ private extension CodeInputBarView {
         inputText: .constant(""),
         isStreaming: false,
         isDisabled: true,
-        onSend: {},
-        onStop: {}
+        onSend: {}
     )
 }

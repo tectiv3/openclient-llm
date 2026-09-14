@@ -13,6 +13,11 @@ struct CodeToolStepView: View {
     let args: [String: AnyCodableValue]
     let output: String?
     let isComplete: Bool
+    /// Feature B: set when this `subagent` tool step's run is still LIVE
+    /// (matched from the `subagents` frame by toolCallId). Non-nil renders
+    /// the tappable "Live" chip that opens the attach view.
+    var subagentRun: CodeSubagentInfo? = nil
+    var onOpenLive: (() -> Void)? = nil
 
     @State private var isExpanded = false
     @State private var areArgsExpanded = false
@@ -20,7 +25,7 @@ struct CodeToolStepView: View {
 
     private static let collapsedLineLimit = 20
     private static let expandedLineLimit = 200
-    // Each "Show more" tap reveals another page of output lines.
+    /// Each "Show more" tap reveals another page of output lines.
     private static let linePage = 200
 
     var body: some View {
@@ -48,6 +53,8 @@ struct CodeToolStepView: View {
                             .controlSize(.mini)
                     }
 
+                    liveChip
+
                     Image(systemName: "chevron.right")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
@@ -74,7 +81,36 @@ struct CodeToolStepView: View {
 // MARK: - Private
 
 private extension CodeToolStepView {
-    var toolIcon: String { CodeToolDisplay.icon(for: toolName) }
+    /// The "Live" affordance: only for a `subagent` step whose run is still
+    /// live on the server. Tapping opens the attach view (m9 routing).
+    @ViewBuilder
+    var liveChip: some View {
+        if let run = subagentRun, let openLive = onOpenLive {
+            Button(action: openLive) {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Color.appAccent)
+                        .frame(width: 6, height: 6)
+                    Text(String(localized: "Live"))
+                        .font(.caption2.weight(.medium))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    Color.appAccent.opacity(0.15),
+                    in: .capsule
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(
+                String(localized: "View live subagent: \(run.agent)")
+            )
+        }
+    }
+
+    var toolIcon: String {
+        CodeToolDisplay.icon(for: toolName)
+    }
 
     var summaryText: String {
         CodeToolDisplay.summary(toolName: toolName, args: args)
@@ -185,7 +221,6 @@ private extension CodeToolStepView {
             }
         }
     }
-
 }
 
 // MARK: - AnyCodableValue Helpers
@@ -193,14 +228,14 @@ private extension CodeToolStepView {
 private extension AnyCodableValue {
     var stringRepresentation: String {
         switch self {
-        case .string(let str): return str
-        case .int(let num): return "\(num)"
-        case .double(let num): return "\(num)"
-        case .bool(let flag): return flag ? "true" : "false"
+        case let .string(str): return str
+        case let .int(num): return "\(num)"
+        case let .double(num): return "\(num)"
+        case let .bool(flag): return flag ? "true" : "false"
         case .null: return "null"
-        case .array(let arr):
+        case let .array(arr):
             return "[\(arr.count) items]"
-        case .object(let obj):
+        case let .object(obj):
             return "{\(obj.count) keys}"
         }
     }
@@ -230,12 +265,14 @@ enum CodeToolDisplay {
         args: [String: AnyCodableValue]
     ) -> String {
         if let command = args["command"],
-           case .string(let cmd) = command {
+           case let .string(cmd) = command
+        {
             let first = cmd.components(separatedBy: "\n").first ?? cmd
             return "\(toolName): \(first)"
         }
         if let path = args["file_path"] ?? args["path"],
-           case .string(let filePath) = path {
+           case let .string(filePath) = path
+        {
             let name = (filePath as NSString).lastPathComponent
             return "\(toolName): \(name)"
         }

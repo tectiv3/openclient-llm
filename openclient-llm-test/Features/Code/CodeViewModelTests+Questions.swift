@@ -134,7 +134,7 @@ extension CodeViewModelTests {
             0, "Answer must not be sent while the transport is down"
         )
 
-        mockClient.emit(.helloOk(version: 1))
+        mockClient.emit(.helloOk(version: 1, features: []))
         try await waitUntil {
             self.mockClient.attemptsCount(where: {
                 if case .answer = $0 {

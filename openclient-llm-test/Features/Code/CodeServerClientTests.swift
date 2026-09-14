@@ -291,7 +291,7 @@ final class CodeServerClientTests: XCTestCase {
         let event = try await nextEvent(from: stream)
 
         // Then
-        guard case let .helloOk(version) = event else {
+        guard case let .helloOk(version, _) = event else {
             return XCTFail("Expected helloOk, got \(String(describing: event))")
         }
         XCTAssertEqual(version, 1)

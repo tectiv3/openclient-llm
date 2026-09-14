@@ -46,7 +46,7 @@ extension CodeViewModelTests {
         }
 
         // When
-        mockClient.emit(.helloOk(version: 1))
+        mockClient.emit(.helloOk(version: 1, features: []))
 
         // Then
         try await waitUntil {
@@ -92,7 +92,7 @@ extension CodeViewModelTests {
         )
 
         // When — the handshake completes.
-        mockClient.emit(.helloOk(version: 1))
+        mockClient.emit(.helloOk(version: 1, features: []))
 
         // Then — exactly one registration follows.
         try await waitUntil {

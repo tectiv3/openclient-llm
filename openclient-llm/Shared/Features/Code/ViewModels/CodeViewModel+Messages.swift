@@ -103,7 +103,7 @@ extension CodeViewModel {
 
         case "agent_settled":
             session.isStreaming = false
-            finalizeStreamingBubbles(in: &session)
+            finalizeStreamingBubbles(in: &session.items)
 
         case "message_start":
             // Transcript content only — does not touch session.isStreaming.
@@ -134,20 +134,22 @@ extension CodeViewModel {
             }
 
         case "message_update":
-            updateLastAssistantContent(event, in: &session)
+            updateLastAssistantContent(
+                message: event.payload["message"], in: &session.items
+            )
 
         case "tool_execution_start":
-            appendToolStep(event, in: &session)
+            appendToolStep(payload: event.payload, in: &session.items)
 
         case "tool_execution_update":
-            updateToolOutput(event, in: &session)
+            updateToolOutput(payload: event.payload, in: &session.items)
 
         case "tool_execution_end":
-            markToolStepComplete(event, in: &session)
+            markToolStepComplete(payload: event.payload, in: &session.items)
 
         case "turn_end":
             // Ends the current LLM turn's bubble, not the whole agent run.
-            finalizeStreamingBubbles(in: &session)
+            finalizeStreamingBubbles(in: &session.items)
 
         default:
             break
@@ -316,9 +318,9 @@ private extension CodeViewModel {
     }
 }
 
-// MARK: - Private
+// MARK: - Tool Steps & Content
 
-private extension CodeViewModel {
+extension CodeViewModel {
     func mapAssistantContent(
         _ content: [CodeContentBlock],
         into items: inout [CodeTranscriptItem],
@@ -364,10 +366,13 @@ private extension CodeViewModel {
         }
     }
 
+    /// `isComplete` defaults to true for the history `toolResult` path;
+    /// the streaming-buffer merge passes false (the step is still live).
     func updateToolStepCompletion(
         toolCallId: String,
         toolName: String,
         output: String,
+        isComplete: Bool = true,
         in items: inout [CodeTranscriptItem]
     ) {
         guard let index = items.lastIndex(where: {
@@ -382,7 +387,7 @@ private extension CodeViewModel {
                 toolCallId: toolCallId,
                 args: [:],
                 output: output,
-                isComplete: true
+                isComplete: isComplete
             ))
             return
         }
@@ -396,32 +401,35 @@ private extension CodeViewModel {
                 toolCallId: tcId,
                 args: args,
                 output: output,
-                isComplete: true
+                isComplete: isComplete
             )
         }
     }
 
+    /// Item-array re-sign (m3): the main transcript passes
+    /// `&session.items`; the subagent-attach path passes its OWN item
+    /// array, so both share the exact same bubble-replacement semantics.
+    /// The raw pi `message_update` frame's `message.content` is a full
+    /// snapshot of the partial message, so replace (not diff) the streaming
+    /// bubble's content on every frame. Guard against an empty parse
+    /// (toolCall-only frames) so we don't wipe content an earlier frame
+    /// already populated on this bubble.
     func updateLastAssistantContent(
-        _ event: CodeStreamEvent,
-        in session: inout SessionState
+        message: AnyCodableValue?,
+        in items: inout [CodeTranscriptItem]
     ) {
-        guard let lastIndex = session.items.lastIndex(where: {
+        guard let lastIndex = items.lastIndex(where: {
             if case .assistant = $0 {
                 return true
             }
             return false
         }) else { return }
 
-        // The server forwards the raw pi `message_update` frame; its
-        // `message.content` is a full snapshot of the partial message, so
-        // replace (not diff) the streaming bubble's content on every frame.
-        // Guard against an empty parse (toolCall-only frames) so we don't
-        // wipe content an earlier frame already populated on this bubble.
-        guard let content = messageContentBlocks(event.payload["message"]),
+        guard let content = messageContentBlocks(message),
               !content.isEmpty else { return }
 
-        if case let .assistant(id, _, _) = session.items[lastIndex] {
-            session.items[lastIndex] = .assistant(
+        if case let .assistant(id, _, _) = items[lastIndex] {
+            items[lastIndex] = .assistant(
                 id: id, content: content, isStreaming: true
             )
         }
@@ -501,30 +509,32 @@ private extension CodeViewModel {
         return blocks
     }
 
+    /// Item-array re-sign (m3): payload-based so the subagent-attach path
+    /// can drive the SAME reducer over its own items.
     func appendToolStep(
-        _ event: CodeStreamEvent,
-        in session: inout SessionState
+        payload: [String: AnyCodableValue],
+        in items: inout [CodeTranscriptItem]
     ) {
         let toolName: String
-        if case let .string(name) = event.payload["toolName"] {
+        if case let .string(name) = payload["toolName"] {
             toolName = name
         } else {
             toolName = "tool"
         }
 
         let toolCallId: String
-        if case let .string(id) = event.payload["toolCallId"] {
+        if case let .string(id) = payload["toolCallId"] {
             toolCallId = id
         } else {
             toolCallId = UUID().uuidString
         }
 
         var args: [String: AnyCodableValue] = [:]
-        if case let .object(argsObj) = event.payload["args"] {
+        if case let .object(argsObj) = payload["args"] {
             args = argsObj
         }
 
-        session.items.append(.toolStep(
+        items.append(.toolStep(
             id: UUID(),
             toolName: toolName,
             toolCallId: toolCallId,
@@ -535,11 +545,11 @@ private extension CodeViewModel {
     }
 
     func updateToolOutput(
-        _ event: CodeStreamEvent,
-        in session: inout SessionState
+        payload: [String: AnyCodableValue],
+        in items: inout [CodeTranscriptItem]
     ) {
         let toolCallId: String?
-        if case let .string(id)? = event.payload["toolCallId"] {
+        if case let .string(id)? = payload["toolCallId"] {
             toolCallId = id
         } else {
             toolCallId = nil
@@ -547,7 +557,7 @@ private extension CodeViewModel {
 
         // Match by toolCallId (when present) rather than the last tool step,
         // so concurrent tool steps don't clobber each other's output.
-        guard let index = session.items.lastIndex(where: {
+        guard let index = items.lastIndex(where: {
             if case let .toolStep(_, _, id, _, _, _) = $0 {
                 return toolCallId.map { id == $0 } ?? true
             }
@@ -556,17 +566,17 @@ private extension CodeViewModel {
 
         if case let .toolStep(id, name, tcId,
                               args, existing, _)
-            = session.items[index]
+            = items[index]
         {
             // pi sends `partialResult` as a cumulative snapshot (never
             // `output`), so replace (not append) the step's output.
             let newOutput: String?
-            if case let .string(text) = event.payload["partialResult"] {
+            if case let .string(text) = payload["partialResult"] {
                 newOutput = text
             } else {
                 newOutput = existing
             }
-            session.items[index] = .toolStep(
+            items[index] = .toolStep(
                 id: id,
                 toolName: name,
                 toolCallId: tcId,
@@ -578,11 +588,11 @@ private extension CodeViewModel {
     }
 
     func markToolStepComplete(
-        _ event: CodeStreamEvent,
-        in session: inout SessionState
+        payload: [String: AnyCodableValue],
+        in items: inout [CodeTranscriptItem]
     ) {
-        guard case let .string(toolCallId)? = event.payload["toolCallId"],
-              let index = session.items.lastIndex(where: {
+        guard case let .string(toolCallId)? = payload["toolCallId"],
+              let index = items.lastIndex(where: {
                   if case let .toolStep(_, _, id, _, _, _) = $0 {
                       return id == toolCallId
                   }
@@ -591,9 +601,9 @@ private extension CodeViewModel {
 
         if case let .toolStep(id, name, tcId,
                               args, output, _)
-            = session.items[index]
+            = items[index]
         {
-            session.items[index] = .toolStep(
+            items[index] = .toolStep(
                 id: id,
                 toolName: name,
                 toolCallId: tcId,
@@ -613,15 +623,17 @@ extension CodeViewModel {
     /// agent events). pi emits one assistant message per tool call in a
     /// turn; toolCall-only messages parse to empty content, so those stray
     /// bubbles are removed here as the single cleanup point.
-    func finalizeStreamingBubbles(in session: inout SessionState) {
-        for index in session.items.indices.reversed() {
+    /// Item-array re-sign (m3): the attach view finalizes its bubbles with
+    /// the same pass (the session-level `isStreaming` flag stays main-only).
+    func finalizeStreamingBubbles(in items: inout [CodeTranscriptItem]) {
+        for index in items.indices.reversed() {
             if case let .assistant(id, content, isStreaming)
-                = session.items[index]
+                = items[index]
             {
                 if content.isEmpty {
-                    session.items.remove(at: index)
+                    items.remove(at: index)
                 } else if isStreaming {
-                    session.items[index] = .assistant(
+                    items[index] = .assistant(
                         id: id,
                         content: content,
                         isStreaming: false

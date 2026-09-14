@@ -179,7 +179,7 @@ final class CodeNotificationTests: XCTestCase {
 
     private func connectAndEstablish() async throws {
         sut.send(.connect(host: "10.0.0.1", port: 47800, code: "abc123"))
-        mockClient.emit(.helloOk(version: 1))
+        mockClient.emit(.helloOk(version: 1, features: []))
         mockClient.emit(.state(CodeSessionInfo(
             sessionId: "s1",
             cwd: "/tmp/project",

@@ -89,6 +89,11 @@ enum CodeClientMessage: Sendable {
     case pushToken(token: String)
     case command(command: String, args: [String: AnyCodableValue] = [:])
     case selectSession(id: String)
+    // Feature B: subagent attach. Only sent when hello_ok advertised the
+    // "subagents" feature (capability gate, M4).
+    case getSubagents
+    case attachSubagent(subagentId: String?, toolCallId: String?)
+    case detachSubagent(subagentId: String)
 }
 
 // MARK: - Implementation
@@ -582,6 +587,22 @@ private extension CodeServerClient {
         case let .selectSession(id):
             dict["type"] = .string("select_session")
             dict["id"] = .string(id)
+
+        case .getSubagents:
+            dict["type"] = .string("get_subagents")
+
+        case let .attachSubagent(subagentId, toolCallId):
+            dict["type"] = .string("attach_subagent")
+            if let subagentId {
+                dict["subagentId"] = .string(subagentId)
+            }
+            if let toolCallId {
+                dict["toolCallId"] = .string(toolCallId)
+            }
+
+        case let .detachSubagent(subagentId):
+            dict["type"] = .string("detach_subagent")
+            dict["subagentId"] = .string(subagentId)
         }
 
         return try? encoder.encode(dict)

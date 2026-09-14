@@ -1,8 +1,11 @@
 # rc: subagent attach, stop-UX, reconnect dedupe
 
-Status: spec (owner-approved decisions, 2026-09-13; round-1 amended 2026-09-13
-after in-repo verification — see Critic log). Three features, one doc because
-they share the same surface (rc wire protocol + `Features/Code` UI).
+Status: IMPLEMENTED 2026-09-14. All tasks done: T1 `cfb9726`,
+T2 `8ccfb6a`, T3 `022393a` (in `~/code/pi-extensions`), T4a `9946375` +
+T4b `c3df3ea`, T5 `ded0307`, T6 `fbe8bcd`, T7 `e533064`. Spec (owner-approved decisions, 2026-09-13;
+round-1 amended 2026-09-13 after in-repo verification — see Critic log).
+Three features, one doc because they share the same surface (rc wire
+protocol + `Features/Code` UI).
 
 Parent refs: `docs/plans/rc-remote-control-spec.md` (frozen),
 `docs/plans/rc-commands-spec.md`, `docs/plans/rc-multi-session-spec.md`,

@@ -46,7 +46,7 @@ extension CodeViewModelTests {
             "Auto-connect must not re-request push authorization"
         )
 
-        mockClient.emit(.helloOk(version: 1))
+        mockClient.emit(.helloOk(version: 1, features: []))
         try await waitUntil {
             if case .connected = self.sut.state {
                 return true
@@ -130,7 +130,7 @@ extension CodeViewModelTests {
         // Given
         makeSutWithSavedHost(token: Self.apnsToken)
         sut.send(.viewAppeared)
-        mockClient.emit(.helloOk(version: 1))
+        mockClient.emit(.helloOk(version: 1, features: []))
         try await waitUntil {
             if case .connected = self.sut.state {
                 return true
@@ -196,7 +196,7 @@ extension CodeViewModelTests {
         // Then
         XCTAssertEqual(sut.state, .connecting)
         try await waitUntil { self.mockPush.requestAuthorizationCallCount == 1 }
-        mockClient.emit(.helloOk(version: 1))
+        mockClient.emit(.helloOk(version: 1, features: []))
         try await waitUntil {
             if case .connected = self.sut.state {
                 return true

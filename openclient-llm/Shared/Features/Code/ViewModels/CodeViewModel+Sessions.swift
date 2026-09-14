@@ -33,6 +33,29 @@ extension CodeViewModel {
         var contextUsage: CodeContextUsage?
         var items: [CodeTranscriptItem] = []
         var pendingQuestion: PendingQuestion?
+        // Feature B: live runs of THIS session's view (a `subagents` frame
+        // is a full list — always replaced wholesale, never diffed) and the
+        // open attach, if any. Both are session-scoped: a rebind (or
+        // returning to the anchor) clears them.
+        var liveSubagents: [CodeSubagentInfo] = []
+        var attachedSubagent: AttachedSubagent?
+    }
+
+    /// An attached subagent run: its meta, and its OWN item array (distinct
+    /// from the main transcript's `items` — the attach view renders only
+    /// this). `running` false = finished; `settledStatus` is present only
+    /// when the `subagent_settled` frame actually arrived (a snapshot can
+    /// report a run already ended without the status).
+    struct AttachedSubagent: Equatable, Identifiable {
+        var info: CodeSubagentInfo
+        var items: [CodeTranscriptItem] = []
+        var running: Bool = true
+        var settledStatus: String?
+        var settledStopReason: String?
+
+        var id: String {
+            info.id
+        }
     }
 
     /// A pending `question` frame waiting for the phone's answer.
@@ -246,5 +269,6 @@ extension CodeViewModel {
         pendingSelectSessionId = nil
         selectTimeoutTask?.cancel()
         selectTimeoutTask = nil
+        detachAttachedSubagentIfAny()
     }
 }

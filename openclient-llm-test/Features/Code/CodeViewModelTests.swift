@@ -72,7 +72,7 @@ final class CodeViewModelTests: XCTestCase {
         sut.send(.connect(host: "10.0.0.1", port: 47800, code: "abc123"))
 
         // When
-        mockClient.emit(.helloOk(version: 1))
+        mockClient.emit(.helloOk(version: 1, features: []))
         try await waitUntil {
             if case .connected = self.sut.state {
                 return true
@@ -416,7 +416,7 @@ final class CodeViewModelTests: XCTestCase {
         }
 
         // When
-        mockClient.emit(.helloOk(version: 1))
+        mockClient.emit(.helloOk(version: 1, features: []))
         try await waitUntil {
             if case .connected = self.sut.state {
                 return true
@@ -499,7 +499,7 @@ final class CodeViewModelTests: XCTestCase {
         isStreaming: Bool = false
     ) async throws {
         sut.send(.connect(host: "10.0.0.1", port: 47800, code: "abc123"))
-        mockClient.emit(.helloOk(version: 1))
+        mockClient.emit(.helloOk(version: 1, features: []))
         mockClient.emit(.state(sessionInfo(sessionId: sessionId, isStreaming: isStreaming)))
         try await waitUntil {
             if case .connected = self.sut.state {

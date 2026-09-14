@@ -98,10 +98,10 @@ final class CodeEndToEndTests: XCTestCase {
 
         // When / Then — the handshake: helloOk, then state, then history,
         // in that order.
-        guard case let .helloOk(version) = await awaitEvent(
+        guard case let .helloOk(version, _) = await awaitEvent(
             collector, labeled: "helloOk", timeout: 15,
             matching: {
-                if case let .helloOk(ver) = $0 {
+                if case let .helloOk(ver, _) = $0 {
                     return ver == 1
                 }
                 return false

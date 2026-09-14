@@ -10,6 +10,10 @@ import SwiftUI
 struct CodeTranscriptItemView: View {
     let item: CodeTranscriptItem
     var onRetry: (UUID) -> Void = { _ in }
+    // Feature B: passed only for `subagent` tool steps whose run is still
+    // live; nil on every other row (no chip).
+    var subagentRun: CodeSubagentInfo? = nil
+    var onOpenLive: (() -> Void)? = nil
 
     @State private var isCompactionExpanded = false
     @State private var reasoningDisclosureState = ReasoningDisclosureState()
@@ -34,7 +38,9 @@ struct CodeTranscriptItemView: View {
                 toolId: toolId,
                 args: args,
                 output: output,
-                isComplete: isComplete
+                isComplete: isComplete,
+                subagentRun: subagentRun,
+                onOpenLive: onOpenLive
             )
 
         case let .resolvedQuestion(_, questionText,
@@ -269,14 +275,18 @@ private extension CodeTranscriptItemView {
         toolId: String,
         args: [String: AnyCodableValue],
         output: String?,
-        isComplete: Bool
+        isComplete: Bool,
+        subagentRun: CodeSubagentInfo? = nil,
+        onOpenLive: (() -> Void)? = nil
     ) -> some View {
         CodeToolStepView(
             toolName: toolName,
             toolId: toolId,
             args: args,
             output: output,
-            isComplete: isComplete
+            isComplete: isComplete,
+            subagentRun: subagentRun,
+            onOpenLive: onOpenLive
         )
     }
 
@@ -454,6 +464,23 @@ extension [CodeContentBlock] {
             args: ["command": .string("swift test")],
             output: nil, isComplete: false
         ))
+        // Feature B: a `subagent` step whose run is still live shows the
+        // tappable "Live" chip.
+        CodeTranscriptItemView(
+            item: .toolStep(
+                id: UUID(),
+                toolName: "subagent", toolCallId: "tc-9",
+                args: ["agent": .string("plan-critic")],
+                output: nil, isComplete: false
+            ),
+            subagentRun: .init(
+                id: "run-1", agent: "plan-critic",
+                task: "Critique the design.",
+                startedAt: "2026-09-13T10:15:00.000Z",
+                toolCallId: "tc-9", model: nil
+            ),
+            onOpenLive: {}
+        )
         CodeTranscriptItemView(item: .resolvedQuestion(
             id: UUID(),
             questionText: "Which file?",

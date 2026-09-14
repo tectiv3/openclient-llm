@@ -35,6 +35,13 @@ extension CodeViewModel {
         case "session_not_found":
             handleSessionNotFound()
 
+        case "subagent_not_found":
+            // The in-flight attach resolved to nothing (m8): abandon the
+            // pending request and surface the server's message.
+            pendingAttach = nil
+            transientToast = error.message
+                ?? String(localized: "Subagent not found")
+
         case "model_not_found":
             transientToast = error.message
                 ?? String(localized: "Model not found")

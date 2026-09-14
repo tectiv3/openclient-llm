@@ -58,8 +58,7 @@ final class CodeViewModel {
         var recentConnections: [CodeRecentConnection] = []
     }
 
-    /// Last-used connect credentials, retained in-memory because the pairing
-    /// code is ephemeral (not persisted) and needed for auto-reconnect.
+    /// Last-used credentials; pairing code is ephemeral (auto-reconnect).
     struct ConnectCredentials: Equatable {
         let host: String
         let port: Int
@@ -73,14 +72,13 @@ final class CodeViewModel {
     @MainActor
     weak static var shared: CodeViewModel?
 
-    /// Push tap that arrived before the Code VM existed (cold launch);
-    /// HomeView forwards it to the fresh VM it creates.
+    /// Push tap that arrived before the VM existed (cold launch); HomeView
+    /// forwards it to the fresh VM it creates.
     @MainActor
     static var pendingNotificationTap = false
 
-    /// Deep-link `sessionId` (custom payload key, multi-session rc spec)
-    /// carried by the pending tap above; nil on legacy payloads. HomeView
-    /// forwards both and clears both.
+    /// Deep-link `sessionId` of the pending tap (custom payload key,
+    /// multi-session rc spec); nil on legacy payloads.
     @MainActor
     static var pendingNotificationTapSessionId: String?
 
@@ -95,20 +93,17 @@ final class CodeViewModel {
     private(set) var notificationManager: LocalNotificationManagerProtocol
     private(set) var remoteNotificationManager: RemoteNotificationManagerProtocol
 
-    /// Persists across state transitions so editable fields survive
-    /// .disconnected → .connecting → .disconnected cycles.
+    /// Survives .disconnected → .connecting → .disconnected cycles.
     var connectForm: ConnectForm
 
     private(set) var lastConnect: ConnectCredentials?
     var backgroundDisconnected = false
 
     /// True while the in-flight connection was auto-initiated from
-    /// `viewAppeared` (push-token auth): auth failures fail silently, unlike
-    /// a user-typed bad pairing code.
+    /// `viewAppeared` (push-token auth).
     private(set) var isAutoConnectAttempt = false
 
-    /// WHY: bounds auto-connect to one attempt per ViewModel lifetime — no
-    /// silent retry when the tab re-appears.
+    /// Bounds auto-connect to one attempt (no silent retry on re-appearance).
     private(set) var autoConnectSuppressed = false
 
     /// Question id that already produced a local notification, keeping the
@@ -120,14 +115,20 @@ final class CodeViewModel {
     var transientToast: String?
 
     /// Prompt-echo UUIDs sent but not yet acknowledged (agent_start) or
-    /// rejected (not_idle). An ordered array so the rejection can always
-    /// be attributed to the newest pending echo; steers are excluded
-    /// because the server never rejects them not_idle. Shared with the
-    /// CodeViewModel+Messages extension (agent_start clears the list).
+    /// rejected (not_idle); steers excluded. Shared with the +Messages
+    /// extension (agent_start clears the list).
     var pendingPromptEchoes: [UUID] = []
 
     /// Sessions list from the anchor (`sessions` frames); empty = today's UX.
     var sessions: [SessionInfo] = []
+
+    /// `hello_ok` capability gate for Feature B (M4): the "subagents"
+    /// feature must be advertised before any attach request is sent.
+    var subagentFeatures: Set<String> = []
+
+    /// Attach request in flight (run id unknown until the snapshot on the
+    /// step-tap path); cleared when the snapshot lands or is abandoned.
+    var pendingAttach: CodeViewModel.PendingAttach?
 
     /// Registry `id` of the selected session; `nil` = default anchor view.
     var selectedId: String?
@@ -139,11 +140,10 @@ final class CodeViewModel {
     var selectTimeoutTask: Task<Void, Never>?
 
     /// Testability seam (spec §Wire protocol): tests shorten the two-phase
-    /// select watchdog. Class-level like `isBackgrounded` (not the extension).
+    /// select watchdog.
     var selectTimeoutSeconds: TimeInterval = 10
 
-    /// Testability seam: production reads UIApplication state on every call;
-    /// tests override this to simulate backgrounding without UIApplication.
+    /// Testability seam: tests override to simulate backgrounding.
     var isBackgrounded: @MainActor () -> Bool = {
         #if os(iOS)
             UIApplication.shared.applicationState == .background
@@ -172,8 +172,7 @@ final class CodeViewModel {
             recentConnections: settingsManager.getCodeRecentConnections()
         )
         state = .disconnected
-        // nil client → build the real one; its reconnect hellos carry the
-        // live device token, so they auto-authenticate like a VM connect.
+        // nil → the real client; its reconnect hellos carry the token.
         let client = client ?? CodeServerClient(
             tokenProvider: { [manager = remoteNotificationManager] in
                 await manager.getToken()
@@ -201,7 +200,6 @@ final class CodeViewModel {
 
 private extension CodeViewModel {
     func handleConnect(host: String, port: Int, code: String) {
-        // Manual intent overrides any auto-attempt bookkeeping.
         isAutoConnectAttempt = false
         settingsManager.setCodeHost(host)
         settingsManager.setCodePort(port)
@@ -215,18 +213,16 @@ private extension CodeViewModel {
         establishConnection(host: host, port: port, code: code)
     }
 
-    /// Token-based auto-connect on screen appearance. The RC server accepts
-    /// a hello carrying the currently-registered push token even without a
-    /// pairing code, so a returning user with a saved host skips code entry.
-    /// No `requestAuthorization()` here: a token implies prior registration.
+    /// Token-based auto-connect on screen appearance: a hello carrying the
+    /// registered push token needs no pairing code. No `requestAuthorization`
+    /// here: a token implies prior registration.
     func handleViewAppeared() {
         guard case .disconnected = state,
               !autoConnectSuppressed,
               remoteNotificationManager.getToken() != nil
         else { return }
 
-        // Same source of truth as `disconnectedForm()`: settings, not the
-        // user-editable connect form fields.
+        // Same source of truth as `disconnectedForm()`: settings.
         let host = settingsManager.getCodeHost() ?? ""
         let port = settingsManager.getCodePort()
         guard !host.isEmpty else { return }
@@ -277,9 +273,22 @@ private extension CodeViewModel {
         // refresh, but a tool ignoring its abort signal or a mid-abort compaction
         // can delay the settle indefinitely — the UI must not stay stuck streaming.
         session.isStreaming = false
-        finalizeStreamingBubbles(in: &session)
+        finalizeStreamingBubbles(in: &session.items)
         updateSession(session)
         Task { await client.send(.abort) }
+    }
+
+    /// The connect/reconnect socket died after the handshake: end the
+    /// background bookkeeping and surface the failed screen.
+    func handleConnectionFailed(_ message: String) {
+        backgroundUseCase.end()
+        // WHY: a failed auto attempt must not be retried on the next tab
+        // appearance.
+        if isAutoConnectAttempt {
+            autoConnectSuppressed = true
+            isAutoConnectAttempt = false
+        }
+        state = .failed(errorMessage: message)
     }
 }
 
@@ -354,7 +363,8 @@ extension CodeViewModel {
 
     func handleEvent(_ event: CodeEvent) {
         switch event {
-        case .helloOk:
+        case let .helloOk(_, features):
+            subagentFeatures = Set(features)
             handleHelloOk()
 
         case let .state(info):
@@ -383,6 +393,9 @@ extension CodeViewModel {
         case let .sessionGone(id):
             handleSessionGone(id: id)
 
+        case .subagents, .subagentSnapshot, .subagentEvent, .subagentSettled:
+            handleSubagentFrame(event)
+
         case .pong:
             break
 
@@ -393,14 +406,7 @@ extension CodeViewModel {
             transitionToReconnecting()
 
         case let .connectionFailed(message):
-            backgroundUseCase.end()
-            // WHY: a failed auto attempt must not be retried on the next
-            // tab appearance; the failed screen lets the user decide.
-            if isAutoConnectAttempt {
-                autoConnectSuppressed = true
-                isAutoConnectAttempt = false
-            }
-            state = .failed(errorMessage: message)
+            handleConnectionFailed(message)
 
         case let .authFailed(error):
             handleAuthFailed(error)
@@ -431,8 +437,7 @@ extension CodeViewModel {
     }
 
     /// Registers the device token with the server now that the handshake
-    /// completed. Fires on first connect and on every reconnect. Duplicate
-    /// sends are harmless: the server keeps the last-registered token.
+    /// completed (first connect and every reconnect; duplicates are harmless).
     private func sendPushTokenIfNeeded(_ token: String? = nil) {
         let tokenToSend = token ?? remoteNotificationManager.getToken()
         guard let tokenToSend, case .connected = state else {
@@ -450,15 +455,13 @@ extension CodeViewModel {
         guard var session = currentSession else { return }
 
         // Null-binding window: sessionId "unknown" means the server's
-        // binding is nil (session being replaced). Do not rebind, do not
-        // overwrite fields with stale values. The real session_start
+        // binding is nil (session being replaced) — the real session_start
         // snapshot corrects everything.
         if info.sessionId == "unknown" {
             return
         }
 
-        // Select ack: the selected session's snapshot arrived, so the local
-        // select watchdog is satisfied (rebind or no-op re-select alike).
+        // Select ack: the selected session's snapshot arrived.
         noteSelectedSessionSnapshot(sessionId: info.sessionId)
 
         let isRebind = !session.sessionId.isEmpty
@@ -468,6 +471,9 @@ extension CodeViewModel {
             session.items = []
             session.pendingQuestion = nil
             pendingPromptEchoes.removeAll()
+            // Feature B: the attach is scoped to the session being left —
+            // orphan it on the way out (m8).
+            detachAttachedSubagentIfAny()
         }
 
         session.sessionId = info.sessionId
@@ -483,7 +489,7 @@ extension CodeViewModel {
         session.contextUsage = info.contextUsage
 
         if !info.isStreaming {
-            finalizeStreamingBubbles(in: &session)
+            finalizeStreamingBubbles(in: &session.items)
         }
 
         updateSession(session)
@@ -493,8 +499,7 @@ extension CodeViewModel {
         guard var session = currentSession else { return }
         guard history.sessionId == session.sessionId else { return }
 
-        // The transcript is replaced wholesale, so local-echo UUIDs are
-        // gone: a failure mark arriving for one is a safe no-op.
+        // The transcript is replaced wholesale, so local-echo UUIDs are gone.
         pendingPromptEchoes.removeAll()
         var items = mapHistoryToItems(history.messages)
         let existingTexts = Set(items.compactMap {
@@ -518,18 +523,22 @@ extension CodeViewModel {
         content: [CodeContentBlock]
     ) {
         guard var session = currentSession,
-              sessionId == session.sessionId else { return }
+              sessionId == session.sessionId, !content.isEmpty
+        else {
+            return
+        }
 
-        let item = CodeTranscriptItem.assistant(
-            id: UUID(), content: content, isStreaming: true
-        )
-        session.items.append(item)
+        // Merge, don't append: the buffer's toolUse carriers may duplicate
+        // steps the rebuilt history already carries (reconnect mid-tool),
+        // and its text/thinking only reaches us un-pruned when genuinely
+        // uncommitted. Empty is a no-op so repeated frames are harmless.
+        mergeBufferIntoItems(content, into: &session.items)
         updateSession(session)
     }
 
     private func transitionToReconnecting() {
-        // The in-flight select dies with the socket; its watchdog must not
-        // fire across the gap (selectedId is restored post-helloOk).
+        // The in-flight select dies with the socket (selectedId is
+        // restored post-helloOk).
         cancelPendingSelect()
         switch state {
         case let .connected(session):
@@ -564,8 +573,7 @@ extension CodeViewModel {
 
         // WHY: a bad_code on a token-auth auto attempt means the server no
         // longer knows this device (pi restarted, first pairing) — the clean
-        // code-entry form is more useful than an error about a code the user
-        // never typed. rate_limited stays visible: it is actionable.
+        // code-entry form wins. rate_limited stays visible: it is actionable.
         let message: String?
         if wasReconnecting, error.code == "bad_code" {
             message = String(localized: "Pairing code expired — re-pair from pi")
@@ -582,8 +590,7 @@ extension CodeViewModel {
         }
         state = .disconnected
 
-        // Suppression applies to any failed auto attempt, including
-        // rate_limited: bounded retries, one shot.
+        // Suppression applies to any failed auto attempt.
         if isAutoConnectAttempt {
             autoConnectSuppressed = true
             isAutoConnectAttempt = false

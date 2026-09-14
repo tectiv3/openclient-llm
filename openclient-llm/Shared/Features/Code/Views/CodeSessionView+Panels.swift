@@ -128,10 +128,25 @@ extension CodeSessionView {
         .accessibilityElement(children: .combine)
     }
 
+    /// The status dot doubles as the abort affordance (the input bar's
+    /// Stop button is gone). Tap only acts while a run is streaming.
     var statusDot: some View {
-        Circle()
-            .fill(isReconnecting ? Color.orange : Color.green)
-            .frame(width: 8, height: 8)
+        StatusDotView(
+            isStreaming: session.isStreaming,
+            isReconnecting: isReconnecting,
+            reduceMotion: reduceMotion,
+            onTap: {
+                guard session.isStreaming else { return }
+                hapticOnAbort()
+                viewModel.send(.abort)
+            }
+        )
+    }
+
+    private func hapticOnAbort() {
+        #if os(iOS)
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        #endif
     }
 
     var truncatedCwd: String {
@@ -278,5 +293,72 @@ extension CodeSessionView {
             Spacer()
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+/// The toolbar status dot. 8pt visual, 44pt tap region; pulses (scale +
+/// opacity) while a run is streaming — the pulsing dot is the only abort
+/// affordance (the input-bar Stop button was removed). Reduce-motion users
+/// get a static accent dot. If the nav bar clips the 44pt region or
+/// distorts the layout, the fallback (m6) is relocating the dot out of the
+/// toolbar into a custom header row.
+private struct StatusDotView: View {
+    let isStreaming: Bool
+    let isReconnecting: Bool
+    let reduceMotion: Bool
+    let onTap: () -> Void
+
+    @State private var pulsing = false
+
+    var body: some View {
+        Button(action: onTap) {
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
+                .scaleEffect(pulsing ? 1.5 : 1)
+                .opacity(pulsing ? 0.55 : 1)
+        }
+        .buttonStyle(.plain)
+        .frame(minWidth: 44, minHeight: 44)
+        .contentShape(Rectangle())
+        .accessibilityLabel(a11yLabel)
+        .accessibilityHint(
+            isStreaming
+                ? String(localized: "Double tap to stop the run")
+                : ""
+        )
+        .accessibilityAddTraits(isStreaming ? .isButton : [])
+        .onAppear(perform: updatePulse)
+        .onChange(of: isStreaming) { _, _ in
+            updatePulse()
+        }
+    }
+
+    private var color: Color {
+        if isReconnecting {
+            return .orange
+        }
+        return isStreaming ? Color.appAccent : .green
+    }
+
+    private var a11yLabel: String {
+        if isReconnecting {
+            return String(localized: "Reconnecting")
+        }
+        return isStreaming
+            ? String(localized: "Stop")
+            : String(localized: "Connected")
+    }
+
+    private func updatePulse() {
+        if isStreaming, !reduceMotion {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                pulsing = true
+            }
+        } else {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                pulsing = false
+            }
+        }
     }
 }
