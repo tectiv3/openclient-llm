@@ -186,12 +186,14 @@ enum CodeHistoryMessage: Equatable, Sendable {
         isError: Bool
     )
     case compaction(summary: String)
+    case contextEdit(targetId: String, omitted: Bool)
     case unknown
 }
 
 extension CodeHistoryMessage: Codable {
     private enum CodingKeys: String, CodingKey {
         case role, text, content, toolName, toolCallId, output, isError, summary
+        case targetId, omitted
     }
 
     init(from decoder: Decoder) throws {
@@ -224,6 +226,12 @@ extension CodeHistoryMessage: Codable {
         case "compaction":
             let summary = try container.decode(String.self, forKey: .summary)
             self = .compaction(summary: summary)
+        case "contextEdit":
+            let targetId = try container.decode(String.self, forKey: .targetId)
+            let omitted = try container.decodeIfPresent(
+                Bool.self, forKey: .omitted
+            ) ?? true
+            self = .contextEdit(targetId: targetId, omitted: omitted)
         default:
             self = .unknown
         }
@@ -247,6 +255,10 @@ extension CodeHistoryMessage: Codable {
         case let .compaction(summary):
             try container.encode("compaction", forKey: .role)
             try container.encode(summary, forKey: .summary)
+        case let .contextEdit(targetId, omitted):
+            try container.encode("contextEdit", forKey: .role)
+            try container.encode(targetId, forKey: .targetId)
+            try container.encode(omitted, forKey: .omitted)
         case .unknown:
             try container.encode("unknown", forKey: .role)
         }

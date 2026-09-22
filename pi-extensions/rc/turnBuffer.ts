@@ -3,8 +3,9 @@
 // index.ts so it is unit-testable without the server (same pattern as
 // apns.ts/registry.ts).
 
-// Structural twin of index.ts's ContentBlock (index.ts keeps its own copy;
-// the two must stay in sync so the prune call type-checks in both directions).
+// Structural twin of historyMap.ts's ContentBlock (index.ts imports that
+// copy; the two must stay in sync so the prune call type-checks in both
+// directions).
 export type BufferBlock =
     | { type: 'text'; text: string; textSignature?: string }
     | { type: 'thinking'; text: string; thinkingSignature?: string }

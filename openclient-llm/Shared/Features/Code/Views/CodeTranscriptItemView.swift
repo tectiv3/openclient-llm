@@ -53,6 +53,9 @@ struct CodeTranscriptItemView: View {
 
         case let .compaction(_, summary):
             compactionSeparator(summary)
+
+        case let .contextEdit(_, omitted):
+            contextEditSeparator(omitted: omitted)
         }
     }
 }
@@ -399,6 +402,27 @@ private extension CodeTranscriptItemView {
             }
         }
     }
+
+    // MARK: - Context Edit
+
+    /// Mirrors the compaction divider row — the raw message stays in the
+    /// transcript, so only the model-context effect is surfaced.
+    func contextEditSeparator(omitted: Bool) -> some View {
+        HStack {
+            Rectangle()
+                .fill(.quaternary)
+                .frame(height: 1)
+            Text(omitted
+                ? String(localized: "Hidden from model context")
+                : String(localized: "Edited in model context"))
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            Rectangle()
+                .fill(.quaternary)
+                .frame(height: 1)
+        }
+        .accessibilityElement(children: .combine)
+    }
 }
 
 extension [CodeContentBlock] {
@@ -490,6 +514,14 @@ extension [CodeContentBlock] {
         CodeTranscriptItemView(item: .compaction(
             id: UUID(),
             summary: "Compacted 12 messages: review scope, memory load, critic launch."
+        ))
+        CodeTranscriptItemView(item: .contextEdit(
+            id: UUID(),
+            omitted: true
+        ))
+        CodeTranscriptItemView(item: .contextEdit(
+            id: UUID(),
+            omitted: false
         ))
     }
     .padding()

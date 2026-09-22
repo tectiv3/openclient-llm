@@ -31,6 +31,7 @@ enum CodeTranscriptItem: Equatable, Identifiable {
         wasCustom: Bool
     )
     case compaction(id: UUID, summary: String)
+    case contextEdit(id: UUID, omitted: Bool)
 
     var id: UUID {
         switch self {
@@ -38,7 +39,8 @@ enum CodeTranscriptItem: Equatable, Identifiable {
              let .assistant(id, _, _),
              let .toolStep(id, _, _, _, _, _),
              let .resolvedQuestion(id, _, _, _),
-             let .compaction(id, _):
+             let .compaction(id, _),
+             let .contextEdit(id, _):
             return id
         }
     }
@@ -76,6 +78,11 @@ extension CodeViewModel {
             case let .compaction(summary):
                 items.append(
                     .compaction(id: UUID(), summary: summary)
+                )
+
+            case let .contextEdit(_, omitted):
+                items.append(
+                    .contextEdit(id: UUID(), omitted: omitted)
                 )
 
             case .unknown:
@@ -611,35 +618,6 @@ extension CodeViewModel {
                 output: output,
                 isComplete: true
             )
-        }
-    }
-}
-
-// MARK: - Session Finalization
-
-extension CodeViewModel {
-    /// Marks streaming assistant bubbles complete and drops empty ones,
-    /// without touching the session-level `isStreaming` flag (driven by
-    /// agent events). pi emits one assistant message per tool call in a
-    /// turn; toolCall-only messages parse to empty content, so those stray
-    /// bubbles are removed here as the single cleanup point.
-    /// Item-array re-sign (m3): the attach view finalizes its bubbles with
-    /// the same pass (the session-level `isStreaming` flag stays main-only).
-    func finalizeStreamingBubbles(in items: inout [CodeTranscriptItem]) {
-        for index in items.indices.reversed() {
-            if case let .assistant(id, content, isStreaming)
-                = items[index]
-            {
-                if content.isEmpty {
-                    items.remove(at: index)
-                } else if isStreaming {
-                    items[index] = .assistant(
-                        id: id,
-                        content: content,
-                        isStreaming: false
-                    )
-                }
-            }
         }
     }
 }

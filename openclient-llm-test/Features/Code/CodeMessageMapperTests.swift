@@ -178,6 +178,59 @@ final class CodeMessageMapperTests: XCTestCase {
         XCTAssertEqual(summary, "condensed")
     }
 
+    func test_mapHistoryToItems_contextEditOmitted_returnsContextEditItem() throws {
+        // Given
+        let messages = try Self.decodeMessages(
+            #"[{"role":"contextEdit","targetId":"m-1","omitted":true}]"#
+        )
+
+        // When
+        let items = sut.mapHistoryToItems(messages)
+
+        // Then
+        XCTAssertEqual(items.count, 1)
+        guard case let .contextEdit(_, omitted) = items[0] else {
+            return XCTFail("Expected contextEdit item, got \(items[0])")
+        }
+        XCTAssertTrue(omitted)
+        guard case let .contextEdit(targetId, _) = messages[0] else {
+            return XCTFail("Expected contextEdit message, got \(messages[0])")
+        }
+        XCTAssertEqual(targetId, "m-1")
+    }
+
+    func test_mapHistoryToItems_contextEditReplacement_isNotOmitted() throws {
+        // Given
+        let messages = try Self.decodeMessages(
+            #"[{"role":"contextEdit","targetId":"m-2","omitted":false}]"#
+        )
+
+        // When
+        let items = sut.mapHistoryToItems(messages)
+
+        // Then
+        guard case let .contextEdit(_, omitted) = items[0] else {
+            return XCTFail("Expected contextEdit item, got \(items[0])")
+        }
+        XCTAssertFalse(omitted)
+    }
+
+    func test_decode_contextEditMissingOmitted_defaultsToOmitted() throws {
+        // Given
+        let messages = try Self.decodeMessages(
+            #"[{"role":"contextEdit","targetId":"m-3"}]"#
+        )
+
+        // When
+        let items = sut.mapHistoryToItems(messages)
+
+        // Then
+        guard case let .contextEdit(_, omitted) = items[0] else {
+            return XCTFail("Expected contextEdit item, got \(items[0])")
+        }
+        XCTAssertTrue(omitted, "Absent omitted field must decode as omitted")
+    }
+
     func test_mapHistoryToItems_unknownRole_isDroppedNoCrash() throws {
         // Given
         let messages = try Self.decodeMessages(#"[{"role":"system","text":"x"}]"#)
