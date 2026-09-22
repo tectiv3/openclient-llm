@@ -1,15 +1,15 @@
 rc/apns.ts(388,63): error TS2339: Property 'reason' does not exist on type 'KeyValidation'.
 rc/apns.ts(389,56): error TS2339: Property 'reason' does not exist on type 'KeyValidation'.
 rc/apns.ts(449,24): error TS2339: Property 'request' does not exist on type 'Http2Session'.
-rc/index.ts(2104,36): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
-rc/index.ts(338,78): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
-rc/index.ts(376,33): error TS2339: Property 'authenticated' does not exist on type 'unknown'.
-rc/index.ts(377,32): error TS2339: Property 'selectedId' does not exist on type 'unknown'.
-rc/index.ts(377,62): error TS2339: Property 'selectedId' does not exist on type 'unknown'.
-rc/index.ts(379,36): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
-rc/index.ts(379,72): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
-rc/index.ts(384,29): error TS2339: Property 'authenticated' does not exist on type 'unknown'.
-rc/index.ts(385,32): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
-rc/index.ts(385,68): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
-rc/index.ts(896,21): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+rc/index.ts(2188,36): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+rc/index.ts(368,78): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
+rc/index.ts(406,33): error TS2339: Property 'authenticated' does not exist on type 'unknown'.
+rc/index.ts(407,32): error TS2339: Property 'selectedId' does not exist on type 'unknown'.
+rc/index.ts(407,62): error TS2339: Property 'selectedId' does not exist on type 'unknown'.
+rc/index.ts(409,36): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
+rc/index.ts(409,72): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
+rc/index.ts(414,29): error TS2339: Property 'authenticated' does not exist on type 'unknown'.
+rc/index.ts(415,32): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
+rc/index.ts(415,68): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'RcClient'.
+rc/index.ts(945,21): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
 rc/push-setup.ts(101,51): error TS2339: Property 'reason' does not exist on type 'KeyValidation'.
