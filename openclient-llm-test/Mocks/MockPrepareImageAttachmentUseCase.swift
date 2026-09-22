@@ -10,7 +10,9 @@ import Foundation
 @testable import openclient_llm
 
 // Safety: Only used within serialized @MainActor test methods.
-final class MockPrepareImageAttachmentUseCase: PrepareImageAttachmentUseCaseProtocol, @unchecked Sendable {
+// nonisolated: mirrors the real nonisolated struct — @concurrent execute
+// must read `result` without MainActor isolation (project default).
+final nonisolated class MockPrepareImageAttachmentUseCase: PrepareImageAttachmentUseCaseProtocol, @unchecked Sendable {
     // MARK: - Properties
 
     var result: Result<PreparedImageAttachment, Error>?
