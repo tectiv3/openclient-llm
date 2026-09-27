@@ -6,8 +6,8 @@
 //  Copyright © 2026 Arturo Carretero Calvo. All rights reserved.
 //
 
-import XCTest
 @testable import openclient_llm
+import XCTest
 
 @MainActor
 final class ChatViewModelTests: XCTestCase {
@@ -117,7 +117,7 @@ final class ChatViewModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -131,7 +131,7 @@ final class ChatViewModelTests: XCTestCase {
         // Given
         let models = [
             LLMModel(id: "gpt-4", mode: .chat),
-            LLMModel(id: "gpt-image-2", mode: .imageGeneration)
+            LLMModel(id: "gpt-image-2", mode: .imageGeneration),
         ]
 
         // When
@@ -150,12 +150,131 @@ final class ChatViewModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
         XCTAssertNotNil(loadedState.errorMessage)
         XCTAssertTrue(loadedState.availableModels.isEmpty)
+    }
+
+    func test_send_viewAppeared_secondTime_preservesLoadedConversation() async throws {
+        // Given
+        let messages = [
+            ChatMessage(role: .user, content: "Hello"),
+            ChatMessage(role: .assistant, content: "Hi there"),
+        ]
+        let conversation = Conversation(modelId: "gpt-4", messages: messages)
+        let conversationSut = makeSut(conversation: conversation)
+        mockFetchModels.result = .success([LLMModel(id: "gpt-4")])
+
+        // When
+        conversationSut.send(.viewAppeared)
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Then
+        guard case let .loaded(firstState) = conversationSut.state else {
+            XCTFail("Expected loaded state")
+            return
+        }
+        XCTAssertEqual(firstState.conversation?.id, conversation.id)
+        XCTAssertEqual(firstState.messages.map(\.id), messages.map(\.id))
+
+        conversationSut.send(.viewAppeared)
+        try await Task.sleep(for: .milliseconds(100))
+
+        guard case let .loaded(secondState) = conversationSut.state else {
+            XCTFail("Expected loaded state")
+            return
+        }
+        XCTAssertEqual(secondState.conversation?.id, conversation.id)
+        XCTAssertEqual(secondState.messages.map(\.id), messages.map(\.id))
+    }
+
+    func test_send_viewAppeared_secondTime_refreshesAvailableModels() async throws {
+        // Given
+        let messages = [ChatMessage(role: .user, content: "Hello")]
+        let conversation = Conversation(modelId: "gpt-4", messages: messages)
+        let conversationSut = makeSut(conversation: conversation)
+        mockFetchModels.result = .success([
+            LLMModel(id: "gpt-4"),
+            LLMModel(id: "llama3"),
+        ])
+        conversationSut.send(.viewAppeared)
+        try await Task.sleep(for: .milliseconds(100))
+
+        mockFetchModels.result = .success([
+            LLMModel(id: "gpt-4"),
+            LLMModel(id: "claude-3"),
+        ])
+
+        // When
+        conversationSut.send(.viewAppeared)
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Then
+        guard case let .loaded(loadedState) = conversationSut.state else {
+            XCTFail("Expected loaded state")
+            return
+        }
+        XCTAssertEqual(loadedState.availableModels.map(\.id), ["gpt-4", "claude-3"])
+        XCTAssertEqual(loadedState.messages.map(\.id), messages.map(\.id))
+        XCTAssertEqual(loadedState.selectedModel?.id, "gpt-4")
+    }
+
+    func test_send_viewAppeared_secondTime_keepsStreamingState() async throws {
+        // Given
+        let messages = [ChatMessage(role: .user, content: "Hello")]
+        let conversation = Conversation(modelId: "gpt-4", messages: messages)
+        let conversationSut = makeSut(conversation: conversation)
+        mockFetchModels.result = .success([LLMModel(id: "gpt-4")])
+        conversationSut.send(.viewAppeared)
+        try await Task.sleep(for: .milliseconds(100))
+
+        guard case var .loaded(loadedState) = conversationSut.state else {
+            XCTFail("Expected loaded state")
+            return
+        }
+        loadedState.isStreaming = true
+        conversationSut.state = .loaded(loadedState)
+
+        // When
+        conversationSut.send(.viewAppeared)
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Then
+        guard case let .loaded(refreshedState) = conversationSut.state else {
+            XCTFail("Expected loaded state")
+            return
+        }
+        XCTAssertTrue(refreshedState.isStreaming)
+        XCTAssertEqual(refreshedState.messages.map(\.id), messages.map(\.id))
+    }
+
+    func test_send_viewAppeared_withModelsErrorOnReappear_keepsExistingModels() async throws {
+        // Given
+        let messages = [ChatMessage(role: .user, content: "Hello")]
+        let conversation = Conversation(modelId: "gpt-4", messages: messages)
+        let conversationSut = makeSut(conversation: conversation)
+        mockFetchModels.result = .success([LLMModel(id: "gpt-4")])
+        conversationSut.send(.viewAppeared)
+        try await Task.sleep(for: .milliseconds(100))
+
+        mockFetchModels.result = .failure(APIError.serverUnreachable)
+
+        // When
+        conversationSut.send(.viewAppeared)
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Then
+        guard case let .loaded(loadedState) = conversationSut.state else {
+            XCTFail("Expected loaded state")
+            return
+        }
+        XCTAssertEqual(loadedState.conversation?.id, conversation.id)
+        XCTAssertEqual(loadedState.messages.map(\.id), messages.map(\.id))
+        XCTAssertEqual(loadedState.availableModels.map(\.id), ["gpt-4"])
+        XCTAssertNil(loadedState.errorMessage)
     }
 
     // MARK: - Tests — inputChanged
@@ -170,7 +289,7 @@ final class ChatViewModelTests: XCTestCase {
         sut.send(.inputChanged("Hello"))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -190,7 +309,7 @@ final class ChatViewModelTests: XCTestCase {
         sut.send(.modelSelected(models[1]))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -213,7 +332,7 @@ final class ChatViewModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(200))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -238,7 +357,7 @@ final class ChatViewModelTests: XCTestCase {
         sut.send(.sendTapped)
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -256,7 +375,7 @@ final class ChatViewModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -268,7 +387,7 @@ final class ChatViewModelTests: XCTestCase {
         mockFetchModels.result = .success([LLMModel(id: "test")])
         sut.send(.viewAppeared)
         try await Task.sleep(for: .milliseconds(100))
-        sut.send(.contextWindowChanged(8_192))
+        sut.send(.contextWindowChanged(8192))
         sut.send(.inputChanged("Hello"))
 
         // When
@@ -277,7 +396,7 @@ final class ChatViewModelTests: XCTestCase {
 
         // Then
         let savedConversation = try XCTUnwrap(mockSaveConversation.savedConversations.last)
-        XCTAssertEqual(savedConversation.contextWindowTokens, 8_192)
+        XCTAssertEqual(savedConversation.contextWindowTokens, 8192)
     }
 
     func test_send_sendTapped_withNoModel_doesNothing() async throws {
@@ -293,7 +412,7 @@ final class ChatViewModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -314,7 +433,7 @@ final class ChatViewModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(200))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -349,7 +468,7 @@ final class ChatViewModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -367,7 +486,7 @@ final class ChatViewModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -392,7 +511,7 @@ final class ChatViewModelTests: XCTestCase {
         sut.send(.stopStreamingTapped)
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -413,7 +532,7 @@ final class ChatViewModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(200))
 
         // Then
-        guard case .loaded(let loadedState) = sut.state else {
+        guard case let .loaded(loadedState) = sut.state else {
             XCTFail("Expected loaded state")
             return
         }
@@ -426,4 +545,28 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(loadedState.messages[1].role, .assistant)
     }
 
+    // MARK: - Helpers
+
+    private func makeSut(conversation: Conversation?) -> ChatViewModel {
+        ChatViewModel(
+            conversation: conversation,
+            fetchModelsUseCase: mockFetchModels,
+            prepareImageAttachmentUseCase: mockPrepareImageAttachment,
+            attachmentRepository: mockAttachmentRepository,
+            streamMessageUseCase: mockStreamMessage,
+            generateImageUseCase: mockGenerateImage,
+            webSearchUseCase: mockWebSearch,
+            saveConversationUseCase: mockSaveConversation,
+            exportConversationUseCase: mockExportConversation,
+            branchConversationUseCase: mockBranchConversation,
+            getChatPreferencesUseCase: mockGetChatPreferences,
+            saveSelectedModelUseCase: mockSaveSelectedModel,
+            setWebSearchEnabledUseCase: mockSetWebSearchEnabled,
+            fetchMCPToolsUseCase: mockFetchMCPTools,
+            resolveAudioModelIdsUseCase: mockResolveAudioModelIds,
+            getUserProfileContextUseCase: mockGetUserProfileContext,
+            getConversationStartersUseCase: mockGetConversationStarters,
+            compactConversationUseCase: mockCompactConversation
+        )
+    }
 }

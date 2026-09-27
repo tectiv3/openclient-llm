@@ -17,19 +17,17 @@ extension ChatViewModel {
     ) -> LoadedState {
         let mcpTools = mcpResult?.tools ?? []
         let mcpServers = mcpResult?.servers ?? []
-        let chatModels = models.filter {
-            [.chat, .completion, .unknown, .imageGeneration].contains($0.mode)
-        }
+        let selectableModels = Self.chatModels(from: models)
         let savedModelID = getChatPreferencesUseCase.getSelectedModelId()
-        let selectedModel = chatModels.first(where: { $0.id == pending?.modelId })
-            ?? chatModels.first(where: { $0.id == savedModelID })
-            ?? chatModels.first
+        let selectedModel = selectableModels.first(where: { $0.id == pending?.modelId })
+            ?? selectableModels.first(where: { $0.id == savedModelID })
+            ?? selectableModels.first
         let audioModelIDs = resolveAudioModelIdsUseCase.execute(from: models)
         var loadedState = LoadedState(
             conversation: pending,
             messages: pending?.messages ?? [],
             selectedModel: selectedModel,
-            availableModels: chatModels,
+            availableModels: selectableModels,
             conversationStarters: (pending?.messages ?? []).isEmpty
                 ? getConversationStartersUseCase.execute(count: 4)
                 : [],
@@ -66,17 +64,18 @@ extension ChatViewModel {
         refreshContextUsage(in: &loadedState)
         return loadedState
     }
+
     func handleMCPEvent(_ event: Event) {
         switch event {
         case .mcpButtonTapped:
             refreshMCPTools()
         case .mcpToolsRefreshed:
             refreshMCPTools()
-        case .mcpToolToggled(let toolId, let enabled):
+        case let .mcpToolToggled(toolId, enabled):
             toggleMCPTool(toolId: toolId, enabled: enabled)
-        case .mcpIntegrationAdded(let integration):
+        case let .mcpIntegrationAdded(integration):
             addMCPIntegration(integration)
-        case .mcpIntegrationRemoved(let integration):
+        case let .mcpIntegrationRemoved(integration):
             removeMCPIntegration(integration)
         default:
             break
@@ -84,7 +83,7 @@ extension ChatViewModel {
     }
 
     func addMCPIntegration(_ integration: MCPIntegration) {
-        guard case .loaded(var loadedState) = state else { return }
+        guard case var .loaded(loadedState) = state else { return }
         guard !loadedState.mcpIntegrations.contains(integration) else { return }
         loadedState.mcpIntegrations.append(integration)
         state = .loaded(loadedState)
@@ -92,15 +91,17 @@ extension ChatViewModel {
     }
 
     func removeMCPIntegration(_ integration: MCPIntegration) {
-        guard case .loaded(var loadedState) = state else { return }
+        guard case var .loaded(loadedState) = state else { return }
         loadedState.mcpIntegrations.removeAll { $0 == integration }
         state = .loaded(loadedState)
         persistConversation()
     }
 
     func refreshMCPTools() {
-        guard case .loaded(let loadedState) = state, !loadedState.isLoadingMCPTools else { return }
-        if settingsManager.getServerType() == .lmStudio { return }
+        guard case let .loaded(loadedState) = state, !loadedState.isLoadingMCPTools else { return }
+        if settingsManager.getServerType() == .lmStudio {
+            return
+        }
         var update = loadedState
         update.isLoadingMCPTools = true
         state = .loaded(update)
@@ -108,7 +109,7 @@ extension ChatViewModel {
         Task { [weak self] in
             guard let self else { return }
             let result = await fetchMCPToolsUseCase.execute()
-            guard case .loaded(var currentState) = state else { return }
+            guard case var .loaded(currentState) = state else { return }
             if result.errorMessage != nil && result.servers.isEmpty {
                 currentState.isLoadingMCPTools = false
                 currentState.errorMessage = result.errorMessage
@@ -136,7 +137,7 @@ extension ChatViewModel {
     }
 
     func toggleMCPTool(toolId: String, enabled: Bool) {
-        guard case .loaded(var loadedState) = state else { return }
+        guard case var .loaded(loadedState) = state else { return }
         cancelCompaction()
         if enabled {
             loadedState.enabledMCPToolIds.insert(toolId)
@@ -152,7 +153,9 @@ extension ChatViewModel {
         let currentIds = Set(tools.map(\.id))
         let legacyIds = Dictionary(uniqueKeysWithValues: tools.map { ($0.prefixedName, $0.id) })
         return Set(savedIds.compactMap { savedId in
-            if currentIds.contains(savedId) { return savedId }
+            if currentIds.contains(savedId) {
+                return savedId
+            }
             return legacyIds[savedId]
         })
     }

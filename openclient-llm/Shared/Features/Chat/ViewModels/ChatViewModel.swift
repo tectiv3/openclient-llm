@@ -64,7 +64,7 @@ final class ChatViewModel {
         var systemPrompt: String = ""
         var pendingAttachments: [ChatMessage.Attachment] = []
         var isPreparingAttachment: Bool = false
-        var pendingSessionId: UUID = UUID()
+        var pendingSessionId: UUID = .init()
         var modelParameters: ModelParameters = .default
         var contextWindowTokens: Int?
         var contextUsage: ContextUsage?
@@ -88,6 +88,10 @@ final class ChatViewModel {
         var enabledMCPToolIds: Set<String> = []
         var isLoadingMCPTools: Bool = false
         var mcpIntegrations: [MCPIntegration] = []
+    }
+
+    static func chatModels(from models: [LLMModel]) -> [LLMModel] {
+        models.filter { [.chat, .completion, .unknown, .imageGeneration].contains($0.mode) }
     }
 
     var state: State
@@ -175,7 +179,7 @@ final class ChatViewModel {
         buildFallbackRequestUseCase: BuildFallbackRequestUseCaseProtocol = BuildFallbackRequestUseCase()
     ) {
         self.state = state
-        self.pendingConversation = conversation
+        pendingConversation = conversation
         self.isPrivateChat = isPrivateChat
         self.fetchModelsUseCase = fetchModelsUseCase
         self.prepareImageAttachmentUseCase = prepareImageAttachmentUseCase
@@ -232,10 +236,10 @@ final class ChatViewModel {
         case .viewDisappeared:
             return
         case .viewAppeared:
-            loadInitialData()
-        case .conversationLoaded(let conversation):
+            handleViewAppeared()
+        case let .conversationLoaded(conversation):
             loadConversation(conversation)
-        case .inputChanged(let text):
+        case let .inputChanged(text):
             updateInput(text)
         case .sendTapped:
             sendMessage()
@@ -248,7 +252,7 @@ final class ChatViewModel {
 
     func sendRoutedEvent(_ event: Event) {
         switch event {
-        case .suggestionTapped(let prompt):
+        case let .suggestionTapped(prompt):
             handleSuggestionTapped(prompt)
         case .modelSelected,
              .systemPromptChanged,
@@ -278,7 +282,6 @@ final class ChatViewModel {
 // MARK: - Private
 
 private extension ChatViewModel {
-
     func loadInitialData() {
         cancelActiveStreaming()
         cancelCompaction()
@@ -314,16 +317,55 @@ private extension ChatViewModel {
         refreshMCPTools()
     }
 
+    /// WHY: ChatView's `.task` re-fires every time the tab becomes visible
+    /// again; rebuilding state there wiped the open conversation (its pending
+    /// conversation is consumed on first load) and cancelled active streaming.
+    func handleViewAppeared() {
+        if loadTask != nil {
+            return
+        } // initial load already in flight
+        guard case .loaded = state else {
+            loadInitialData()
+            return
+        }
+        refreshAvailableModels()
+    }
+
+    /// Re-appear path: keep conversation, messages, and streaming untouched;
+    /// only refresh the model list in place.
+    func refreshAvailableModels() {
+        loadTask = Task {
+            // WHY: silent on failure — a transient models error when returning
+            // to an open chat must not disturb the loaded state.
+            guard let models = try? await fetchModelsUseCase.execute(),
+                  !Task.isCancelled,
+                  case var .loaded(loadedState) = state
+            else {
+                loadTask = nil
+                return
+            }
+            loadedState.availableModels = Self.chatModels(from: models)
+            if let selected = loadedState.selectedModel,
+               let updated = loadedState.availableModels.first(where: { $0.id == selected.id })
+            {
+                loadedState.selectedModel = updated
+            }
+            state = .loaded(loadedState)
+            loadTask = nil
+            applyCapabilityOverrides()
+        }
+    }
+
     func handleConfigurationEvent(_ event: Event) {
         switch event {
-        case .modelSelected(let model): selectModel(model)
-        case .systemPromptChanged(let prompt): updateSystemPrompt(prompt)
-        case .attachmentAdded(let data, let fileName, let type):
+        case let .modelSelected(model): selectModel(model)
+        case let .systemPromptChanged(prompt): updateSystemPrompt(prompt)
+        case let .attachmentAdded(data, fileName, type):
             addAttachment(data: data, fileName: fileName, type: type)
-        case .attachmentRemoved(let id): removeAttachment(id)
-        case .modelParametersChanged(let parameters): updateModelParameters(parameters)
-        case .contextWindowChanged(let tokens): updateContextWindow(tokens)
-        case .speakMessageTapped(let message): speakMessage(message)
+        case let .attachmentRemoved(id): removeAttachment(id)
+        case let .modelParametersChanged(parameters): updateModelParameters(parameters)
+        case let .contextWindowChanged(tokens): updateContextWindow(tokens)
+        case let .speakMessageTapped(message): speakMessage(message)
         case .stopSpeakingTapped: stopSpeaking()
         default: break
         }
@@ -332,7 +374,7 @@ private extension ChatViewModel {
     func loadConversation(_ conversation: Conversation) {
         cancelActiveStreaming()
         cancelCompaction()
-        guard case .loaded(var loadedState) = state else {
+        guard case var .loaded(loadedState) = state else {
             pendingConversation = conversation
             return
         }
@@ -355,7 +397,7 @@ private extension ChatViewModel {
     }
 
     func selectModel(_ model: LLMModel) {
-        guard case .loaded(var loadedState) = state else { return }
+        guard case var .loaded(loadedState) = state else { return }
         cancelCompaction()
         LogManager.info("selectModel id=\(model.id)")
         loadedState.selectedModel = model
@@ -370,7 +412,7 @@ private extension ChatViewModel {
     }
 
     func updateSystemPrompt(_ prompt: String) {
-        guard case .loaded(var loadedState) = state else { return }
+        guard case var .loaded(loadedState) = state else { return }
         cancelCompaction()
         loadedState.systemPrompt = prompt
         if loadedState.conversation != nil {
@@ -382,7 +424,7 @@ private extension ChatViewModel {
     }
 
     func updateModelParameters(_ parameters: ModelParameters) {
-        guard case .loaded(var loadedState) = state else { return }
+        guard case var .loaded(loadedState) = state else { return }
         cancelCompaction()
         loadedState.modelParameters = parameters
         if loadedState.conversation != nil {
@@ -393,7 +435,7 @@ private extension ChatViewModel {
     }
 
     func speakMessage(_ message: ChatMessage) {
-        guard case .loaded(var loadedState) = state,
+        guard case var .loaded(loadedState) = state,
               !message.content.isEmpty else { return }
         guard let ttsModelId = loadedState.ttsModelId else { return }
 
@@ -408,12 +450,12 @@ private extension ChatViewModel {
                     voice: getChatPreferencesUseCase.getSelectedTTSVoice(forModelId: ttsModelId)
                 )
                 await playAudioUseCase.play(data: audioData, messageId: message.id)
-                guard case .loaded(var currentState) = state else { return }
+                guard case var .loaded(currentState) = state else { return }
                 currentState.isSpeaking = false
                 currentState.speakingMessageId = nil
                 state = .loaded(currentState)
             } catch {
-                guard case .loaded(var currentState) = state else { return }
+                guard case var .loaded(currentState) = state else { return }
                 currentState.isSpeaking = false
                 currentState.speakingMessageId = nil
                 currentState.errorMessage = error.localizedDescription
@@ -425,7 +467,7 @@ private extension ChatViewModel {
 
     func stopSpeaking() {
         playAudioUseCase.stop()
-        guard case .loaded(var loadedState) = state else { return }
+        guard case var .loaded(loadedState) = state else { return }
         loadedState.isSpeaking = false
         loadedState.speakingMessageId = nil
         state = .loaded(loadedState)
@@ -454,7 +496,7 @@ private extension ChatViewModel {
     }
 
     func applyCapabilityOverrides() {
-        guard case .loaded(var loadedState) = state else { return }
+        guard case var .loaded(loadedState) = state else { return }
         for index in loadedState.availableModels.indices {
             let modelId = loadedState.availableModels[index].id
             if let overrides = settingsManager.getCapabilityOverrides(forModelId: modelId) {
@@ -464,7 +506,8 @@ private extension ChatViewModel {
             }
         }
         if let selected = loadedState.selectedModel,
-           let updated = loadedState.availableModels.first(where: { $0.id == selected.id }) {
+           let updated = loadedState.availableModels.first(where: { $0.id == selected.id })
+        {
             loadedState.selectedModel = updated
         }
         state = .loaded(loadedState)
