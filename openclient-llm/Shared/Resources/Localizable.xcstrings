@@ -8739,6 +8739,9 @@
         }
       }
     },
+    "Edited in model context" : {
+
+    },
     "Email Composer" : {
       "comment" : "Name of a prompt template for composing emails.",
       "localizations" : {
@@ -11614,6 +11617,9 @@
           }
         }
       }
+    },
+    "Hidden from model context" : {
+
     },
     "Hide Actions" : {
       "comment" : "A label for hiding the available actions.",
@@ -22711,6 +22717,7 @@
       }
     },
     "Right-click a message to edit, regenerate, branch, or save it as a favourite." : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -31336,6 +31343,7 @@
     },
     "Touch and hold a message to edit, regenerate, branch, or save it as a favourite." : {
       "comment" : "A description of the action to edit, regenerate, branch, or save a message.",
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -31398,6 +31406,9 @@
           }
         }
       }
+    },
+    "Touch and hold message text to select and copy it. For message actions, touch and hold the timestamp or the assistant icon." : {
+
     },
     "Transcribing..." : {
       "comment" : "A placeholder text displayed when the user is recording audio.",

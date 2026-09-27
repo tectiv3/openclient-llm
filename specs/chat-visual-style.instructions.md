@@ -48,10 +48,21 @@ Modern, clean conversational interface inspired by leading AI chat applications.
 
 - Message timestamps use `.caption2`/tertiary styling and sit outside message surfaces. User timestamps are below and
   trailing the accent-tinted glass; assistant timestamps are trailing in the metadata row.
+- The metadata row, the user timestamp, and the assistant avatar host the message-actions context menu (see
+  Text Selection).
 - Optional token usage is shown in the completed assistant message metadata row.
 - While the user manually scrolls through history, a centered, noninteractive glass date capsule identifies the day of
   the first visible message. It remains hidden during idle and programmatic scrolling.
 - Do not make timestamps hover-only; they must remain available on touch platforms.
+
+### Text Selection
+
+- Message text is long-press-selectable via `.textSelection(.enabled)`. The system provides selection handles and range
+  controls on iOS 27+; iOS 26 offers a whole-text menu.
+- Container-level context menus are FORBIDDEN on message bubbles: the context-menu long-press gesture takes precedence
+  over text selection, so `.textSelection(.enabled)` never engages.
+- Message actions live on non-text elements instead: the assistant avatar, the assistant metadata row, and the user
+  timestamp.
 
 ## Input Bar
 

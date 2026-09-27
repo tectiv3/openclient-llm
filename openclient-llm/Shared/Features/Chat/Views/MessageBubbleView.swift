@@ -9,9 +9,9 @@
 import SwiftUI
 import TipKit
 #if canImport(UIKit)
-import SwiftUI
+    import SwiftUI
 #elseif canImport(AppKit)
-import AppKit
+    import AppKit
 #endif
 
 struct MessageBubbleView: View {
@@ -45,8 +45,8 @@ struct MessageBubbleView: View {
             assistantMessageLayout
                 .popoverTip(
                     showsMessageActionsTip
-                    ? AppTips.messageActions
-                    : nil
+                        ? AppTips.messageActions
+                        : nil
                 )
         case .tool:
             EmptyView()
@@ -74,23 +74,34 @@ private extension MessageBubbleView {
                         .regular.tint(Color.appAccent),
                         in: .rect(cornerRadius: 18)
                     )
+                // Menu lives on the timestamp, not the bubble: a container-level
+                // long-press gesture would take over and block text selection.
                 timestampLabel
+                    .padding(.vertical, 2)
                     .padding(.trailing, 4)
-            }
-            .contentShape(Rectangle())
-            .contextMenu {
-                messageContextMenu(message.content)
+                    .contentShape(Rectangle())
+                    .contextMenu {
+                        messageContextMenu(message.content)
+                    }
             }
         }
     }
 
     var assistantMessageLayout: some View {
         HStack(alignment: .top, spacing: 10) {
+            // The avatar doubles as the message-actions target: a menu on the
+            // message container would steal the long-press from text selection.
             Image(systemName: "sparkles")
                 .font(.system(size: 14))
                 .foregroundStyle(Color.appAccent)
                 .frame(width: 28, height: 28)
                 .glassEffect(.regular, in: .circle)
+                .contentShape(Circle())
+                .contextMenu {
+                    if !message.content.isEmpty {
+                        messageContextMenu(message.content)
+                    }
+                }
 
             VStack(alignment: .leading, spacing: 8) {
                 if !message.attachments.isEmpty {
@@ -121,6 +132,11 @@ private extension MessageBubbleView {
 
                         timestampLabel
                     }
+                    .padding(.vertical, 2)
+                    .contentShape(Rectangle())
+                    .contextMenu {
+                        messageContextMenu(message.content)
+                    }
                 }
 
                 if let results = message.webSearchResults, !results.isEmpty, !isStreaming {
@@ -142,12 +158,6 @@ private extension MessageBubbleView {
                 }
             }
             .frame(minHeight: 28, alignment: .center)
-            .contentShape(Rectangle())
-            .contextMenu {
-                if !message.content.isEmpty {
-                    messageContextMenu(message.content)
-                }
-            }
 
             Spacer(minLength: 0)
         }
@@ -200,7 +210,6 @@ private extension MessageBubbleView {
 
     // MARK: - Attachments
 
-    @ViewBuilder
     var attachmentsView: some View {
         HStack(spacing: 8) {
             ForEach(message.attachments) { attachment in
@@ -214,7 +223,6 @@ private extension MessageBubbleView {
         }
     }
 
-    @ViewBuilder
     func imageThumbnail(_ attachment: ChatMessage.Attachment) -> some View {
         AttachmentImageView(attachment: attachment)
     }
@@ -230,8 +238,8 @@ private extension MessageBubbleView {
                     .lineLimit(1)
                     .foregroundStyle(.primary)
                 Text(attachment.type == .image
-                     ? String(localized: "Image")
-                     : String(localized: "PDF Document"))
+                    ? String(localized: "Image")
+                    : String(localized: "PDF Document"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -316,12 +324,12 @@ private extension MessageBubbleView {
     }
 
     func copyToClipboard(_ text: String) {
-#if os(iOS)
-        UIPasteboard.general.string = text
-#elseif os(macOS)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-#endif
+        #if os(iOS)
+            UIPasteboard.general.string = text
+        #elseif os(macOS)
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        #endif
     }
 
     var shouldBlinkStreamingIndicator: Bool {
@@ -340,6 +348,7 @@ private extension MessageBubbleView {
                 Text(reasoning)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 6)
@@ -407,8 +416,8 @@ private extension MessageBubbleView {
                 Image(systemName: isSpeaking ? "stop.circle.fill" : "speaker.wave.2")
                     .font(.system(size: 10))
                 Text(isSpeaking
-                     ? String(localized: "Stop")
-                     : String(localized: "Listen"))
+                    ? String(localized: "Stop")
+                    : String(localized: "Listen"))
                     .font(.caption2)
             }
             .foregroundStyle(isSpeaking ? AnyShapeStyle(.red) : AnyShapeStyle(.tertiary))
@@ -418,8 +427,7 @@ private extension MessageBubbleView {
 
     // MARK: - Image Actions
 
-    @ViewBuilder
-    func imageSaveContextMenu(_ attachment: ChatMessage.Attachment) -> some View {
+    func imageSaveContextMenu(_: ChatMessage.Attachment) -> some View {
         EmptyView() // Context menu is handled inside AttachmentImageView
     }
 }
