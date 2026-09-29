@@ -29,6 +29,9 @@ extension CodeViewModel {
         var model: CodeModelInfo?
         var models: [CodeModelInfo] = []
         var isStreaming: Bool = false
+        /// A Stop was issued but the server has not confirmed the abort
+        /// settled; prompts are held in `pendingOutbox` until it does.
+        var awaitingSettle: Bool = false
         var compacting: CodeCompacting?
         var contextUsage: CodeContextUsage?
         var items: [CodeTranscriptItem] = []

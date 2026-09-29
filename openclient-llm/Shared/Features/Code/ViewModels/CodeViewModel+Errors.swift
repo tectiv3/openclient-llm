@@ -20,9 +20,14 @@ extension CodeViewModel {
                 ?? String(localized: "Compaction failed")
 
         case "not_idle":
-            transientToast = error.message
-                ?? String(localized: "Cannot send while streaming")
-            markPendingEchoFailed()
+            if requeueNewestPendingPrompt() {
+                transientToast = error.message
+                    ?? String(localized: "Still stopping — will send when ready")
+            } else {
+                transientToast = error.message
+                    ?? String(localized: "Cannot send while streaming")
+                markPendingEchoFailed()
+            }
 
         case "not_ready":
             transientToast = error.message

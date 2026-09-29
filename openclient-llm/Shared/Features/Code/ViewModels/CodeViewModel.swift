@@ -119,6 +119,16 @@ final class CodeViewModel {
     /// extension (agent_start clears the list).
     var pendingPromptEchoes: [UUID] = []
 
+    /// Prompts composed after Stop, held until the server confirms the
+    /// abort settled so the not_idle race cannot lose them.
+    var pendingOutbox: [(id: UUID, text: String)] = []
+
+    var abortReconcileTask: Task<Void, Never>?
+
+    /// Testability seams for the abort-reconciliation backstop.
+    var abortReconcileDelay: Duration = .seconds(2)
+    var abortReabortDelay: Duration = .seconds(4)
+
     /// Sessions list from the anchor (`sessions` frames); empty = today's UX.
     var sessions: [SessionInfo] = []
 
@@ -273,8 +283,10 @@ private extension CodeViewModel {
         // refresh, but a tool ignoring its abort signal or a mid-abort compaction
         // can delay the settle indefinitely — the UI must not stay stuck streaming.
         session.isStreaming = false
+        session.awaitingSettle = true
         finalizeStreamingBubbles(in: &session.items)
         updateSession(session)
+        startAbortReconciliation()
         Task { await client.send(.abort) }
     }
 
@@ -470,7 +482,10 @@ extension CodeViewModel {
         if isRebind {
             session.items = []
             session.pendingQuestion = nil
+            session.awaitingSettle = false
             pendingPromptEchoes.removeAll()
+            pendingOutbox.removeAll()
+            clearAbortReconciliation()
             // Feature B: the attach is scoped to the session being left —
             // orphan it on the way out (m8).
             detachAttachedSubagentIfAny()
@@ -485,6 +500,9 @@ extension CodeViewModel {
             session.models = models
         }
         session.isStreaming = info.isStreaming
+        if !info.isStreaming {
+            session.awaitingSettle = false
+        }
         session.compacting = info.compacting
         session.contextUsage = info.contextUsage
 
@@ -493,47 +511,11 @@ extension CodeViewModel {
         }
 
         updateSession(session)
-    }
 
-    private func handleHistory(_ history: CodeHistory) {
-        guard var session = currentSession else { return }
-        guard history.sessionId == session.sessionId else { return }
-
-        // The transcript is replaced wholesale, so local-echo UUIDs are gone.
-        pendingPromptEchoes.removeAll()
-        var items = mapHistoryToItems(history.messages)
-        let existingTexts = Set(items.compactMap {
-            if case let .user(_, text, _, _) = $0 {
-                text
-            } else {
-                nil
-            }
-        })
-        for pendingText in history.pending ?? [] where !existingTexts.contains(pendingText) {
-            items.append(.user(
-                id: UUID(), text: pendingText, failed: false, pending: true
-            ))
+        if !info.isStreaming {
+            clearAbortReconciliation()
+            flushPendingOutbox()
         }
-        session.items = items
-        updateSession(session)
-    }
-
-    private func handleStreamingBuffer(
-        sessionId: String,
-        content: [CodeContentBlock]
-    ) {
-        guard var session = currentSession,
-              sessionId == session.sessionId, !content.isEmpty
-        else {
-            return
-        }
-
-        // Merge, don't append: the buffer's toolUse carriers may duplicate
-        // steps the rebuilt history already carries (reconnect mid-tool),
-        // and its text/thinking only reaches us un-pruned when genuinely
-        // uncommitted. Empty is a no-op so repeated frames are harmless.
-        mergeBufferIntoItems(content, into: &session.items)
-        updateSession(session)
     }
 
     private func transitionToReconnecting() {
@@ -618,6 +600,8 @@ extension CodeViewModel {
 
     func resetToDisconnected() {
         pendingPromptEchoes.removeAll()
+        pendingOutbox.removeAll()
+        clearAbortReconciliation()
         cancelPendingSelect()
         connectForm = disconnectedForm()
         state = .disconnected

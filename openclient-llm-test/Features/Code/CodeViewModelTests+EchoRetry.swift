@@ -52,9 +52,12 @@ extension CodeViewModelTests {
         XCTAssertTrue(item.failed)
     }
 
-    func test_errorNotIdle_trailingPendingEcho_marksEchoFailed() async throws {
-        // Given — the echo was sent, the server rejected it
+    func test_errorNotIdle_trailingPendingEcho_requeuesForLaterSend() async throws {
+        // Given — the echo was sent, the server rejected it because the
+        // abort is still settling
         try await connectAndEstablish()
+        sut.abortReconcileDelay = .seconds(30)
+        sut.abortReabortDelay = .seconds(30)
         sut.send(.sendPrompt(text: "hi"))
         try await waitUntil {
             self.mockClient.attemptsCount(where: {
@@ -70,8 +73,11 @@ extension CodeViewModelTests {
             code: "not_idle", message: "agent is busy"
         )))
 
-        // Then
-        try await waitUntil { self.lastUserItem()?.failed == true }
+        // Then — the text is requeued, never marked failed
+        try await waitUntil { self.sut.pendingOutbox.count == 1 }
+        let item = try XCTUnwrap(lastUserItem())
+        XCTAssertFalse(item.failed)
+        XCTAssertTrue(item.pending)
         XCTAssertEqual(currentSession()?.items.count, 1)
     }
 
@@ -204,6 +210,8 @@ extension CodeViewModelTests {
         // and is pending, then a steer (never rejected not_idle) was
         // accepted and is the trailing echo
         try await connectAndEstablish()
+        sut.abortReconcileDelay = .seconds(30)
+        sut.abortReabortDelay = .seconds(30)
         sut.send(.sendPrompt(text: "hi"))
         try await waitUntil {
             self.mockClient.attemptsCount(where: {
@@ -232,14 +240,15 @@ extension CodeViewModelTests {
             code: "not_idle", message: "agent is busy"
         )))
 
-        // Then — the prompt echo is marked, the trailing steer is not
-        try await waitUntil {
-            self.userItems().contains {
-                $0.text == "hi" && $0.failed
-            }
-        }
+        // Then — the prompt is requeued (correlated by pending ID), the
+        // trailing steer is untouched
+        try await waitUntil { self.sut.pendingOutbox.count == 1 }
         let items = userItems()
         XCTAssertEqual(items.count, 2)
+        let prompt = try XCTUnwrap(items.first { $0.text == "hi" })
+        XCTAssertFalse(prompt.failed)
+        XCTAssertTrue(prompt.pending)
+        XCTAssertEqual(sut.pendingOutbox.first?.text, "hi")
         let steer = try XCTUnwrap(
             items.first { $0.text == "be brief" },
             "Steer echo missing from transcript"

@@ -110,6 +110,7 @@ extension CodeViewModel {
 
         case "agent_settled":
             session.isStreaming = false
+            session.awaitingSettle = false
             finalizeStreamingBubbles(in: &session.items)
 
         case "message_start":
@@ -168,6 +169,8 @@ extension CodeViewModel {
         // get_state, so refresh after the agent settles to keep the context
         // estimate current.
         if event.name == "agent_settled" {
+            clearAbortReconciliation()
+            flushPendingOutbox()
             send(.refreshState)
         }
     }
@@ -179,6 +182,14 @@ extension CodeViewModel {
     func handleSendPrompt(_ text: String) {
         guard case var .connected(session) = state,
               !session.isStreaming else { return }
+        // Awaiting settle: hold the prompt client-side instead of racing the
+        // server's async abort and getting it rejected `not_idle`.
+        if session.awaitingSettle {
+            let echo = appendLocalEcho(text, to: &session, pending: true)
+            updateSession(session)
+            enqueueOutbox(id: echo.id, text: text)
+            return
+        }
         let echo = appendLocalEcho(text, to: &session)
         updateSession(session)
         sendPromptText(text, echo: echo)
@@ -225,7 +236,7 @@ extension CodeViewModel {
 
 // MARK: - Private (Prompt Echoes)
 
-private extension CodeViewModel {
+extension CodeViewModel {
     /// Shares the prompt-send tail between `handleSendPrompt` and
     /// `handleRetryPrompt` so a failed transport marks the echoed item
     /// failed in both paths.
@@ -240,7 +251,7 @@ private extension CodeViewModel {
         }
     }
 
-    func markLocalEchoFailed(_ id: UUID) {
+    private func markLocalEchoFailed(_ id: UUID) {
         guard var session = currentSession,
               let index = session.items.firstIndex(where: {
                   if case let .user(itemId, _, _, _) = $0 {
@@ -265,7 +276,7 @@ private extension CodeViewModel {
     /// new) so the caller can correlate later send failures with it. Steers
     /// echo as `pending: true` because they stay queued in pi until the
     /// next turn boundary delivers them.
-    func appendLocalEcho(
+    private func appendLocalEcho(
         _ text: String,
         to session: inout SessionState,
         pending: Bool = false
@@ -276,7 +287,7 @@ private extension CodeViewModel {
     /// Shared user-item append, deduped against a trailing identical user
     /// item: a forwarded user frame and its local echo collapse into one
     /// entry regardless of arrival order.
-    func appendUserItem(
+    private func appendUserItem(
         _ text: String,
         to session: inout SessionState,
         pending: Bool = false
@@ -304,7 +315,7 @@ private extension CodeViewModel {
     /// item when pi delivers it (user-role message_start). Returns true when
     /// a match was flipped, so the caller skips the append that would
     /// duplicate the transcript entry.
-    func markPendingUserDelivered(
+    private func markPendingUserDelivered(
         _ text: String,
         in session: inout SessionState
     ) -> Bool {
