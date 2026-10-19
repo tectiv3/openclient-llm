@@ -59,6 +59,7 @@ import {
     parseSubagentMeta,
     resolveAttachCandidate,
     scanLiveSubagents,
+    sessionFileIsSubagentChild,
     type ScannedSubagent,
 } from './subagents'
 
@@ -941,9 +942,11 @@ function handlePushToken(state: RcSingleton, client: RcClient, message: JsonObje
     dbgLog('push_token registered:', client.ip)
 }
 
-// INV1: pushes only in interactive modes. Subagent children run json/print mode
-// and would otherwise fire a push per settled turn, and the opened APNs session
-// would pin the event loop and hang the child (the B1 hang).
+// INV1: pushes only in interactive modes (json/print sessions would otherwise
+// fire a push per settled turn, and the opened APNs session would pin the event
+// loop and hang the process — the B1 hang). Subagent children are NOT filtered
+// here: they run --mode rpc like a top-level remote-control session, so the
+// serving gate (children never run /rc) is what keeps them quiet.
 function pushAllowed(state: RcSingleton): boolean {
     const mode = state.binding?.ctx?.mode
     return mode === 'tui' || mode === 'rpc'
@@ -1372,6 +1375,12 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
         for (const client of state.clients) client.attachedSubagentId = null
         state.subagentRunState.clear()
         forward('session_start', event, ctx)
+        // rc_inspect is meaningless in a subagent child (its singleton never serves).
+        // session_start re-fires on reload, which re-adds all extension tools, so the
+        // guard must live here rather than at registration time.
+        if (isSubagentChildSession(ctx) && pi.getActiveTools().includes('rc_inspect')) {
+            pi.setActiveTools(pi.getActiveTools().filter(name => name !== 'rc_inspect'))
+        }
         // forward() rebinds to the new ctx; this (debounced) is what updates
         // the entry's sessionId/name/cwd/model after an in-process /new.
         notifyRcStatus(state)
@@ -2408,6 +2417,10 @@ function safeArray(value: unknown): unknown[] {
 // scanLiveSubagents is what scopes a scan to one session.
 function subagentsDir(): string {
     return join(getAgentDir(), 'subagents')
+}
+
+function isSubagentChildSession(ctx: ExtensionContext): boolean {
+    return sessionFileIsSubagentChild(ctx.sessionManager.getSessionFile?.(), subagentsDir())
 }
 
 function fsListSubagentFiles(dir: string): string[] {

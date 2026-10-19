@@ -4,6 +4,7 @@ import {
     mapBusEvent,
     resolveAttachCandidate,
     scanLiveSubagents,
+    sessionFileIsSubagentChild,
     SUBAGENT_EVENT_WHITELIST,
     classifySettle,
     type ScanOptions,
@@ -177,6 +178,32 @@ describe('scanLiveSubagents', () => {
             new Set([1, 2, 3])
         )
         expect(scanLiveSubagents(opts).map(r => r.id)).toEqual(['new', 'mid', 'old'])
+    })
+})
+
+describe('sessionFileIsSubagentChild', () => {
+    const dir = '/Users/x/.pi/agent/subagents'
+
+    it('is true for a session file directly inside the subagents dir', () => {
+        expect(sessionFileIsSubagentChild('/Users/x/.pi/agent/subagents/abc.jsonl', dir)).toBe(
+            true
+        )
+    })
+
+    it('is false for a sibling dir with the same prefix', () => {
+        expect(
+            sessionFileIsSubagentChild('/Users/x/.pi/agent/subagents-other/x.jsonl', dir)
+        ).toBe(false)
+    })
+
+    it('is false for a top-level session file', () => {
+        expect(sessionFileIsSubagentChild('/Users/x/.pi/agent/sessions/abc.jsonl', dir)).toBe(
+            false
+        )
+    })
+
+    it('is false when there is no session file', () => {
+        expect(sessionFileIsSubagentChild(undefined, dir)).toBe(false)
     })
 })
 

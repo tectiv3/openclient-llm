@@ -5,6 +5,7 @@
 // READ-ONLY by contract: nothing here unlinks or writes files — the subagent
 // extension manages its own artifacts.
 
+import { resolve, sep } from 'node:path'
 import { pruneBufferForSnapshot, tailClassification, type BufferBlock } from './turnBuffer'
 
 // Structural twin of the subagent extension's SubagentMeta (pi-extensions
@@ -32,6 +33,19 @@ export interface SubagentMeta {
 export interface ScannedSubagent {
     id: string
     meta: SubagentMeta
+}
+
+// A subagent child's session file lives in <agentDir>/subagents (<id>.jsonl).
+// This is the only reliable signal — children also run --mode rpc, and no
+// child-specific env marker exists.
+export function sessionFileIsSubagentChild(
+    sessionFile: string | undefined,
+    dir: string
+): boolean {
+    if (!sessionFile) return false
+    const resolved = resolve(sessionFile)
+    const target = resolve(dir)
+    return resolved === target || resolved.startsWith(target + sep)
 }
 
 export const SUBAGENT_TERMINAL_STATUSES: Set<string> = new Set<string>([

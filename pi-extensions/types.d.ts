@@ -32,6 +32,8 @@ declare module '@earendil-works/pi-coding-agent' {
         setModel(model: unknown): Promise<boolean>
         setSessionName(name: string): void
         getSessionName(): string | undefined
+        getActiveTools(): string[]
+        setActiveTools(toolNames: string[]): void
         events: EventBus
     }
 
@@ -65,6 +67,7 @@ declare module '@earendil-works/pi-coding-agent' {
             getBranch(): unknown[]
             getSessionId?(): string
             getSessionName?(): string
+            getSessionFile?(): string | undefined
         }
         ui: {
             custom<T>(
