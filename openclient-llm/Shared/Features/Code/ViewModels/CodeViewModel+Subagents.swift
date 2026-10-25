@@ -127,9 +127,7 @@ extension CodeViewModel {
                 id: UUID(), content: [], isStreaming: true
             ))
         case "message_update":
-            updateLastAssistantContent(
-                message: payload["message"], in: &items
-            )
+            applyStreamDelta(payload: payload, in: &items)
         case "tool_execution_start":
             appendToolStep(payload: payload, in: &items)
         case "tool_execution_update":
@@ -140,6 +138,9 @@ extension CodeViewModel {
             // Ends the current LLM turn's bubble, not the whole run: a
             // multi-turn run keeps streaming; the view stays open until
             // its own `subagent_settled`.
+            replaceLastAssistantContent(
+                fromTurnEnd: payload["message"], in: &items
+            )
             finalizeStreamingBubbles(in: &items)
         default:
             break

@@ -37,7 +37,18 @@ protocol CodeWebSocketTask: Sendable {
 
 /// Default `CodeWebSocketTask` backed by a real `URLSessionWebSocketTask`.
 struct URLSessionCodeWebSocketTask: CodeWebSocketTask {
+    /// URLSession's 1 MiB default aborts the socket on any larger inbound
+    /// frame (`NSPOSIXErrorDomain` 40, "Message too long"), which surfaced
+    /// as a reconnect loop on long transcripts. The protocol's frames are
+    /// trimmed server-side; this cap is the defense-in-depth ceiling.
+    static let maximumMessageSize = 64 * 1024 * 1024
+
     let task: URLSessionWebSocketTask
+
+    init(task: URLSessionWebSocketTask) {
+        task.maximumMessageSize = Self.maximumMessageSize
+        self.task = task
+    }
 
     func resume() {
         task.resume()
@@ -109,7 +120,7 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
         var coalescingTask: Task<Void, Never>?
         var timeoutTask: Task<Void, Never>?
         var continuation: AsyncStream<CodeEvent>.Continuation?
-        var lastPongTime: Date = .now
+        var lastFrameTime: Date = .now
         var reconnectAttempts = 0
         var attemptGeneration: Int = 0
         /// True once the current attempt completed its handshake, so the
@@ -291,6 +302,11 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
     private func handleReceivedMessage(
         _ message: URLSessionWebSocketTask.Message
     ) {
+        // Liveness is "a frame arrived", not "a pong arrived": a backed-up
+        // receive loop (frames queued behind a slow consumer) must not
+        // false-trip the pong deadline.
+        state.withLock { $0.lastFrameTime = .now }
+
         let data: Data
         switch message {
         case let .string(text):
@@ -333,7 +349,9 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
             }
 
         case .pong:
-            state.withLock { $0.lastPongTime = .now }
+            // Liveness already refreshed in handleReceivedMessage; pongs
+            // are transport keepalive, not app events to surface.
+            break
 
         case let .event(streamEvent)
             where streamEvent.name == "message_update":
@@ -456,7 +474,7 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
     private func startPingLoop() {
         state.withLock {
             $0.pingTask?.cancel()
-            $0.lastPongTime = .now
+            $0.lastFrameTime = .now
         }
 
         let task = Task { [weak self] in
@@ -486,10 +504,10 @@ final class CodeServerClient: CodeServerClientProtocol, @unchecked Sendable {
                 )
                 guard !Task.isCancelled else { return }
 
-                let pongAfterPing = self.state.withLock {
-                    $0.lastPongTime >= pingSentAt
+                let frameAfterPing = self.state.withLock {
+                    $0.lastFrameTime >= pingSentAt
                 }
-                if !pongAfterPing {
+                if !frameAfterPing {
                     self.handleConnectionLost(URLError(.timedOut))
                     return
                 }

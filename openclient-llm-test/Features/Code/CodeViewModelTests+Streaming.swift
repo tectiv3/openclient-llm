@@ -8,6 +8,10 @@
 @testable import openclient_llm
 import XCTest
 
+// The suite predates the split-by-feature extension files; the streaming
+// tests stay beside their subject instead of fragmenting again.
+// swiftlint:disable file_length
+
 // MARK: - CodeViewModelTests — Local echo / streaming / state refresh
 
 extension CodeViewModelTests {
@@ -85,7 +89,7 @@ extension CodeViewModelTests {
         XCTAssertTrue(pending)
     }
 
-    func test_messageUpdate_replacesAssistantContentFromMessageSnapshot() async throws {
+    func test_messageUpdate_assemblesAssistantContentFromDeltas() async throws {
         // Given
         try await connectAndEstablish(isStreaming: true)
         mockClient.emit(.event(messageStartEvent(role: "assistant")))
@@ -93,10 +97,18 @@ extension CodeViewModelTests {
             (self.currentSession()?.items.count ?? 0) == 1
         }
 
-        // When — first raw pi frame: full partial message snapshot
-        mockClient.emit(.event(messageUpdateEvent(
-            thinking: "let's think", text: "hello "
-        )))
+        // When — first frames: thinking and text deltas, no snapshot
+        emit([
+            messageUpdateEvent(type: "thinking_start", contentIndex: 0),
+            messageUpdateEvent(
+                type: "thinking_delta", contentIndex: 0,
+                delta: "let's think"
+            ),
+            messageUpdateEvent(type: "text_start", contentIndex: 1),
+            messageUpdateEvent(
+                type: "text_delta", contentIndex: 1, delta: "hello "
+            ),
+        ])
         try await waitUntil {
             guard let items = self.currentSession()?.items,
                   case let .assistant(_, content, _)? = items.last
@@ -108,10 +120,15 @@ extension CodeViewModelTests {
             ]
         }
 
-        // When — second frame with a longer snapshot: replace, not append
-        mockClient.emit(.event(messageUpdateEvent(
-            thinking: "let's think", text: "hello world"
-        )))
+        // When — a later frame continues the same block
+        emit([
+            messageUpdateEvent(
+                type: "text_delta", contentIndex: 1, delta: "world"
+            ),
+            messageUpdateEvent(
+                type: "text_end", contentIndex: 1, content: "hello world"
+            ),
+        ])
         try await waitUntil {
             guard let items = self.currentSession()?.items,
                   case let .assistant(_, content, _)? = items.last
@@ -123,7 +140,7 @@ extension CodeViewModelTests {
             ]
         }
 
-        // Then — snapshot replaced the bubble content, in order
+        // Then — deltas assembled the bubble content, in order
         let items = try XCTUnwrap(currentSession()?.items)
         guard case let .assistant(_, content, _)? = items.last else {
             return XCTFail("Expected assistant item, got \(items.last)")
@@ -131,7 +148,7 @@ extension CodeViewModelTests {
         XCTAssertEqual(content, [.thinking("let's think"), .text("hello world")])
     }
 
-    func test_messageUpdate_skipsToolCallBlocksFromSnapshot() async throws {
+    func test_messageUpdate_ignoresToolCallDeltas() async throws {
         // Given
         try await connectAndEstablish(isStreaming: true)
         mockClient.emit(.event(messageStartEvent(role: "assistant")))
@@ -139,10 +156,21 @@ extension CodeViewModelTests {
             (self.currentSession()?.items.count ?? 0) == 1
         }
 
-        // When — raw pi frame carrying a toolCall block alongside text
-        mockClient.emit(.event(messageUpdateEventWithToolCall(text: "checking")))
+        // When — text delta followed by the tool-call delta run
+        emit([
+            messageUpdateEvent(type: "text_start", contentIndex: 0),
+            messageUpdateEvent(
+                type: "text_delta", contentIndex: 0, delta: "checking"
+            ),
+            messageUpdateEvent(type: "toolcall_start", contentIndex: 1),
+            messageUpdateEvent(
+                type: "toolcall_delta", contentIndex: 1,
+                delta: #"{"command"#
+            ),
+            messageUpdateEvent(type: "toolcall_end", contentIndex: 1),
+        ])
 
-        // Then — text kept, toolCall block skipped
+        // Then — text kept, no tool block appended to the bubble
         try await waitUntil {
             guard let items = self.currentSession()?.items,
                   case let .assistant(_, content, _)? = items.last
@@ -152,6 +180,7 @@ extension CodeViewModelTests {
             return content == [.text("checking")]
         }
         let items = try XCTUnwrap(currentSession()?.items)
+        XCTAssertEqual(items.count, 1, "tool-call deltas must not add items")
         guard case let .assistant(_, content, _)? = items.last else {
             return XCTFail("Expected assistant item, got \(items.last)")
         }
@@ -166,14 +195,12 @@ extension CodeViewModelTests {
             (self.currentSession()?.items.count ?? 0) == 1
         }
 
-        // When — malformed frame: content is a string, not an array
+        // When — malformed frame: assistantMessageEvent is not an object
         mockClient.emit(.event(CodeStreamEvent(
             sessionId: "s1",
             name: "message_update",
             payload: [
-                "message": .object([
-                    "content": .string("not-an-array"),
-                ]),
+                "assistantMessageEvent": .string("not-an-object"),
             ]
         )))
         try await Task.sleep(for: .milliseconds(100))
@@ -184,6 +211,203 @@ extension CodeViewModelTests {
             return XCTFail("Expected assistant item, got \(items.last)")
         }
         XCTAssertEqual(content, [])
+    }
+
+    // MARK: - Tests — Delta assembly edge cases
+
+    func test_messageUpdate_textSplitMidWord_reassemblesExactText() async throws {
+        // Given
+        try await connectAndEstablish(isStreaming: true)
+        mockClient.emit(.event(messageStartEvent(role: "assistant")))
+        try await waitUntil {
+            (self.currentSession()?.items.count ?? 0) == 1
+        }
+
+        // When — one word spread across three frames
+        mockClient.emit(.event(messageUpdateEvent(
+            type: "text_start", contentIndex: 0
+        )))
+        for delta in ["Hel", "lo, wo", "rld"] {
+            mockClient.emit(.event(messageUpdateEvent(
+                type: "text_delta", contentIndex: 0, delta: delta
+            )))
+        }
+        mockClient.emit(.event(messageUpdateEvent(
+            type: "text_end", contentIndex: 0, content: "Hello, world"
+        )))
+
+        // Then
+        try await waitUntil {
+            guard let items = self.currentSession()?.items,
+                  case let .assistant(_, content, _)? = items.last
+            else {
+                return false
+            }
+            return content == [.text("Hello, world")]
+        }
+        guard let items = currentSession()?.items,
+              case let .assistant(_, content, _)? = items.last
+        else {
+            return XCTFail("Expected assistant item, got \(String(describing: currentSession()?.items.last))")
+        }
+        XCTAssertEqual(content, [.text("Hello, world")])
+    }
+
+    func test_messageUpdate_outOfRangeIndex_padsWithUnknownWithoutShifting()
+        async throws
+    {
+        // Given — thinking at 0 and text at 1, the contiguous prefix pi
+        // produces (a tool call would occupy 2)
+        try await connectAndEstablish(isStreaming: true)
+        mockClient.emit(.event(messageStartEvent(role: "assistant")))
+        try await waitUntil {
+            (self.currentSession()?.items.count ?? 0) == 1
+        }
+        emit([
+            messageUpdateEvent(type: "thinking_start", contentIndex: 0),
+            messageUpdateEvent(
+                type: "thinking_delta", contentIndex: 0, delta: "plan"
+            ),
+            messageUpdateEvent(type: "text_start", contentIndex: 1),
+            messageUpdateEvent(
+                type: "text_delta", contentIndex: 1, delta: "body"
+            ),
+        ])
+        try await waitUntil {
+            guard let items = self.currentSession()?.items,
+                  case let .assistant(_, content, _)? = items.last
+            else {
+                return false
+            }
+            return content == [.thinking("plan"), .text("body")]
+        }
+
+        // When — a delta one index past the end
+        mockClient.emit(.event(messageUpdateEvent(
+            type: "text_delta", contentIndex: 3, delta: "tail"
+        )))
+
+        // Then — exactly one gap filler at index 2, content still in order
+        try await waitUntil {
+            guard let items = self.currentSession()?.items,
+                  case let .assistant(_, content, _)? = items.last
+            else {
+                return false
+            }
+            return content == [
+                .thinking("plan"), .text("body"), .unknown, .text("tail"),
+            ]
+        }
+        guard let items = currentSession()?.items,
+              case let .assistant(_, content, _)? = items.last
+        else {
+            return XCTFail("Expected assistant item")
+        }
+        XCTAssertEqual(content[2], .unknown)
+        XCTAssertEqual(content.dropFirst(3), [.text("tail")])
+    }
+
+    func test_turnEnd_authoritativeContent_overwritesDriftedDeltas()
+        async throws
+    {
+        // Given — a bubble whose delta assembly drifted (a dropped frame)
+        try await connectAndEstablish(isStreaming: true)
+        mockClient.emit(.event(messageStartEvent(role: "assistant")))
+        try await waitUntil {
+            (self.currentSession()?.items.count ?? 0) == 1
+        }
+        let bubbleId = try XCTUnwrap(currentSession()?.items.last?.id)
+        mockClient.emit(.event(messageUpdateEvent(
+            type: "text_delta", contentIndex: 0, delta: "drifted "
+        )))
+        try await waitUntil {
+            guard let items = self.currentSession()?.items,
+                  case let .assistant(_, content, _)? = items.last
+            else {
+                return false
+            }
+            return content == [.text("drifted ")]
+        }
+
+        // When — turn_end carries the authoritative final content
+        mockClient.emit(.event(CodeStreamEvent(
+            sessionId: "s1",
+            name: "turn_end",
+            payload: [
+                "turnIndex": .int(3),
+                "message": .object([
+                    "role": .string("assistant"),
+                    "stopReason": .string("stop"),
+                    "content": .array([
+                        .object([
+                            "type": .string("text"),
+                            "text": .string("authoritative"),
+                        ]),
+                        .object([
+                            "type": .string("thinking"),
+                            "text": .string("reasoning"),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )))
+
+        // Then — content repaired, identity preserved, bubble closed
+        try await waitUntil {
+            guard case let .assistant(_, _, isStreaming)?
+                = self.currentSession()?.items.last else { return false }
+            return !isStreaming
+        }
+        let items = try XCTUnwrap(currentSession()?.items)
+        guard case let .assistant(id, content, isStreaming) = items.last else {
+            return XCTFail("Expected assistant item, got \(items.last)")
+        }
+        XCTAssertEqual(id, bubbleId)
+        XCTAssertEqual(content, [.text("authoritative"), .thinking("reasoning")])
+        XCTAssertFalse(isStreaming)
+    }
+
+    func test_toolExecutionUpdate_stringPartialResult_replacesOutput()
+        async throws
+    {
+        // Given — a live tool step
+        try await connectAndEstablish(isStreaming: true)
+        mockClient.emit(.event(toolExecutionEvent(
+            name: "tool_execution_start", toolCallId: "tc1", toolName: "bash"
+        )))
+        try await waitUntil {
+            (self.currentSession()?.items.count ?? 0) == 1
+        }
+
+        // When — the wire now carries a plain, capped string preview
+        mockClient.emit(.event(toolExecutionEvent(
+            name: "tool_execution_update", toolCallId: "tc1",
+            toolName: "bash", partialResult: "line 1"
+        )))
+        try await waitUntil {
+            guard case let .toolStep(_, _, _, _, output, _)?
+                = self.currentSession()?.items.last else { return false }
+            return output == "line 1"
+        }
+        mockClient.emit(.event(toolExecutionEvent(
+            name: "tool_execution_update", toolCallId: "tc1",
+            toolName: "bash", partialResult: "line 1\nline 2"
+        )))
+
+        // Then — the cumulative preview replaces, never appends
+        try await waitUntil {
+            guard case let .toolStep(_, _, _, _, output, _)?
+                = self.currentSession()?.items.last else { return false }
+            return output == "line 1\nline 2"
+        }
+        guard case let .toolStep(_, _, toolCallId, _, output, isComplete)?
+            = currentSession()?.items.last
+        else {
+            return XCTFail("Expected tool step")
+        }
+        XCTAssertEqual(toolCallId, "tc1")
+        XCTAssertEqual(output, "line 1\nline 2")
+        XCTAssertFalse(isComplete)
     }
 
     func test_agentSettled_triggersStateRefresh() async throws {
@@ -270,9 +494,7 @@ extension CodeViewModelTests {
         // Given — bubble with real content
         try await connectAndEstablish(isStreaming: true)
         mockClient.emit(.event(messageStartEvent(role: "assistant")))
-        mockClient.emit(.event(messageUpdateEvent(
-            thinking: "", text: "done"
-        )))
+        emit(messageDeltas(thinking: "", text: "done"))
         try await waitUntil {
             guard let items = self.currentSession()?.items,
                   case let .assistant(_, content, _)? = items.last
@@ -493,68 +715,86 @@ extension CodeViewModelTests {
     func toolExecutionEvent(
         name: String,
         toolCallId: String,
-        toolName: String
+        toolName: String,
+        partialResult: String? = nil
     ) -> CodeStreamEvent {
-        CodeStreamEvent(
+        var payload: [String: AnyCodableValue] = [
+            "toolCallId": .string(toolCallId),
+            "toolName": .string(toolName),
+        ]
+        switch name {
+        case "tool_execution_start":
+            payload["args"] = .object([:])
+        case "tool_execution_end":
+            payload["isError"] = .bool(false)
+        default:
+            if let partialResult {
+                payload["partialResult"] = .string(partialResult)
+            }
+        }
+        return CodeStreamEvent(
             sessionId: "s1",
             name: name,
-            payload: [
-                "toolCallId": .string(toolCallId),
-                "toolName": .string(toolName),
-                "args": .object([:]),
-            ]
+            payload: payload
         )
     }
 
-    /// Builds a raw pi `message_update` frame: the `message` object carries
-    /// the full partial content snapshot (wire shape, not the normalized
-    /// history shape).
+    /// Builds a trimmed `message_update` frame: only the
+    /// `assistantMessageEvent` (the wire carries neither the cumulative
+    /// `message` nor `partial`).
     func messageUpdateEvent(
+        type: String,
+        contentIndex: Int,
+        delta: String? = nil,
+        content: String? = nil
+    ) -> CodeStreamEvent {
+        var event: [String: AnyCodableValue] = [
+            "type": .string(type),
+            "contentIndex": .int(contentIndex),
+        ]
+        if let delta {
+            event["delta"] = .string(delta)
+        }
+        if let content {
+            event["content"] = .string(content)
+        }
+        return CodeStreamEvent(
+            sessionId: "s1",
+            name: "message_update",
+            payload: ["assistantMessageEvent": .object(event)]
+        )
+    }
+
+    /// One assistant message as pi sends it after the wire trim: thinking
+    /// at index 0 and text at index 1, each closed by its authoritative
+    /// `*_end` block. An empty string still opens its block, so callers
+    /// keep seeing `[.thinking(""), .text(...)]`.
+    func messageDeltas(
         thinking: String,
         text: String
-    ) -> CodeStreamEvent {
-        CodeStreamEvent(
-            sessionId: "s1",
-            name: "message_update",
-            payload: [
-                "message": .object([
-                    "content": .array([
-                        .object([
-                            "type": .string("thinking"),
-                            "thinking": .string(thinking),
-                        ]),
-                        .object([
-                            "type": .string("text"),
-                            "text": .string(text),
-                        ]),
-                    ]),
-                ]),
-            ]
-        )
+    ) -> [CodeStreamEvent] {
+        [
+            messageUpdateEvent(type: "thinking_start", contentIndex: 0),
+            messageUpdateEvent(
+                type: "thinking_delta", contentIndex: 0, delta: thinking
+            ),
+            messageUpdateEvent(
+                type: "thinking_end", contentIndex: 0, content: thinking
+            ),
+            messageUpdateEvent(type: "text_start", contentIndex: 1),
+            messageUpdateEvent(
+                type: "text_delta", contentIndex: 1, delta: text
+            ),
+            messageUpdateEvent(
+                type: "text_end", contentIndex: 1, content: text
+            ),
+        ]
     }
 
-    /// Builds a raw pi `message_update` frame whose `message.content`
-    /// snapshot includes a `toolCall` block alongside the text block.
-    func messageUpdateEventWithToolCall(text: String) -> CodeStreamEvent {
-        CodeStreamEvent(
-            sessionId: "s1",
-            name: "message_update",
-            payload: [
-                "message": .object([
-                    "content": .array([
-                        .object([
-                            "type": .string("text"),
-                            "text": .string(text),
-                        ]),
-                        .object([
-                            "type": .string("toolCall"),
-                            "toolCall": .string("tc1"),
-                            "name": .string("bash"),
-                            "arguments": .object([:]),
-                        ]),
-                    ]),
-                ]),
-            ]
-        )
+    /// Drains delta frames into the mock server stream in order.
+    func emit(_ events: [CodeStreamEvent]) {
+        for event in events {
+            mockClient.emit(.event(event))
+        }
     }
 }

@@ -45,6 +45,7 @@ import {
     type PushOutcome,
 } from './apns'
 import { pruneBufferForSnapshot, tailClassification } from './turnBuffer'
+import { capPreviewBytes, flattenToString, trimForwardedPayload } from './wirePayloads'
 import {
     mapHistoryEntry,
     textFromMessage,
@@ -1355,7 +1356,7 @@ function registerEventHandlers(pi: ExtensionAPI, state: RcSingleton): void {
         trackEvent(state, name, event)
         if (!state.server) return
         state.broadcast({
-            ...eventPayload(event),
+            ...trimForwardedPayload(name, eventPayload(event)),
             type: 'event',
             sessionId: sessionId(state),
             name,
@@ -1602,8 +1603,10 @@ function updateToolOutput(buffer: ContentBlock[], event: JsonObject): void {
             item => item.type === 'toolUse' && (!toolCallId || item.toolCallId === toolCallId)
         )
     if (!block || block.type !== 'toolUse') return
-    block.output =
-        stringFromDeep(event.partialResult) ?? stringFromDeep(event.result) ?? block.output
+    // D7: the buffer is what streaming_buffer snapshots replay on reconnect, so
+    // store only the preview-capped output, never the cumulative tool result.
+    const output = flattenToString(event.partialResult) ?? flattenToString(event.result)
+    if (output !== undefined) block.output = capPreviewBytes(output)
 }
 
 function eventPayload(event: unknown): JsonObject {
@@ -2394,18 +2397,6 @@ function errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error)
 }
 
-function stringFromDeep(value: unknown): string | undefined {
-    if (typeof value === 'string') return value
-    if (Array.isArray(value)) return value.map(item => stringFromDeep(item) ?? '').join('')
-    if (!isObject(value)) return undefined
-    return (
-        stringFrom(value.content) ??
-        stringFrom(value.text) ??
-        stringFrom(value.output) ??
-        JSON.stringify(value)
-    )
-}
-
 function safeArray(value: unknown): unknown[] {
     return Array.isArray(value) ? value : []
 }
@@ -2554,7 +2545,15 @@ function handleSubagentBusEvent(state: RcSingleton, busPayload: unknown): void {
     if (name === 'agent_start') broadcastSubagents(state)
     if (name === 'agent_settled') startSubagentSettlePoll(state, subagentId)
     if (!SUBAGENT_EVENT_WHITELIST.has(name)) return
-    const frame: JsonObject = { type: 'subagent_event', subagentId, name, ...payload }
+    // D8: the subagent bus path shares the main-event trimmer, so both send
+    // identical bodies. Envelope fields stay last so a payload key can never
+    // shadow them.
+    const frame: JsonObject = {
+        ...trimForwardedPayload(name, payload),
+        type: 'subagent_event',
+        subagentId,
+        name,
+    }
     for (const client of state.clients) {
         if (client.attachedSubagentId === subagentId) writeJson(client, frame)
     }

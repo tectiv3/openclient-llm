@@ -266,9 +266,7 @@ final class CodeViewModelTests: XCTestCase {
             sessionId: "s1", name: "agent_start", payload: [:]
         )))
         mockClient.emit(.event(messageStartEvent(role: "assistant")))
-        mockClient.emit(.event(messageUpdateEvent(
-            thinking: "", text: "generating"
-        )))
+        emit(messageDeltas(thinking: "", text: "generating"))
         try await waitUntil {
             guard let session = self.currentSession(),
                   case let .assistant(_, content, isStreaming)? = session.items.last

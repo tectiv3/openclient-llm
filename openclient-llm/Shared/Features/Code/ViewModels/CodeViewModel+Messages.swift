@@ -142,9 +142,7 @@ extension CodeViewModel {
             }
 
         case "message_update":
-            updateLastAssistantContent(
-                message: event.payload["message"], in: &session.items
-            )
+            applyStreamDelta(payload: event.payload, in: &session.items)
 
         case "tool_execution_start":
             appendToolStep(payload: event.payload, in: &session.items)
@@ -157,6 +155,11 @@ extension CodeViewModel {
 
         case "turn_end":
             // Ends the current LLM turn's bubble, not the whole agent run.
+            // The frame's message is the authoritative content, so it
+            // repairs any delta assembly drift before the bubble closes.
+            replaceLastAssistantContent(
+                fromTurnEnd: event.payload["message"], in: &session.items
+            )
             finalizeStreamingBubbles(in: &session.items)
 
         default:
@@ -424,35 +427,6 @@ extension CodeViewModel {
         }
     }
 
-    /// Item-array re-sign (m3): the main transcript passes
-    /// `&session.items`; the subagent-attach path passes its OWN item
-    /// array, so both share the exact same bubble-replacement semantics.
-    /// The raw pi `message_update` frame's `message.content` is a full
-    /// snapshot of the partial message, so replace (not diff) the streaming
-    /// bubble's content on every frame. Guard against an empty parse
-    /// (toolCall-only frames) so we don't wipe content an earlier frame
-    /// already populated on this bubble.
-    func updateLastAssistantContent(
-        message: AnyCodableValue?,
-        in items: inout [CodeTranscriptItem]
-    ) {
-        guard let lastIndex = items.lastIndex(where: {
-            if case .assistant = $0 {
-                return true
-            }
-            return false
-        }) else { return }
-
-        guard let content = messageContentBlocks(message),
-              !content.isEmpty else { return }
-
-        if case let .assistant(id, _, _) = items[lastIndex] {
-            items[lastIndex] = .assistant(
-                id: id, content: content, isStreaming: true
-            )
-        }
-    }
-
     /// Mirrors the server's textFromMessage for user-role frames (string
     /// shortcuts first, text parts joined with no separator) so the result
     /// equals what a later history sync would hold for the same message —
@@ -488,13 +462,12 @@ extension CodeViewModel {
         return result.isEmpty ? nil : result
     }
 
-    /// Parses the raw pi assistant `message.content` array carried by a
-    /// `message_update` frame. The wire shape differs from the normalized
-    /// history shape (thinking blocks use a `thinking` key, tool calls are
-    /// `{type: "toolCall", ...}`), so the strict `CodeContentBlock` decoder
-    /// cannot consume it directly. Only text and thinking blocks are
-    /// transcript-relevant here; tool steps are driven by
-    /// `tool_execution_*` events.
+    /// Parses the assistant `message` object carried by a `turn_end` frame
+    /// (and the raw pi `message_update` shape it replaced). The wire shape
+    /// differs from the normalized history shape: thinking blocks use a
+    /// `thinking` key in pi's raw form and a `text` key in the trimmed rc
+    /// form, so both are accepted. Only text and thinking blocks are
+    /// transcript-relevant; tool steps are driven by `tool_execution_*`.
     func messageContentBlocks(
         _ message: AnyCodableValue?
     ) -> [CodeContentBlock]? {
@@ -518,6 +491,8 @@ extension CodeViewModel {
                 }
             case "thinking":
                 if case let .string(thinking)? = part["thinking"] {
+                    blocks.append(.thinking(thinking))
+                } else if case let .string(thinking)? = part["text"] {
                     blocks.append(.thinking(thinking))
                 }
             default:

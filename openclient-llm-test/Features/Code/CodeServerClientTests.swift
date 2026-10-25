@@ -8,7 +8,12 @@
 @testable import openclient_llm
 import XCTest
 
+// Client framing, liveness, and transport-limit tests belong together;
+// splitting them would duplicate the setup for no benefit.
+// swiftlint:disable file_length
+
 @MainActor
+// swiftlint:disable:next type_body_length
 final class CodeServerClientTests: XCTestCase {
     // MARK: - Properties
 
@@ -574,6 +579,65 @@ final class CodeServerClientTests: XCTestCase {
         XCTAssertNil(hello["token"], "No token: the key must be omitted")
     }
 
+    // MARK: - Tests — Transport limits and liveness
+
+    /// URLSession's 1 MiB default receive cap kills the socket on a larger
+    /// frame (`NSPOSIXErrorDomain` 40); the wrapper must raise it when it
+    /// wraps the task. No network is involved.
+    func test_urlSessionCodeWebSocketTask_setsMaximumMessageSize() throws {
+        // Given — a real task, never resumed
+        let url = try XCTUnwrap(URL(string: "ws://127.0.0.1:47800"))
+        let raw = URLSession.shared.webSocketTask(with: url)
+        defer { raw.cancel(with: .goingAway, reason: nil) }
+
+        // When
+        let wrapped = URLSessionCodeWebSocketTask(task: raw)
+
+        // Then
+        XCTAssertEqual(
+            URLSessionCodeWebSocketTask.maximumMessageSize,
+            64 * 1024 * 1024
+        )
+        XCTAssertEqual(raw.maximumMessageSize, 64 * 1024 * 1024)
+        XCTAssertEqual(wrapped.task.maximumMessageSize, 64 * 1024 * 1024)
+    }
+
+    /// D10: any received frame refreshes the liveness clock, so a receive
+    /// stream that is busy (or backed up behind a slow consumer) cannot
+    /// false-trip the pong deadline while the peer is alive.
+    func test_pingLoop_nonPongFrames_refreshLivenessWithoutReconnect()
+        async throws
+    {
+        // Given — a peer that never answers pings but keeps sending
+        // ordinary frames faster than the pong deadline.
+        transport.autoPong = false
+        let stream = sut.connect(host: "h", port: 1, code: "c")
+        let collector = CodeLivenessCollector()
+        let consumer = Task {
+            for await event in stream {
+                await collector.record(event)
+            }
+        }
+        defer {
+            consumer.cancel()
+            _ = stream
+        }
+        let task = try XCTUnwrap(transport.lastTask)
+
+        // When — twelve non-pong frames over three pong deadlines
+        for _ in 0 ..< 12 {
+            task.enqueue(#"{"type":"mystery"}"#)
+            try await Task.sleep(for: .milliseconds(250))
+        }
+
+        // Then — frame activity kept the connection alive
+        let lostCount = await collector.lostCount()
+        XCTAssertEqual(lostCount, 0, "non-pong frames must refresh liveness")
+        XCTAssertEqual(transport.tasks.count, 1, "no reconnect expected")
+        XCTAssertEqual(task.cancelCount, 0, "socket must stay connected")
+        XCTAssertGreaterThanOrEqual(task.sentPingCount, 1)
+    }
+
     // MARK: - Helpers
 
     private static func helloFrame(in task: MockCodeWebSocketTask) -> [String: Any]? {
@@ -593,5 +657,24 @@ final class CodeServerClientTests: XCTestCase {
             with: Data(frame.utf8)
         )
         return object as? [String: Any] ?? [:]
+    }
+}
+
+// MARK: - Liveness Collector
+
+/// Counts `connectionLost` events off the client's stream from a background
+/// task; the count is read back on the MainActor after the observation
+/// window.
+private actor CodeLivenessCollector {
+    private var lost = 0
+
+    func record(_ event: CodeEvent) {
+        if case .connectionLost = event {
+            lost += 1
+        }
+    }
+
+    func lostCount() -> Int {
+        lost
     }
 }
