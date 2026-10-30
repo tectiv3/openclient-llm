@@ -70,7 +70,9 @@ function envValue(name: string): string | undefined {
     return value ? value : undefined
 }
 
-function readRawConfig(): JsonObject {
+// Exported so other rc modules can read the same file (statusMode.ts) without
+// duplicating the path/env-seam/parse logic. Returns {} on any failure.
+export function readRawConfig(): JsonObject {
     try {
         const parsed: unknown = JSON.parse(readFileSync(apnsConfigPath(), 'utf8'))
         if (typeof parsed !== 'object' || parsed === null) return {}

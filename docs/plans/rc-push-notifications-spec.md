@@ -260,6 +260,10 @@ machine (env vars remain supported — see config precedence below).
   token, written on registration (so a fresh pi session is push-ready
   before the phone reconnects) and deleted on exact-token 410 — both via
   the same atomic 0600 write, merge-preserving the other fields.
+
+  An optional `"status": "quiet"` field is also honored here (display-only,
+  not a credential): it collapses the rc footer to `🐙` (anchor) or `🐚`
+  (sibling). Merged like every other key, so `/rc push-setup` preserves it.
 - **Config precedence** (the APNs module resolves config on every use):
   env vars `PI_RC_APNS_TEAM_ID` / `PI_RC_APNS_KEY_ID` /
   `PI_RC_APNS_KEY_FILE` / `PI_RC_APNS_HOST` (when set) **override** the

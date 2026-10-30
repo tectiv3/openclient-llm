@@ -224,6 +224,10 @@ Location: `pi-extensions/rc/` in this repo; symlink `~/.pi/agent/extensions/rc` 
       - Generate fresh 6-digit decimal code (random, in-memory only — not persisted). Digits only so it is trivial to enter on a phone keypad.
       - Print in TUI: `ctx.ui.notify` + footer status
         (`rc: ws://mac.ts.net:47800 code A1B2C3`).
+      - Optional quiet footer: `"status": "quiet"` in `~/.pi/agent/rc-push.json`
+        (case/whitespace tolerant) replaces the whole status text with a single
+        emoji — `🐙` for the anchor, `🐚` for a loopback sibling. Read per status
+        refresh; affects the footer slot only, never `ctx.ui.notify`.
       - If port already in use (EADDRINUSE) → notify "port 47800 busy — another pi
         session is serving; toggle /rc there first".
     - If server is on → stop it:

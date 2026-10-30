@@ -32,6 +32,7 @@ import {
     type RcSessionEntry,
 } from './registry'
 import { runPushSetup } from './push-setup'
+import { readStatusMode, statusText } from './statusMode'
 import { finishedBody, questionBody } from './title'
 import {
     finishedCollapseId,
@@ -1762,10 +1763,17 @@ function refreshStatus(state: RcSingleton): void {
     const clients = connectedClientCount(state)
     const clientsText =
         clients === 0 ? 'no clients' : `${clients} client${clients === 1 ? '' : 's'}`
-    const lastPush = state.lastPush ? ` · ${state.lastPush}` : ''
     safeSetStatus(
         state.binding?.ctx,
-        `rc: ws://${state.host}:${state.port} code ${state.code} · ${clientsText} · ${pushStatusText()}${lastPush}`
+        statusText(readStatusMode(), {
+            isAnchor: state.isAnchor,
+            host: state.host,
+            port: state.port,
+            code: state.code,
+            clientsText,
+            pushText: pushStatusText(),
+            lastPush: state.lastPush,
+        })
     )
 }
 
